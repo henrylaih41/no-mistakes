@@ -98,7 +98,8 @@ func renderStatsDashboard(stats *db.Stats) string {
 
 func renderStatsBox(lines []string) string {
 	var b strings.Builder
-	b.WriteString("╭" + strings.Repeat("─", statsBoxWidth-2) + "╮\n")
+	eyebrow := " git push no-mistakes "
+	b.WriteString("╭─" + eyebrow + strings.Repeat("─", statsBoxWidth-3-lipgloss.Width(eyebrow)) + "╮\n")
 	for _, line := range lines {
 		b.WriteString(renderStatsBoxLine(line))
 		b.WriteByte('\n')

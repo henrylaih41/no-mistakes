@@ -50,7 +50,7 @@ func TestStatsCommandRendersAllRepoDashboard(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"╭────────────────",
+		"╭─ git push no-mistakes",
 		"_  _ ____    _  _ _ ____ ___ ____ _  _ ____ ____",
 		"Total changes",
 		"Rescued changes",
@@ -107,6 +107,14 @@ func TestStatsDashboardCapsTopReposAndUsesPipelineStepOrder(t *testing.T) {
 	}
 	if strings.Contains(out, "four") {
 		t.Fatalf("stats output should cap top repos at 3:\n%s", out)
+	}
+}
+
+func TestStatsDashboardTopBorderShowsGitPushNoMistakes(t *testing.T) {
+	out := renderStatsDashboard(&db.Stats{})
+	firstLine := strings.Split(out, "\n")[0]
+	if !strings.Contains(firstLine, "git push no-mistakes") {
+		t.Fatalf("top border should include eyebrow, got %q", firstLine)
 	}
 }
 
