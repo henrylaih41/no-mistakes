@@ -97,6 +97,76 @@ func TestGetStatsFallsBackToStepFindingsWhenRoundsAreMissing(t *testing.T) {
 	}
 }
 
+func TestFixedFindingsByStepCountsResolvedRoundFindings(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/repo/fixes", "git@example.com:fixes.git", "main")
+	run, _ := d.InsertRun(repo.ID, "fixes", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	initial := `{"findings":[{"id":"r1","severity":"warning","description":"one"},{"id":"r2","severity":"warning","description":"two"},{"id":"r3","severity":"warning","description":"three"}],"summary":"three"}`
+	final := `{"findings":[{"id":"r3","severity":"warning","description":"three"}],"summary":"one left"}`
+	if _, err := d.InsertStepRound(step.ID, 1, "initial", &initial, nil, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepRound(step.ID, 2, "auto_fix", &final, nil, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	fixed, err := d.FixedFindingsByStep(step)
+	if err != nil {
+		t.Fatalf("fixed findings by step: %v", err)
+	}
+	if fixed != 2 {
+		t.Fatalf("fixed = %d, want 2", fixed)
+	}
+}
+
+func TestStepFindingStatsDoesNotCountSelectedFindingsAsFixed(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/repo/fixing", "git@example.com:fixing.git", "main")
+	run, _ := d.InsertRun(repo.ID, "fixing", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	initial := `{"findings":[{"id":"r1","severity":"warning","description":"one"},{"id":"r2","severity":"warning","description":"two"},{"id":"r3","severity":"warning","description":"three"}],"summary":"three"}`
+	round, err := d.InsertStepRound(step.ID, 1, "initial", &initial, nil, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := `["r1","r2"]`
+	if err := d.SetStepRoundSelection(round.ID, &selected, RoundSelectionSourceUser); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := d.StepFindingStats(step)
+	if err != nil {
+		t.Fatalf("step finding stats: %v", err)
+	}
+	if stats.ReportedFindings != 3 || stats.FixedFindings != 0 {
+		t.Fatalf("stats = reported %d fixed %d, want reported 3 fixed 0", stats.ReportedFindings, stats.FixedFindings)
+	}
+}
+
+func TestStepFindingStatsAddsNewFindingsToTotal(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/repo/new-findings", "git@example.com:new.git", "main")
+	run, _ := d.InsertRun(repo.ID, "new", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	initial := `{"findings":[{"id":"r1","severity":"warning","description":"one"},{"id":"r2","severity":"warning","description":"two"},{"id":"r3","severity":"warning","description":"three"}],"summary":"three"}`
+	final := `{"findings":[{"id":"r3","severity":"warning","description":"three"},{"id":"r4","severity":"warning","description":"four"}],"summary":"two left"}`
+	if _, err := d.InsertStepRound(step.ID, 1, "initial", &initial, nil, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepRound(step.ID, 2, "auto_fix", &final, nil, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := d.StepFindingStats(step)
+	if err != nil {
+		t.Fatalf("step finding stats: %v", err)
+	}
+	if stats.ReportedFindings != 4 || stats.FixedFindings != 2 {
+		t.Fatalf("stats = reported %d fixed %d, want reported 4 fixed 2", stats.ReportedFindings, stats.FixedFindings)
+	}
+}
+
 func assertStepStat(t *testing.T, stats []StepStats, step types.StepName, reported int, fixes int) {
 	t.Helper()
 	for _, got := range stats {

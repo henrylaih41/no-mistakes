@@ -112,11 +112,8 @@ func (d *DB) aggregateRunStats(runID string, stepStats map[types.StepName]*StepS
 		if err != nil {
 			return 0, 0, err
 		}
-		reported, final := stepFindingCounts(step, rounds)
-		fixed := reported - final
-		if fixed < 0 {
-			fixed = 0
-		}
+		findingStats := stepFindingStats(step, rounds)
+		reported, fixed := findingStats.ReportedFindings, findingStats.FixedFindings
 
 		runReported += reported
 		runFixed += fixed
@@ -133,11 +130,56 @@ func (d *DB) aggregateRunStats(runID string, stepStats map[types.StepName]*StepS
 }
 
 func stepFindingCounts(step *StepResult, rounds []*StepRound) (reported int, final int) {
+	stats := stepFindingStats(step, rounds)
+	return stats.ReportedFindings, stats.ReportedFindings - stats.FixedFindings
+}
+
+func stepFindingStats(step *StepResult, rounds []*StepRound) StepStats {
+	stats := StepStats{StepName: step.StepName}
 	if len(rounds) == 0 {
 		count := findingsCount(step.FindingsJSON)
-		return count, count
+		stats.ReportedFindings = count
+		return stats
 	}
-	return findingsCount(rounds[0].FindingsJSON), findingsCount(rounds[len(rounds)-1].FindingsJSON)
+
+	reported := make(map[types.Finding]bool)
+	var current []types.Finding
+	for _, round := range rounds {
+		items := findingItems(round.FindingsJSON)
+		for _, item := range items {
+			reported[findingStatsKey(item)] = true
+		}
+		current = items
+	}
+
+	stats.ReportedFindings = len(reported)
+	currentCount := len(current)
+	stats.FixedFindings = stats.ReportedFindings - currentCount
+	if stats.FixedFindings < 0 {
+		stats.FixedFindings = 0
+	}
+	if stats.FixedFindings > stats.ReportedFindings {
+		stats.FixedFindings = stats.ReportedFindings
+	}
+	return stats
+}
+
+// FixedFindingsByStep returns how many findings were resolved for a single step.
+func (d *DB) FixedFindingsByStep(step *StepResult) (int, error) {
+	stats, err := d.StepFindingStats(step)
+	if err != nil {
+		return 0, err
+	}
+	return stats.FixedFindings, nil
+}
+
+// StepFindingStats returns reported and fixed finding counts for a single step.
+func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil {
+		return StepStats{}, err
+	}
+	return stepFindingStats(step, rounds), nil
 }
 
 func findingsCount(raw *string) int {
@@ -149,6 +191,25 @@ func findingsCount(raw *string) int {
 		return 0
 	}
 	return len(findings.Items)
+}
+
+func findingItems(raw *string) []types.Finding {
+	if raw == nil || *raw == "" {
+		return nil
+	}
+	findings, err := types.ParseFindingsJSON(*raw)
+	if err != nil {
+		return nil
+	}
+	return findings.Items
+}
+
+func findingStatsKey(item types.Finding) types.Finding {
+	item.ID = ""
+	item.Action = ""
+	item.Source = ""
+	item.UserInstructions = ""
+	return item
 }
 
 func sortStepStats(stats []StepStats) {
