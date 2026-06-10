@@ -4,7 +4,7 @@ Thanks for wanting to contribute. One rule up front:
 
 **All pull requests to this repository must be raised through `no-mistakes`.**
 
-This repo _is_ no-mistakes. Contributions should be done using the tool itself which helps reduce overhead in review.
+This repo _is_ no-mistakes. Contributions should be done using the tool itself, which reduces the maintainer's burden of reviewing and merging contributions.
 A GitHub Actions check (`Require no-mistakes`) runs on every PR and fails if the body is missing the deterministic signature that no-mistakes writes. PRs without it will not be reviewed or merged.
 
 ## Workflow
@@ -27,7 +27,6 @@ See the [quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick
 ## Repo conventions
 
 - Go 1.25+, standard toolchain. See `AGENTS.md` for agent instructions.
-- Use TDD for bug fixes and new features.
 - Run `make fmt`, `make lint`, and `make test` before pushing. Run `make e2e` too when you touch agent integrations, the e2e harness, or recorded fixtures. The pipeline will run them again, but a fast local pass saves rounds.
 - Run `make skill` when you change the canonical agent skill content under `internal/skill`; `make lint` fails if `skills/no-mistakes/SKILL.md` has drifted.
 - Use `make e2e-record` only when an upstream agent wire format changes or you are adding a new fixture flavor. It overwrites `internal/e2e/fixtures/`, spends real API quota, and the diff should be reviewed before committing.
