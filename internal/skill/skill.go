@@ -2,8 +2,9 @@
 //
 // It is the single source of truth for the skill's identity (name and
 // trigger description) and its SKILL.md body. The genskill tool renders
-// Markdown() to skills/no-mistakes/SKILL.md (verified fresh in CI), and the
-// init command embeds that generated file to install it into a user's repo.
+// Markdown() to the public skills/no-mistakes/SKILL.md and InstalledMarkdown()
+// to this repo's vendored .agents copy (verified fresh in CI). The init command
+// vendors InstalledMarkdown() into a user's repo.
 // The CLI's axi home view reuses Description so the two never drift.
 package skill
 
@@ -19,13 +20,30 @@ const Name = "no-mistakes"
 const Description = "Validate your code changes through the no-mistakes pipeline - automated code review, tests, lint, docs, push, PR, and CI - before they reach upstream. Use when the user asks to run no-mistakes, gate or ship or validate their changes, push safely, asks you to do a task and then validate it, or invokes /no-mistakes."
 
 // Markdown returns the complete SKILL.md document (YAML frontmatter plus body).
-// The output is deterministic so it can be regenerated and diff-checked.
+// The output is deterministic so it can be regenerated and diff-checked. This
+// is the canonical public rendering, surfaced by skill discovery tools (e.g.
+// `npx skills add kunchenguid/no-mistakes`).
 func Markdown() string {
+	return markdown(false)
+}
+
+// InstalledMarkdown returns the SKILL.md variant that init vendors into a
+// repo's agent skill directories. It is identical to Markdown() except the
+// frontmatter carries `metadata.internal: true`, so skill discovery tools skip
+// the vendored copy instead of surfacing it alongside the repo's own skills.
+func InstalledMarkdown() string {
+	return markdown(true)
+}
+
+func markdown(internal bool) string {
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.WriteString("name: " + Name + "\n")
 	b.WriteString("description: " + Description + "\n")
 	b.WriteString("user-invocable: true\n")
+	if internal {
+		b.WriteString("metadata:\n  internal: true\n")
+	}
 	b.WriteString("---\n")
 	b.WriteString(body)
 	return b.String()
