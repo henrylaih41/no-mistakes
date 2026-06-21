@@ -40,7 +40,8 @@ type Harness struct {
 	AgentLog    string // every fake-agent invocation appended here, one JSON per line
 	Scenario    string // optional path to a scenario yaml; empty = built-in default
 
-	agentName string // claude / codex / opencode
+	agentName         string // claude / codex / opencode
+	allowRepoCommands *bool  // mirrors SetupOpts.AllowRepoCommands
 }
 
 // SetupOpts controls per-test setup.
@@ -54,6 +55,16 @@ type SetupOpts struct {
 	// Scenario is an optional path to a YAML scenario file. If empty the
 	// fake agent uses its built-in clean-response default.
 	Scenario string
+
+	// AllowRepoCommands controls the per-repo allow_repo_commands opt-in
+	// committed to the trusted default-branch .no-mistakes.yaml (never the
+	// global config, and never the pushed branch). The harness models a
+	// trusted single-developer environment (the same user owns the working
+	// clone, gate, and daemon), so it defaults to true: feature-branch
+	// commands run as before. Tests that verify the supply-chain hardening
+	// (commands must come from the trusted default branch) pass a pointer
+	// to false to exercise the secure default.
+	AllowRepoCommands *bool
 }
 
 const e2eDaemonStartTimeout = "45s"
@@ -72,17 +83,18 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 
 	root := t.TempDir()
 	h := &Harness{
-		t:           t,
-		NMBin:       nmBin,
-		FakeAgent:   fakeBin,
-		BinDir:      filepath.Join(root, "bin"),
-		NMHome:      filepath.Join(root, "nmhome"),
-		HomeDir:     filepath.Join(root, "home"),
-		UpstreamDir: filepath.Join(root, "upstream.git"),
-		WorkDir:     filepath.Join(root, "work"),
-		AgentLog:    filepath.Join(root, "fakeagent.log"),
-		Scenario:    opts.Scenario,
-		agentName:   opts.Agent,
+		t:                 t,
+		NMBin:             nmBin,
+		FakeAgent:         fakeBin,
+		BinDir:            filepath.Join(root, "bin"),
+		NMHome:            filepath.Join(root, "nmhome"),
+		HomeDir:           filepath.Join(root, "home"),
+		UpstreamDir:       filepath.Join(root, "upstream.git"),
+		WorkDir:           filepath.Join(root, "work"),
+		AgentLog:          filepath.Join(root, "fakeagent.log"),
+		Scenario:          opts.Scenario,
+		agentName:         opts.Agent,
+		allowRepoCommands: opts.AllowRepoCommands,
 	}
 
 	for _, dir := range []string{h.BinDir, h.NMHome, h.HomeDir, h.WorkDir} {
@@ -204,8 +216,18 @@ func (h *Harness) initGitRepos() {
 	if err := os.WriteFile(readme, []byte("# e2e\n"), 0o644); err != nil {
 		h.t.Fatalf("write readme: %v", err)
 	}
+	// allow_repo_commands is committed to the trusted default-branch copy of
+	// .no-mistakes.yaml (never global, never the pushed branch). The harness
+	// models a trusted single-developer environment where the same user owns
+	// every branch, so it defaults to true: feature-branch commands run as
+	// before. Security tests override via SetupOpts.AllowRepoCommands = false.
+	allowRepoCommands := true
+	if h.allowRepoCommands != nil {
+		allowRepoCommands = *h.allowRepoCommands
+	}
 	repoConfig := filepath.Join(h.WorkDir, ".no-mistakes.yaml")
-	if err := os.WriteFile(repoConfig, []byte("ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\n"), 0o644); err != nil {
+	repoCfg := fmt.Sprintf("ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\nallow_repo_commands: %t\n", allowRepoCommands)
+	if err := os.WriteFile(repoConfig, []byte(repoCfg), 0o644); err != nil {
 		h.t.Fatalf("write repo config: %v", err)
 	}
 	mustGit(h.WorkDir, "add", "README.md", ".no-mistakes.yaml")

@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -352,4 +353,46 @@ func WorktreeAdd(ctx context.Context, repoDir, wtPath, sha string) error {
 func WorktreeRemove(ctx context.Context, repoDir, wtPath string) error {
 	_, err := Run(ctx, repoDir, "worktree", "remove", "--force", wtPath)
 	return err
+}
+
+// ResolveRef returns the commit SHA that ref resolves to via
+// `git rev-parse --verify <ref>^{commit}`. Use it to pin an exact commit
+// (e.g. the default-branch tip just fetched) before reading a file from it,
+// so a shared-ref worktree cannot serve a stale remote-tracking ref. Returns
+// an error if the ref does not resolve to a commit.
+func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
+	out, err := Run(ctx, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("resolve ref %s: %w", ref, err)
+	}
+	return out, nil
+}
+
+// RefExists reports whether the given ref resolves to a commit. It uses
+// `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
+// result rather than a loud error.
+func RefExists(ctx context.Context, dir, ref string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	cmd.Env = NonInteractiveEnv(dir)
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("git rev-parse %s: %w", ref, err)
+	}
+	return true, nil
+}
+
+// ShowFile returns the content of path as stored at the given ref (e.g.
+// "HEAD", "origin/main", or a SHA) via `git show <ref>:<path>`. A failure
+// (e.g. the path is absent at the ref) is returned as the underlying git
+// error from Run; callers that need to distinguish "absent" from a real
+// failure should check RefExists first or inspect the error text.
+func ShowFile(ctx context.Context, dir, ref, path string) (string, error) {
+	out, err := Run(ctx, dir, "show", fmt.Sprintf("%s:%s", ref, path))
+	if err != nil {
+		return "", err
+	}
+	return out, nil
 }
