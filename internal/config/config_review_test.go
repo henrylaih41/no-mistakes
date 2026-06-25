@@ -242,6 +242,43 @@ func TestEffectiveRepoConfig_OptInHonorsPushedReview(t *testing.T) {
 	}
 }
 
+func TestLoadRepo_ReviewValidatesReservedArgs(t *testing.T) {
+	dir := t.TempDir()
+	repoYAML := "review:\n  reviewers:\n    - agent: codex\n      args:\n        - --json\n"
+	if err := os.WriteFile(filepath.Join(dir, ".no-mistakes.yaml"), []byte(repoYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadRepo(dir)
+	if err == nil {
+		t.Fatal("expected error: repo-level reviewer with reserved arg --json must be rejected")
+	}
+	if !strings.Contains(err.Error(), "managed by no-mistakes") {
+		t.Errorf("expected 'managed by no-mistakes' in error, got: %v", err)
+	}
+}
+
+func TestLoadRepoFromBytes_ReviewValidatesUnknownFamily(t *testing.T) {
+	data := []byte("review:\n  reviewers:\n    - agent: gpt5\n")
+	_, err := LoadRepoFromBytes(data)
+	if err == nil {
+		t.Fatal("expected error: repo-level reviewer with unknown family must be rejected")
+	}
+	if !strings.Contains(err.Error(), "gpt5") {
+		t.Errorf("expected error to mention unknown family, got: %v", err)
+	}
+}
+
+func TestLoadRepoFromBytes_ReviewValidatesEmptyArg(t *testing.T) {
+	data := []byte("review:\n  reviewers:\n    - agent: codex\n      args:\n        - \" \"\n")
+	_, err := LoadRepoFromBytes(data)
+	if err == nil {
+		t.Fatal("expected error: repo-level reviewer with empty arg must be rejected")
+	}
+	if !strings.Contains(err.Error(), "empty arg") {
+		t.Errorf("expected 'empty arg' in error, got: %v", err)
+	}
+}
+
 func TestValidateReviewers_RejectsUnknownFamily(t *testing.T) {
 	err := validateReviewers([]ReviewerSpec{{Agent: "gpt5"}})
 	if err == nil {

@@ -755,6 +755,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if cfg.AutoFix.CI == nil {
 		cfg.AutoFix.CI = cfg.AutoFix.Babysit
 	}
+	if err := validateReviewers(cfg.Review.Reviewers); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
