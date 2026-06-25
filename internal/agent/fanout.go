@@ -38,11 +38,23 @@ func FanOut(ctx context.Context, agents []Agent, opts RunOpts, maxParallel int) 
 		wg.Add(1)
 		go func(i int, ag Agent) {
 			defer wg.Done()
-			if sem != nil {
-				sem <- struct{}{}
-				defer func() { <-sem }()
-			}
 			results[i].Agent = ag
+			// Honor cancellation while queued on the semaphore...
+			if sem != nil {
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+					results[i].Err = ctx.Err()
+					return
+				}
+			}
+			// ...and again before invoking Run, so an already-cancelled ctx
+			// short-circuits instead of spawning the agent.
+			if err := ctx.Err(); err != nil {
+				results[i].Err = err
+				return
+			}
 			res, err := ag.Run(ctx, opts)
 			results[i].Result = res
 			results[i].Err = err

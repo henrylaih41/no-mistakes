@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -99,6 +100,49 @@ func TestFanOut_OneAgentErrorIsolated(t *testing.T) {
 		}
 		if results[i].Result == nil {
 			t.Errorf("results[%d].Result = nil, want a result", i)
+		}
+	}
+}
+
+// countingAgent records how many times Run was invoked.
+type countingAgent struct {
+	name string
+	ran  *atomic.Int32
+}
+
+func (c *countingAgent) Name() string { return c.name }
+
+func (c *countingAgent) Run(_ context.Context, _ RunOpts) (*Result, error) {
+	c.ran.Add(1)
+	return &Result{Text: c.name}, nil
+}
+
+func (c *countingAgent) Close() error { return nil }
+
+func TestFanOut_CancelledContextSkipsRun(t *testing.T) {
+	var ran atomic.Int32
+	agents := []Agent{
+		&countingAgent{name: "codex", ran: &ran},
+		&countingAgent{name: "claude", ran: &ran},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before FanOut runs
+
+	results := FanOut(ctx, agents, RunOpts{}, 0)
+
+	if got := ran.Load(); got != 0 {
+		t.Errorf("Run invoked %d times, want 0 for a cancelled ctx", got)
+	}
+	for i := range results {
+		if !errors.Is(results[i].Err, context.Canceled) {
+			t.Errorf("results[%d].Err = %v, want context.Canceled", i, results[i].Err)
+		}
+		if results[i].Result != nil {
+			t.Errorf("results[%d].Result = %v, want nil", i, results[i].Result)
+		}
+		if results[i].Agent == nil {
+			t.Errorf("results[%d].Agent = nil, want the input agent attributed", i)
 		}
 	}
 }
