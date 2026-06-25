@@ -106,7 +106,7 @@ func repoOwner(slug string) string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitHub }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, Reviews: true}
 }
 
 func (h *Host) Available(ctx context.Context) error {
@@ -317,6 +317,243 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, _ *scm.PR, branch, head
 		}
 	}
 	return "", nil
+}
+
+// DefaultBotLogin is the GitHub account a reviewing bot posts under when the
+// caller does not override it. It mirrors the config default; the two layers are
+// independent (the github package does not import config), so the literal is
+// duplicated deliberately.
+const DefaultBotLogin = "devin-ai-integration[bot]"
+
+// apiArgs builds the args for `gh api repos/{owner}/{repo}/<suffix>`. The repo
+// slug is embedded in the path because `gh api` (unlike `gh pr`) does not accept
+// --repo; this is the gh-api equivalent of repoArgs(). When the slug is unknown
+// the {owner}/{repo} placeholder lets gh resolve the repo from its working dir.
+func (h *Host) apiArgs(suffix string) []string {
+	repo := h.repo
+	if repo == "" {
+		repo = "{owner}/{repo}"
+	}
+	return []string{"api", "repos/" + repo + "/" + suffix}
+}
+
+type ghUser struct {
+	Login string `json:"login"`
+}
+
+// ghReviewComment is a PR review (inline, file-scoped) comment from
+// `gh api repos/{owner}/{repo}/pulls/{n}/comments`.
+type ghReviewComment struct {
+	Path             string `json:"path"`
+	Line             int    `json:"line"`
+	OriginalLine     int    `json:"original_line"`
+	Body             string `json:"body"`
+	CommitID         string `json:"commit_id"`
+	OriginalCommitID string `json:"original_commit_id"`
+	HTMLURL          string `json:"html_url"`
+	User             ghUser `json:"user"`
+}
+
+// ghIssueComment is a top-level (non-file-scoped) PR comment from
+// `gh api repos/{owner}/{repo}/issues/{n}/comments`. These carry no commit SHA.
+type ghIssueComment struct {
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+	User    ghUser `json:"user"`
+}
+
+// ghReview is a PR review object from `gh api repos/{owner}/{repo}/pulls/{n}/reviews`.
+type ghReview struct {
+	State    string `json:"state"`
+	CommitID string `json:"commit_id"`
+	HTMLURL  string `json:"html_url"`
+	User     ghUser `json:"user"`
+}
+
+// GetBotFindings returns botLogin's findings on the PR scoped to headSHA. It
+// reads inline (file-scoped) review comments and keeps only those tied to
+// headSHA via original_commit_id or commit_id, plus the bot's top-level review
+// comments (which carry no SHA and so cannot be scoped — they are the most
+// recent review round's summary in practice). Severity is parsed from each body.
+func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLogin string) ([]scm.ReviewComment, error) {
+	botLogin = strings.TrimSpace(botLogin)
+	if botLogin == "" {
+		botLogin = DefaultBotLogin
+	}
+
+	inlineOut, err := h.cmd(ctx, "gh", h.apiArgs(fmt.Sprintf("pulls/%d/comments", prNumber))...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh api pulls comments: %w", err)
+	}
+	var inline []ghReviewComment
+	if err := json.Unmarshal(inlineOut, &inline); err != nil {
+		return nil, fmt.Errorf("parse PR review comments: %w", err)
+	}
+
+	findings := make([]scm.ReviewComment, 0, len(inline))
+	for _, c := range inline {
+		if !strings.EqualFold(strings.TrimSpace(c.User.Login), botLogin) {
+			continue
+		}
+		if !commentMatchesHead(c.CommitID, c.OriginalCommitID, headSHA) {
+			continue
+		}
+		findings = append(findings, scm.ReviewComment{
+			Path:     c.Path,
+			Line:     pickLine(c.Line, c.OriginalLine),
+			Body:     c.Body,
+			Severity: severityFromBody(c.Body),
+			CommitID: firstNonEmpty(c.OriginalCommitID, c.CommitID),
+			URL:      c.HTMLURL,
+		})
+	}
+
+	issueOut, err := h.cmd(ctx, "gh", h.apiArgs(fmt.Sprintf("issues/%d/comments", prNumber))...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh api issues comments: %w", err)
+	}
+	var issue []ghIssueComment
+	if err := json.Unmarshal(issueOut, &issue); err != nil {
+		return nil, fmt.Errorf("parse PR issue comments: %w", err)
+	}
+	for _, c := range issue {
+		if !strings.EqualFold(strings.TrimSpace(c.User.Login), botLogin) {
+			continue
+		}
+		// Top-level comments have no Path/Line/CommitID: they are not tied to a
+		// file or a SHA. They are included for completeness but do not drive the
+		// verdict (see GetReviewVerdict).
+		findings = append(findings, scm.ReviewComment{
+			Body:     c.Body,
+			Severity: severityFromBody(c.Body),
+			URL:      c.HTMLURL,
+		})
+	}
+	return findings, nil
+}
+
+// GetReviewVerdict derives botLogin's verdict for headSHA from the PR's review
+// objects + inline findings, never from a commit status check.
+//
+// Why derive: Devin posts PR reviews with state=COMMENTED (never
+// CHANGES_REQUESTED) and publishes no commit status check, so a status rollup is
+// empty even when it has flagged blocking issues. It also re-reviews per commit,
+// so there can be several review objects per head SHA.
+//
+// Derivation:
+//   - NONE: the bot has never reviewed the PR.
+//   - PENDING: the bot has reviewed before but not yet headSHA.
+//   - CHANGES_REQUESTED: the bot reviewed headSHA and left at least one severe
+//     (high/medium) file-scoped finding tied to headSHA.
+//   - APPROVED: the bot reviewed headSHA with no severe file-scoped findings.
+//
+// Only file-scoped (inline) findings drive CHANGES_REQUESTED; a top-level review
+// summary is informational. REST does not expose thread resolution, so every
+// returned finding is treated as unresolved.
+func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botLogin string) (scm.ReviewVerdict, error) {
+	botLogin = strings.TrimSpace(botLogin)
+	if botLogin == "" {
+		botLogin = DefaultBotLogin
+	}
+
+	reviewsOut, err := h.cmd(ctx, "gh", h.apiArgs(fmt.Sprintf("pulls/%d/reviews", prNumber))...).Output()
+	if err != nil {
+		return "", fmt.Errorf("gh api pulls reviews: %w", err)
+	}
+	var reviews []ghReview
+	if err := json.Unmarshal(reviewsOut, &reviews); err != nil {
+		return "", fmt.Errorf("parse PR reviews: %w", err)
+	}
+
+	head := strings.TrimSpace(headSHA)
+	reviewedAny, reviewedHead := false, false
+	for _, r := range reviews {
+		if !strings.EqualFold(strings.TrimSpace(r.User.Login), botLogin) {
+			continue
+		}
+		reviewedAny = true
+		if head == "" || strings.EqualFold(strings.TrimSpace(r.CommitID), head) {
+			reviewedHead = true
+		}
+	}
+	if !reviewedAny {
+		return scm.VerdictNone, nil
+	}
+	if !reviewedHead {
+		return scm.VerdictPending, nil
+	}
+
+	findings, err := h.GetBotFindings(ctx, prNumber, headSHA, botLogin)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range findings {
+		if f.Path == "" {
+			continue // top-level summary, not a file-scoped finding
+		}
+		if f.Severity == severityHigh || f.Severity == severityMedium {
+			return scm.VerdictChangesRequested, nil
+		}
+	}
+	return scm.VerdictApproved, nil
+}
+
+const (
+	severityHigh   = "high"
+	severityMedium = "medium"
+	severityLow    = "low"
+)
+
+// severityFromBody parses a coarse severity bucket from a bot finding body.
+// Emoji markers win (Devin uses 🔴 for bug/high and 🚩 for analysis/medium),
+// then keyword heuristics. An unrecognized body defaults to medium so an
+// unmarked inline finding is treated conservatively as severe.
+func severityFromBody(body string) string {
+	switch {
+	case strings.Contains(body, "🔴"):
+		return severityHigh
+	case strings.Contains(body, "🚩"):
+		return severityMedium
+	}
+	lower := strings.ToLower(body)
+	switch {
+	case strings.Contains(lower, "bug"), strings.Contains(lower, "high"), strings.Contains(lower, "critical"):
+		return severityHigh
+	case strings.Contains(lower, "medium"):
+		return severityMedium
+	case strings.Contains(lower, "low"), strings.Contains(lower, "nit"):
+		return severityLow
+	default:
+		return severityMedium
+	}
+}
+
+// commentMatchesHead reports whether an inline comment is tied to headSHA via
+// either original_commit_id (the commit it was first made against) or commit_id
+// (GitHub's running update). An empty headSHA cannot be scoped, so it matches.
+func commentMatchesHead(commitID, originalCommitID, headSHA string) bool {
+	head := strings.TrimSpace(headSHA)
+	if head == "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(originalCommitID), head) ||
+		strings.EqualFold(strings.TrimSpace(commitID), head)
+}
+
+func pickLine(line, originalLine int) int {
+	if line > 0 {
+		return line
+	}
+	return originalLine
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 type githubRun struct {

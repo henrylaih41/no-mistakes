@@ -50,6 +50,7 @@ type GlobalConfig struct {
 	Intent               IntentRaw
 	Test                 TestRaw
 	Review               ReviewRaw
+	ReviewLoop           ReviewLoopRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -66,6 +67,7 @@ type globalConfigRaw struct {
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
 	Review               ReviewRaw           `yaml:"review"`
+	ReviewLoop           ReviewLoopRaw       `yaml:"review_loop"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -79,17 +81,18 @@ type RepoConfig struct {
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
 	// the pushed branch controls nothing that executes.
-	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
-	AutoFix           AutoFixRaw `yaml:"auto_fix"`
-	Intent            IntentRaw  `yaml:"intent"`
-	Test              TestRaw    `yaml:"test"`
+	AllowRepoCommands bool          `yaml:"allow_repo_commands"`
+	AutoFix           AutoFixRaw    `yaml:"auto_fix"`
+	Intent            IntentRaw     `yaml:"intent"`
+	Test              TestRaw       `yaml:"test"`
 	// Review is a pointer so an absent review block (nil) is distinguishable
 	// from an explicit empty one (&ReviewRaw{}). An explicit repo-level
 	// review block - including review.reviewers: [] - overrides the inherited
 	// global panel; an empty reviewer list disables the panel and reverts to
 	// the single-agent default. When the key is absent the repo inherits the
 	// global review config (see Merge).
-	Review *ReviewRaw `yaml:"review"`
+	Review     *ReviewRaw    `yaml:"review"`
+	ReviewLoop ReviewLoopRaw `yaml:"review_loop"`
 }
 
 // Commands holds optional per-repo command overrides.
@@ -137,6 +140,7 @@ type Config struct {
 	Intent               Intent
 	Test                 Test
 	Review               Review
+	ReviewLoop           ReviewLoop
 }
 
 // ReviewerSpec identifies one reviewer in the cross-family review panel. Agent
@@ -169,6 +173,36 @@ type Review struct {
 	Reviewers   []ReviewerSpec
 	MaxParallel int
 	FailOpen    bool
+}
+
+// DefaultReviewLoopBotLogin is the GitHub account whose PR reviews the post-PR
+// review loop reads by default. The reviewer is an external bot (Devin); the
+// fixer that acts on its findings is always no-mistakes itself, so no fixer
+// agent is configured here.
+const DefaultReviewLoopBotLogin = "devin-ai-integration[bot]"
+
+// ReviewLoopRaw is the YAML representation of the post-PR review loop (read
+// layer). Pointer fields distinguish "not set" (nil) from explicit zero/false
+// values so global defaults survive a partially-specified repo block.
+type ReviewLoopRaw struct {
+	Enabled   *bool   `yaml:"enabled"`
+	BotLogin  *string `yaml:"bot_login"`
+	MaxRounds *int    `yaml:"max_rounds"`
+	FailOpen  *bool   `yaml:"fail_open"`
+}
+
+// ReviewLoop is the resolved post-PR review-loop config. When Enabled is false
+// (the default) the loop is inert and pipeline behavior is byte-identical.
+// BotLogin selects whose PR reviews are read (default DefaultReviewLoopBotLogin).
+// MaxRounds bounds how many review/fix rounds the loop will run. FailOpen
+// (default true) means a silent reviewer does not block: if the bot never posts
+// a verdict, the loop proceeds rather than holding the PR. The fixer is always
+// no-mistakes (the reviewing bot is review-only), so no fixer agent is config'd.
+type ReviewLoop struct {
+	Enabled   bool
+	BotLogin  string
+	MaxRounds int
+	FailOpen  bool
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -297,6 +331,16 @@ intent:
 #   evidence:
 #     store_in_repo: true
 #     dir: .no-mistakes/evidence
+
+# Post-PR review loop (read layer; off by default). When enabled, no-mistakes
+# reads an external review bot's PR verdict + findings and feeds them back to its
+# own fixer (the bot is review-only; no-mistakes is always the fixer). With the
+# default disabled state the pipeline behaves identically.
+# review_loop:
+#   enabled: false
+#   bot_login: "devin-ai-integration[bot]"
+#   max_rounds: 3
+#   fail_open: true   # a silent reviewer does not block the PR
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -763,6 +807,10 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		return nil, err
 	}
 	cfg.Review = raw.Review
+	if err := validateReviewLoop(raw.ReviewLoop); err != nil {
+		return nil, err
+	}
+	cfg.ReviewLoop = raw.ReviewLoop
 
 	return cfg, nil
 }
@@ -820,6 +868,9 @@ func LoadRepoFromBytes(data []byte) (*RepoConfig, error) {
 			return nil, err
 		}
 	}
+	if err := validateReviewLoop(cfg.ReviewLoop); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -857,9 +908,12 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // falling back to the pushed branch — this blocks the supply-chain vector for
 // repos that ship .no-mistakes.yaml only on feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, intent, test) are always
-// taken from the pushed copy, matching prior behavior, since they cannot
-// run arbitrary shell or select a process.
+// Non-executing fields (ignore patterns, auto-fix, intent, test, review_loop)
+// are always taken from the pushed copy, matching prior behavior, since they
+// cannot run arbitrary shell or select a process. review_loop only names a bot
+// login to READ reviews from plus a few booleans; the fixer that acts on those
+// findings is always no-mistakes itself, never a contributor-named binary, so
+// it carries no supply-chain risk and needs no trust gate.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -968,6 +1022,43 @@ func resolveReview(raw ReviewRaw) Review {
 	}
 }
 
+// reviewLoopDefaults returns the default post-PR review-loop settings. The loop
+// is off by default (Enabled false) so behavior is byte-identical until a user
+// opts in. FailOpen defaults true: a silent reviewer must not block the PR.
+func reviewLoopDefaults() ReviewLoop {
+	return ReviewLoop{
+		Enabled:   false,
+		BotLogin:  DefaultReviewLoopBotLogin,
+		MaxRounds: 3,
+		FailOpen:  true,
+	}
+}
+
+// applyReviewLoopOverrides applies non-nil raw values onto resolved defaults.
+func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.BotLogin != nil && strings.TrimSpace(*src.BotLogin) != "" {
+		dst.BotLogin = strings.TrimSpace(*src.BotLogin)
+	}
+	if src.MaxRounds != nil {
+		dst.MaxRounds = *src.MaxRounds
+	}
+	if src.FailOpen != nil {
+		dst.FailOpen = *src.FailOpen
+	}
+}
+
+// validateReviewLoop rejects a negative max_rounds; everything else is a
+// low-risk, non-executing setting (a bot login string and booleans).
+func validateReviewLoop(raw ReviewLoopRaw) error {
+	if raw.MaxRounds != nil && *raw.MaxRounds < 0 {
+		return fmt.Errorf("invalid review_loop.max_rounds: %d (must be >= 0)", *raw.MaxRounds)
+	}
+	return nil
+}
+
 // autoFixDefaults returns the default auto-fix configuration.
 func autoFixDefaults() AutoFix {
 	return AutoFix{
@@ -1049,6 +1140,10 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		review = resolveReview(*repo.Review)
 	}
 
+	reviewLoop := reviewLoopDefaults()
+	applyReviewLoopOverrides(&reviewLoop, &global.ReviewLoop)
+	applyReviewLoopOverrides(&reviewLoop, &repo.ReviewLoop)
+
 	cfg := &Config{
 		Agent:                global.Agent,
 		ACPXPath:             global.ACPXPath,
@@ -1063,6 +1158,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:               intent,
 		Test:                 test,
 		Review:               review,
+		ReviewLoop:           reviewLoop,
 	}
 
 	if repo.Agent != "" {
