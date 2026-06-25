@@ -30,7 +30,18 @@ func New(cmd CmdFactory, cliAvailable func() bool) *Host {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitLab }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, Reviews: false}
+}
+
+// GetReviewVerdict is unsupported on GitLab: the review read layer is GitHub-only
+// for now. Capabilities().Reviews is false, so callers should not invoke this.
+func (h *Host) GetReviewVerdict(_ context.Context, _ int, _, _ string) (scm.ReviewVerdict, error) {
+	return scm.VerdictNone, scm.ErrUnsupported
+}
+
+// GetBotFindings is unsupported on GitLab; see GetReviewVerdict.
+func (h *Host) GetBotFindings(_ context.Context, _ int, _, _ string) ([]scm.ReviewComment, error) {
+	return nil, scm.ErrUnsupported
 }
 
 func (h *Host) Available(ctx context.Context) error {

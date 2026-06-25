@@ -233,6 +233,185 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 	}
 }
 
+// Canned `gh api` JSON modeled on a real Devin PR: the bot posts a COMMENTED
+// review (never CHANGES_REQUESTED) with inline findings whose bodies carry the
+// 🔴 (bug/high) and 🚩 (analysis/medium) severity markers, plus a top-level
+// summary comment that carries no SHA.
+const (
+	headSHA = "abc123def"
+	oldSHA  = "0000oldsha"
+	botUser = "devin-ai-integration[bot]"
+)
+
+// inlineCommentsJSON has, in order: a 🔴 finding on headSHA, a 🚩 finding on
+// headSHA, a stale 🔴 finding on an OLD sha (must be scoped out), and a human's
+// inline comment on headSHA (must be filtered out by login).
+const inlineCommentsJSON = `[
+  {"path":"internal/batch/download.go","line":42,"original_line":40,"body":"🔴 **Batch download crashes on empty manifest**","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"https://github.com/test/repo/pull/7#discussion_r1","user":{"login":"devin-ai-integration[bot]"}},
+  {"path":"internal/batch/path.go","line":17,"original_line":17,"body":"🚩 **Batch path swallows the second error**","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"https://github.com/test/repo/pull/7#discussion_r2","user":{"login":"devin-ai-integration[bot]"}},
+  {"path":"internal/old/stale.go","line":3,"original_line":3,"body":"🔴 **Stale finding from a previous commit**","commit_id":"0000oldsha","original_commit_id":"0000oldsha","html_url":"https://github.com/test/repo/pull/7#discussion_r0","user":{"login":"devin-ai-integration[bot]"}},
+  {"path":"internal/human/note.go","line":9,"original_line":9,"body":"high severity concern from a human","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"https://github.com/test/repo/pull/7#discussion_rh","user":{"login":"some-human"}}
+]` + "\n"
+
+// issueCommentsJSON has a Devin top-level summary (kept, no SHA, no Path) and a
+// human's reply (filtered out).
+const issueCommentsJSON = `[
+  {"body":"Devin reviewed the latest changes; see inline comments.","html_url":"https://github.com/test/repo/pull/7#issuecomment-1","user":{"login":"devin-ai-integration[bot]"}},
+  {"body":"thanks!","html_url":"https://github.com/test/repo/pull/7#issuecomment-2","user":{"login":"some-human"}}
+]` + "\n"
+
+func TestGetBotFindingsFiltersBotParsesSeverityAndScopesToHead(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/comments":  {stdout: inlineCommentsJSON},
+		"gh api repos/test/repo/issues/7/comments": {stdout: issueCommentsJSON},
+	}), nil, "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetBotFindings() error = %v", err)
+	}
+	if len(findings) != 3 {
+		t.Fatalf("len(findings) = %d, want 3 (two head-scoped inline + one top-level; stale-sha and human dropped): %+v", len(findings), findings)
+	}
+
+	// findings[0]: 🔴 inline -> high, file-scoped to headSHA.
+	if findings[0].Severity != "high" {
+		t.Errorf("findings[0].Severity = %q, want high", findings[0].Severity)
+	}
+	if findings[0].Path != "internal/batch/download.go" {
+		t.Errorf("findings[0].Path = %q, want internal/batch/download.go", findings[0].Path)
+	}
+	if findings[0].Line != 42 {
+		t.Errorf("findings[0].Line = %d, want 42", findings[0].Line)
+	}
+	if findings[0].CommitID != headSHA {
+		t.Errorf("findings[0].CommitID = %q, want %q", findings[0].CommitID, headSHA)
+	}
+	if findings[0].URL == "" {
+		t.Errorf("findings[0].URL is empty, want the discussion URL")
+	}
+
+	// findings[1]: 🚩 inline -> medium.
+	if findings[1].Severity != "medium" {
+		t.Errorf("findings[1].Severity = %q, want medium", findings[1].Severity)
+	}
+
+	// findings[2]: top-level Devin summary -> no Path/Line/CommitID, default medium.
+	if findings[2].Path != "" || findings[2].Line != 0 || findings[2].CommitID != "" {
+		t.Errorf("findings[2] = %+v, want top-level (empty Path/Line/CommitID)", findings[2])
+	}
+	if findings[2].Severity != "medium" {
+		t.Errorf("findings[2].Severity = %q, want medium (default for unmarked body)", findings[2].Severity)
+	}
+}
+
+func TestGetReviewVerdictChangesRequested(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews": {
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		"gh api repos/test/repo/pulls/7/comments":  {stdout: inlineCommentsJSON},
+		"gh api repos/test/repo/issues/7/comments": {stdout: issueCommentsJSON},
+	}), nil, "test/repo")
+
+	verdict, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictChangesRequested {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (severe inline findings on headSHA)", verdict, scm.VerdictChangesRequested)
+	}
+}
+
+func TestGetReviewVerdictApproved(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews": {
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		// Bot reviewed headSHA but left only a top-level summary (no file-scoped
+		// findings), and a stale finding from a prior commit that scopes out.
+		"gh api repos/test/repo/pulls/7/comments": {
+			stdout: `[{"path":"internal/old/stale.go","line":3,"body":"🔴 **Stale finding from a previous commit**","commit_id":"0000oldsha","original_commit_id":"0000oldsha","html_url":"u","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		"gh api repos/test/repo/issues/7/comments": {stdout: issueCommentsJSON},
+	}), nil, "test/repo")
+
+	verdict, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictApproved {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (reviewed headSHA, no severe head-scoped findings)", verdict, scm.VerdictApproved)
+	}
+}
+
+func TestGetReviewVerdictPendingWhenHeadNotYetReviewed(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		// Bot has reviewed before, but only an older commit - not headSHA.
+		"gh api repos/test/repo/pulls/7/reviews": {
+			stdout: `[{"state":"COMMENTED","commit_id":"0000oldsha","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+	}), nil, "test/repo")
+
+	verdict, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictPending {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (bot reviewed an older sha, not headSHA)", verdict, scm.VerdictPending)
+	}
+}
+
+func TestGetReviewVerdictNoneWhenBotNeverReviewed(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		// Only a human review exists; the bot has never reviewed.
+		"gh api repos/test/repo/pulls/7/reviews": {
+			stdout: `[{"state":"APPROVED","commit_id":"abc123def","user":{"login":"some-human"}}]` + "\n",
+		},
+	}), nil, "test/repo")
+
+	verdict, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictNone {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (bot never reviewed)", verdict, scm.VerdictNone)
+	}
+}
+
+func TestSeverityFromBody(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		body string
+		want string
+	}{
+		{"🔴 **Batch download crashes**", "high"},
+		{"🚩 **Batch path swallows error**", "medium"},
+		{"This is a clear bug in the loop", "high"},
+		{"high severity issue", "high"},
+		{"medium severity issue", "medium"},
+		{"low severity issue", "low"},
+		{"nit: rename this", "low"},
+		{"some unmarked observation", "medium"},
+	}
+	for _, tc := range cases {
+		if got := severityFromBody(tc.body); got != tc.want {
+			t.Errorf("severityFromBody(%q) = %q, want %q", tc.body, got, tc.want)
+		}
+	}
+}
+
 type githubTestResponse struct {
 	stdout string
 	stderr string
