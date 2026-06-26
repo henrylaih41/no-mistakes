@@ -142,10 +142,18 @@ func TestDevinFindingFingerprints(t *testing.T) {
 	if got, want := devinFindingFingerprints(a), devinFindingFingerprints(reordered); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fingerprints not order/dedup stable: %v vs %v", got, want)
 	}
-	// A changed body produces a different fingerprint set.
-	changed := []scm.ReviewComment{{Path: "a.go", Line: 1, Severity: "high", Body: "x2"}, a[1]}
+	// Rewording a finding body must NOT change its fingerprint: the fingerprint
+	// keys on (Path, Line, Severity) only, so minor bot rewrites don't defeat
+	// anti-thrash.
+	reworded := []scm.ReviewComment{{Path: "a.go", Line: 1, Severity: "high", Body: "x2 reworded"}, a[1]}
+	if strings.Join(devinFindingFingerprints(a), ",") != strings.Join(devinFindingFingerprints(reworded), ",") {
+		t.Fatal("expected identical fingerprints when only the body changes")
+	}
+	// A changed severity (like a changed path or line) DOES produce a different
+	// fingerprint set, so a genuinely different finding re-triggers a fix.
+	changed := []scm.ReviewComment{{Path: "a.go", Line: 1, Severity: "medium", Body: "x"}, a[1]}
 	if strings.Join(devinFindingFingerprints(a), ",") == strings.Join(devinFindingFingerprints(changed), ",") {
-		t.Fatal("expected different fingerprints when a finding body changes")
+		t.Fatal("expected different fingerprints when a finding's severity changes")
 	}
 	if devinFindingFingerprints(nil) != nil {
 		t.Fatal("expected nil fingerprints for no findings")
@@ -206,6 +214,24 @@ func TestDevinFindingsPromptSection(t *testing.T) {
 	}
 	if strings.Count(got, "\n- ") != 2 {
 		t.Fatalf("expected 2 rendered findings (blank skipped), got: %q", got)
+	}
+	// Each finding body is fenced and labeled as untrusted data (prompt-injection
+	// hardening): a fence opener/closer per rendered finding plus the header note.
+	if !strings.Contains(got, "untrusted") {
+		t.Fatalf("expected the section to label finding text as untrusted, got: %q", got)
+	}
+	if strings.Count(got, "REVIEWER_TEXT") < 4 { // header note + (open+close) x2 findings
+		t.Fatalf("expected each finding body fenced in a REVIEWER_TEXT block, got: %q", got)
+	}
+
+	// An over-long (or hostile) body is truncated so it cannot flood the prompt.
+	long := strings.Repeat("A", devinFindingBodyMaxRunes+50)
+	truncated := devinFindingsPromptSection([]scm.ReviewComment{{Path: "z.go", Line: 1, Severity: "high", Body: long}})
+	if strings.Contains(truncated, long) {
+		t.Fatalf("expected the long body to be truncated, but it was interpolated verbatim")
+	}
+	if !strings.Contains(truncated, "truncated") {
+		t.Fatalf("expected a truncation marker, got: %q", truncated)
 	}
 }
 
@@ -338,7 +364,9 @@ func TestHandleDevinFixRound_WaitsWhenKeyAlreadyFixed(t *testing.T) {
 	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
 	var logs []string
 	sctx := newReviewTestContext(cfg, "head", func(s string) { logs = append(logs, s) })
-	step := &CIStep{lastFixedChecks: "samekey"}
+	// The Devin loop keys its already-fixed check on its own dedicated field, not
+	// the shared lastFixedChecks (which the CI-check fix path uses).
+	step := &CIStep{lastDevinFixKey: "samekey"}
 
 	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, nil, "samekey", nil)
 	if outcome != nil {

@@ -365,27 +365,24 @@ type ghReviewComment struct {
 	User             ghUser `json:"user"`
 }
 
-// ghIssueComment is a top-level (non-file-scoped) PR comment from
-// `gh api repos/{owner}/{repo}/issues/{n}/comments`. These carry no commit SHA.
-type ghIssueComment struct {
-	Body    string `json:"body"`
-	HTMLURL string `json:"html_url"`
-	User    ghUser `json:"user"`
-}
-
 // ghReview is a PR review object from `gh api repos/{owner}/{repo}/pulls/{n}/reviews`.
 type ghReview struct {
-	State    string `json:"state"`
-	CommitID string `json:"commit_id"`
-	HTMLURL  string `json:"html_url"`
-	User     ghUser `json:"user"`
+	State       string `json:"state"`
+	CommitID    string `json:"commit_id"`
+	SubmittedAt string `json:"submitted_at"`
+	HTMLURL     string `json:"html_url"`
+	User        ghUser `json:"user"`
 }
 
 // GetBotFindings returns botLogin's findings on the PR scoped to headSHA. It
 // reads inline (file-scoped) review comments and keeps only those tied to
-// headSHA via original_commit_id or commit_id, plus the bot's top-level review
-// comments (which carry no SHA and so cannot be scoped — they are the most
-// recent review round's summary in practice). Severity is parsed from each body.
+// headSHA via original_commit_id or commit_id. Severity is parsed from each body.
+//
+// Top-level (issue) comments are deliberately NOT returned: they carry no
+// commit SHA or path, so they cannot be scoped to a head and would persist
+// across rounds as stale/phantom findings (and destabilize the anti-thrash
+// fingerprints). They are review summaries, not actionable file-scoped findings,
+// and do not drive the verdict, so the loop ignores them entirely.
 func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLogin string) ([]scm.ReviewComment, error) {
 	botLogin = strings.TrimSpace(botLogin)
 	if botLogin == "" {
@@ -418,28 +415,6 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 			URL:      c.HTMLURL,
 		})
 	}
-
-	issueOut, err := h.cmd(ctx, "gh", h.paginatedAPIArgs(fmt.Sprintf("issues/%d/comments", prNumber))...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("gh api issues comments: %w", err)
-	}
-	var issue []ghIssueComment
-	if err := json.Unmarshal(issueOut, &issue); err != nil {
-		return nil, fmt.Errorf("parse PR issue comments: %w", err)
-	}
-	for _, c := range issue {
-		if !strings.EqualFold(strings.TrimSpace(c.User.Login), botLogin) {
-			continue
-		}
-		// Top-level comments have no Path/Line/CommitID: they are not tied to a
-		// file or a SHA. They are included for completeness but do not drive the
-		// verdict (see GetReviewVerdict).
-		findings = append(findings, scm.ReviewComment{
-			Body:     c.Body,
-			Severity: severityFromBody(c.Body),
-			URL:      c.HTMLURL,
-		})
-	}
 	return findings, nil
 }
 
@@ -456,17 +431,20 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 // Derivation:
 //   - NONE: the bot has never reviewed the PR.
 //   - PENDING: the bot has reviewed before but not yet headSHA.
-//   - CHANGES_REQUESTED: the bot reviewed headSHA and EITHER posted a native
-//     CHANGES_REQUESTED review state on the matching head, OR left at least one
-//     severe (high/medium) file-scoped finding tied to headSHA.
-//   - APPROVED: the bot reviewed headSHA with no CHANGES_REQUESTED state and no
-//     severe file-scoped findings.
+//   - CHANGES_REQUESTED: the bot reviewed headSHA and EITHER its MOST RECENT
+//     review on the matching head is a native CHANGES_REQUESTED state, OR it left
+//     at least one severe (high/medium) file-scoped finding tied to headSHA.
+//   - APPROVED: the bot reviewed headSHA, its most recent head review is not
+//     CHANGES_REQUESTED, and there are no severe file-scoped findings.
 //
-// A native CHANGES_REQUESTED state is honored directly: a reviewer that uses
-// GitHub's request-changes flow must not be treated as approved just because no
-// inline body parsed as severe. Only file-scoped (inline) findings otherwise
-// drive CHANGES_REQUESTED; a top-level review summary is informational. REST
-// does not expose thread resolution, so every returned finding is unresolved.
+// Only the MOST RECENT bot review targeting the head (by submitted_at) decides
+// the native state: a bot that requested changes and then re-reviewed the same
+// SHA as APPROVED must clear, so the states are not OR-ed across the head's
+// review history. A native CHANGES_REQUESTED state is honored directly: a
+// reviewer that uses GitHub's request-changes flow must not be treated as
+// approved just because no inline body parsed as severe. Only file-scoped
+// (inline) findings otherwise drive CHANGES_REQUESTED. REST does not expose
+// thread resolution, so every returned finding is unresolved.
 func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botLogin string) (scm.ReviewVerdict, []scm.ReviewComment, error) {
 	botLogin = strings.TrimSpace(botLogin)
 	if botLogin == "" {
@@ -494,17 +472,28 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 
 	head := strings.TrimSpace(headSHA)
 	reviewedAny, reviewedHead, headChangesRequested := false, false, false
+	// Track the most recent bot review targeting the head (by submitted_at) so its
+	// state — not the OR of every state in the head's history — decides the native
+	// verdict. Ties (or unparseable timestamps) fall back to API order, which is
+	// already chronological, so the last matching review wins.
+	var latestHeadAt time.Time
+	var haveLatestHead bool
 	for _, r := range reviews {
 		if !strings.EqualFold(strings.TrimSpace(r.User.Login), botLogin) {
 			continue
 		}
 		reviewedAny = true
-		if head == "" || strings.EqualFold(strings.TrimSpace(r.CommitID), head) {
-			reviewedHead = true
-			if strings.EqualFold(strings.TrimSpace(r.State), "CHANGES_REQUESTED") {
-				headChangesRequested = true
-			}
+		if !strings.EqualFold(strings.TrimSpace(r.CommitID), head) {
+			continue
 		}
+		reviewedHead = true
+		submittedAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(r.SubmittedAt))
+		if haveLatestHead && submittedAt.Before(latestHeadAt) {
+			continue
+		}
+		latestHeadAt = submittedAt
+		haveLatestHead = true
+		headChangesRequested = strings.EqualFold(strings.TrimSpace(r.State), "CHANGES_REQUESTED")
 	}
 	if !reviewedAny {
 		return scm.VerdictNone, nil, nil
@@ -543,13 +532,17 @@ const (
 )
 
 // severityFromBody parses a coarse severity bucket from a bot finding body.
-// Emoji markers win (Devin uses 🔴 for bug/high and 🚩 for analysis/medium),
-// then a whole-word keyword heuristic. Keyword matching is word-boundary based
-// rather than substring based: a plain strings.Contains for "low" also fires on
-// "allow", "follow", "below", "flow", and "slow", which would silently downgrade
-// a severe unmarked finding to low and drop it from the verdict. An unrecognized
-// body defaults to medium so an unmarked inline finding is treated
-// conservatively as severe.
+// "high" requires an EXPLICIT marker — only the 🔴 emoji (Devin uses it for
+// bug/high); 🚩 marks medium. The keyword fallback deliberately never escalates
+// to high: a bare-word heuristic false-positives on negated or contextual
+// mentions ("this is not a bug", "no critical issues" would otherwise both
+// register as high), so an unmarked body is treated conservatively as medium
+// (still severe enough to gate) unless it is explicitly low/nit.
+//
+// Keyword matching for low/nit is word-boundary based rather than substring
+// based: a plain strings.Contains for "low" also fires on "allow", "follow",
+// "below", "flow", and "slow", which would silently downgrade a severe unmarked
+// finding to low and drop it from the verdict.
 func severityFromBody(body string) string {
 	switch {
 	case strings.Contains(body, "🔴"):
@@ -559,10 +552,6 @@ func severityFromBody(body string) string {
 	}
 	words := bodyWordSet(strings.ToLower(body))
 	switch {
-	case words["bug"] || words["high"] || words["critical"]:
-		return severityHigh
-	case words["medium"]:
-		return severityMedium
 	case words["low"] || words["nit"]:
 		return severityLow
 	default:
