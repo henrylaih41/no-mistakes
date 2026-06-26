@@ -55,6 +55,16 @@ type CIStep struct {
 	// than reusing lastFixedChecks (the CI-check fix path's key) so the two paths
 	// cannot collide on each other's keys.
 	lastDevinFixKey string
+	// lastRetriggeredSHA is the head SHA for which we last (attempted to) explicitly
+	// trigger a Devin review via the API. Guarded by devinMu. It makes the trigger
+	// idempotent at most once per head SHA: COST-CRITICAL, since the CI loop polls
+	// every few seconds and each trigger creates a paid Devin session.
+	lastRetriggeredSHA string
+
+	// triggerReview, when nil, defaults to a real Devin API client. It is injected
+	// in tests so the loop never makes a real HTTP call. Its signature matches
+	// devin.Client.TriggerReview: (ctx, apiKey, prURL, headSHA) -> (sessionID, err).
+	triggerReview func(ctx context.Context, apiKey, prURL, headSHA string) (string, error)
 
 	checksGracePeriod    time.Duration // minimum wait before trusting empty CI checks (0 = default 60s)
 	pollIntervalOverride time.Duration // if set, overrides computed poll interval (for testing)
@@ -123,6 +133,29 @@ func (s *CIStep) recordDevinFixKey(key string) {
 	s.devinMu.Lock()
 	defer s.devinMu.Unlock()
 	s.lastDevinFixKey = key
+}
+
+// retriggeredSHA returns the head SHA the last explicit Devin re-trigger was made
+// for, read under devinMu.
+func (s *CIStep) retriggeredSHA() string {
+	s.devinMu.Lock()
+	defer s.devinMu.Unlock()
+	return s.lastRetriggeredSHA
+}
+
+// claimRetrigger records headSHA as the head we are (about to) trigger a Devin
+// review for, returning true only if it was not already the recorded head. The
+// compare-and-set runs under devinMu so concurrent callers (and the once-per-head
+// cost guard) cannot both claim the same head. It is set BEFORE the network call
+// so a failed/rate-limited trigger is not retried every poll.
+func (s *CIStep) claimRetrigger(headSHA string) bool {
+	s.devinMu.Lock()
+	defer s.devinMu.Unlock()
+	if s.lastRetriggeredSHA == headSHA {
+		return false
+	}
+	s.lastRetriggeredSHA = headSHA
+	return true
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
@@ -313,6 +346,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if loopActive {
 				devinDecision, devinFindings = s.evalDevinReview(sctx, host, pr)
 				devinPrints = devinFindingFingerprints(devinFindings)
+				// When Devin has not posted a verdict for the current head yet
+				// (NONE/PENDING), explicitly (re-)trigger a review via the Devin API:
+				// its auto-review is rate-limited / pausable, so this kicks a paused
+				// initial review. Once-per-head guarded + best-effort (never alters
+				// control flow); inert unless cfg.Retrigger and a key resolves.
+				if devinDecision == devinDecisionPending {
+					s.maybeRetriggerDevin(sctx, pr, sctx.Run.HeadSHA)
+				}
 			}
 			devinNotGreen := devinDecision == devinDecisionNotGreen
 

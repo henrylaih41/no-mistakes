@@ -628,10 +628,260 @@ func TestCIStepDevinFieldsRaceSafe(t *testing.T) {
 			step.devinAnchorReset("head", now)
 			step.recordDevinRound()
 			_ = step.devinRounds()
+			step.claimRetrigger("head")
+			_ = step.retriggeredSHA()
 		}(i)
 	}
 	wg.Wait()
 	if got := step.devinRounds(); got != 8 {
 		t.Fatalf("recordDevinRound under contention = %d, want 8", got)
+	}
+	if got := step.retriggeredSHA(); got != "head" {
+		t.Fatalf("retriggeredSHA under contention = %q, want head", got)
+	}
+}
+
+// fakeLoopAPIKey is a fake, non-secret value used to exercise the re-trigger
+// wiring. A real Devin API key must never appear in a test file.
+const fakeLoopAPIKey = "loop-fake-key-NOT-REAL"
+
+// recordingTrigger is an injected stand-in for devin.Client.TriggerReview so the
+// loop tests never make a real HTTP call. It records each call's args and can be
+// made to fail.
+type recordingTrigger struct {
+	mu    sync.Mutex
+	calls []triggerCall
+	err   error // when set, every call returns this error
+}
+
+type triggerCall struct {
+	apiKey  string
+	prURL   string
+	headSHA string
+}
+
+func (r *recordingTrigger) fn(_ context.Context, apiKey, prURL, headSHA string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, triggerCall{apiKey: apiKey, prURL: prURL, headSHA: headSHA})
+	if r.err != nil {
+		return "", r.err
+	}
+	return "sess-" + headSHA, nil
+}
+
+func (r *recordingTrigger) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
+
+func (r *recordingTrigger) last() triggerCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls[len(r.calls)-1]
+}
+
+// TestMaybeRetriggerDevin_OncePerHeadAcrossPolls asserts the cost-critical guard:
+// across many polls of the same head, the loop triggers Devin exactly once and
+// passes the resolved key + PR URL + head SHA.
+func TestMaybeRetriggerDevin_OncePerHeadAcrossPolls(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey) // env precedence -> no file/network
+	cfg := config.ReviewLoop{Enabled: true, Retrigger: true}
+	rt := &recordingTrigger{}
+	step := &CIStep{triggerReview: rt.fn}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+	pr := &scm.PR{Number: "1", URL: "https://github.com/o/r/pull/1"}
+
+	for i := 0; i < 5; i++ {
+		step.maybeRetriggerDevin(sctx, pr, "headA")
+	}
+
+	if rt.count() != 1 {
+		t.Fatalf("trigger count = %d, want 1 (once per head across polls)", rt.count())
+	}
+	got := rt.last()
+	if got.headSHA != "headA" || got.prURL != pr.URL || got.apiKey != fakeLoopAPIKey {
+		t.Fatalf("trigger args = %+v, want headA + pr url + resolved key", got)
+	}
+	if step.retriggeredSHA() != "headA" {
+		t.Fatalf("lastRetriggeredSHA = %q, want headA", step.retriggeredSHA())
+	}
+}
+
+// TestMaybeRetriggerDevin_TriggersAgainOnNewHead asserts a new head SHA (e.g.
+// after a fix push) triggers a fresh review while a repeat of the same head does
+// not.
+func TestMaybeRetriggerDevin_TriggersAgainOnNewHead(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)
+	cfg := config.ReviewLoop{Enabled: true, Retrigger: true}
+	rt := &recordingTrigger{}
+	step := &CIStep{triggerReview: rt.fn}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+	pr := &scm.PR{Number: "1", URL: "https://github.com/o/r/pull/1"}
+
+	step.maybeRetriggerDevin(sctx, pr, "headA")
+	step.maybeRetriggerDevin(sctx, pr, "headA") // duplicate -> no-op
+	step.maybeRetriggerDevin(sctx, pr, "headB") // new head -> triggers again
+
+	if rt.count() != 2 {
+		t.Fatalf("trigger count = %d, want 2 (headA + headB, dup suppressed)", rt.count())
+	}
+	if got := rt.last(); got.headSHA != "headB" {
+		t.Fatalf("second trigger head = %q, want headB", got.headSHA)
+	}
+}
+
+func TestMaybeRetriggerDevin_NoopWhenLoopDisabled(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)
+	cfg := config.ReviewLoop{Enabled: false, Retrigger: true}
+	rt := &recordingTrigger{}
+	step := &CIStep{triggerReview: rt.fn}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+
+	step.maybeRetriggerDevin(sctx, &scm.PR{Number: "1", URL: "u"}, "headA")
+
+	if rt.count() != 0 {
+		t.Fatalf("trigger count = %d, want 0 when the loop is disabled", rt.count())
+	}
+	if step.retriggeredSHA() != "" {
+		t.Fatalf("guard consumed when the loop is disabled: %q", step.retriggeredSHA())
+	}
+}
+
+func TestMaybeRetriggerDevin_NoopWhenRetriggerFalse(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)
+	cfg := config.ReviewLoop{Enabled: true, Retrigger: false}
+	rt := &recordingTrigger{}
+	step := &CIStep{triggerReview: rt.fn}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+
+	step.maybeRetriggerDevin(sctx, &scm.PR{Number: "1", URL: "u"}, "headA")
+
+	if rt.count() != 0 {
+		t.Fatalf("trigger count = %d, want 0 when Retrigger=false", rt.count())
+	}
+	if step.retriggeredSHA() != "" {
+		t.Fatalf("guard consumed when Retrigger=false: %q", step.retriggeredSHA())
+	}
+}
+
+// TestMaybeRetriggerDevin_NoopWhenNoKey asserts a missing key skips the trigger
+// WITHOUT consuming the once-per-head guard, so a key that appears later can still
+// trigger the same head.
+func TestMaybeRetriggerDevin_NoopWhenNoKey(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", "") // env empty
+	dir := t.TempDir()
+	cfg := config.ReviewLoop{
+		Enabled:         true,
+		Retrigger:       true,
+		DevinAPIKeyFile: filepath.Join(dir, "absent"), // no such file -> no key
+	}
+	rt := &recordingTrigger{}
+	step := &CIStep{triggerReview: rt.fn}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+
+	step.maybeRetriggerDevin(sctx, &scm.PR{Number: "1", URL: "u"}, "headA")
+
+	if rt.count() != 0 {
+		t.Fatalf("trigger count = %d, want 0 when no key resolves", rt.count())
+	}
+	if step.retriggeredSHA() != "" {
+		t.Fatalf("guard consumed when no key resolved: %q (a later key must still trigger)", step.retriggeredSHA())
+	}
+}
+
+// TestMaybeRetriggerDevin_ErrorIsSwallowedAndNotRetried asserts a trigger error
+// (e.g. rate-limited) is best-effort: it is attempted at most once per head (the
+// head is claimed BEFORE the call) and never panics or changes control flow.
+func TestMaybeRetriggerDevin_ErrorIsSwallowedAndNotRetried(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)
+	cfg := config.ReviewLoop{Enabled: true, Retrigger: true}
+	rt := &recordingTrigger{err: errors.New("rate limited")}
+	step := &CIStep{triggerReview: rt.fn}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+	pr := &scm.PR{Number: "1", URL: "u"}
+
+	for i := 0; i < 3; i++ {
+		step.maybeRetriggerDevin(sctx, pr, "headA")
+	}
+
+	if rt.count() != 1 {
+		t.Fatalf("trigger count = %d, want 1 (error path claims the head; no per-poll retry)", rt.count())
+	}
+	if step.retriggeredSHA() != "headA" {
+		t.Fatalf("guard not set after an attempted (failed) trigger: %q", step.retriggeredSHA())
+	}
+}
+
+// runRetriggerFixRound drives a real handleDevinFixRound (with a fix that pushes a
+// new commit) with retrigger enabled and an injected trigger, returning the
+// observable state plus the pre-fix head SHA.
+func runRetriggerFixRound(t *testing.T, triggerErr error) (*CIStep, *pipeline.StepContext, *recordingTrigger, *pipeline.StepOutcome, string) {
+	t.Helper()
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true, ReplyOnFix: false, Retrigger: true}
+	dir, baseSHA, headSHA, upstream := setupDevinFixRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(filepath.Join(opts.CWD, "devin-fix.txt"), []byte("fixed"), 0o644); err != nil {
+			return nil, err
+		}
+		return &agent.Result{}, nil
+	}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.ReviewLoop = cfg
+	sctx.Log = func(string) {}
+	sctx.LogChunk = func(string) {}
+
+	rt := &recordingTrigger{err: triggerErr}
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
+	step := &CIStep{triggerReview: rt.fn}
+	pr := &scm.PR{Number: "42", URL: "https://github.com/o/r/pull/42"}
+	outcome := step.handleDevinFixRound(sctx, host, pr, []scm.ReviewComment{severeFinding()}, "freshkey", nil)
+	return step, sctx, rt, outcome, headSHA
+}
+
+// TestHandleDevinFixRound_RetriggersDevinOnNewHeadAfterPush asserts that after a
+// successful fix push the loop re-triggers Devin on the NEW head SHA.
+func TestHandleDevinFixRound_RetriggersDevinOnNewHeadAfterPush(t *testing.T) {
+	step, sctx, rt, outcome, oldHead := runRetriggerFixRound(t, nil)
+
+	if outcome != nil {
+		t.Fatalf("expected nil outcome (keep polling), got %+v", outcome)
+	}
+	if step.devinFixRounds != 1 {
+		t.Fatalf("devinFixRounds = %d, want 1", step.devinFixRounds)
+	}
+	if rt.count() != 1 {
+		t.Fatalf("trigger count = %d, want 1 after a fix push", rt.count())
+	}
+	got := rt.last()
+	if got.headSHA != sctx.Run.HeadSHA {
+		t.Fatalf("retrigger head = %q, want the new pushed head %q", got.headSHA, sctx.Run.HeadSHA)
+	}
+	if got.headSHA == oldHead {
+		t.Fatal("retrigger used the OLD head; expected the new pushed head")
+	}
+}
+
+// TestHandleDevinFixRound_RetriggerErrorDoesNotFailRound asserts a re-trigger
+// error after a fix push is best-effort: the round still completes (nil outcome,
+// round counted, fix key recorded).
+func TestHandleDevinFixRound_RetriggerErrorDoesNotFailRound(t *testing.T) {
+	step, _, rt, outcome, _ := runRetriggerFixRound(t, errors.New("trigger boom"))
+
+	if outcome != nil {
+		t.Fatalf("a re-trigger error must not escalate the round, got %+v", outcome)
+	}
+	if step.devinFixRounds != 1 {
+		t.Fatalf("devinFixRounds = %d, want 1 (round completes despite the trigger error)", step.devinFixRounds)
+	}
+	if step.devinFixKey() != "freshkey" {
+		t.Fatalf("fix key not recorded after a successful push: %q", step.devinFixKey())
+	}
+	if rt.count() != 1 {
+		t.Fatalf("trigger count = %d, want 1 attempt even though it errored", rt.count())
 	}
 }

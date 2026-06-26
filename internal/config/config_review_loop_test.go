@@ -25,6 +25,42 @@ func TestMerge_ReviewLoopDefaults(t *testing.T) {
 	if !cfg.ReviewLoop.ReplyOnFix {
 		t.Errorf("ReviewLoop.ReplyOnFix = false, want true (acknowledge addressed findings by default)")
 	}
+	if !cfg.ReviewLoop.Retrigger {
+		t.Errorf("ReviewLoop.Retrigger = false, want true (explicit Devin re-trigger on by default)")
+	}
+	if cfg.ReviewLoop.DevinAPIKeyFile != DefaultDevinAPIKeyFile {
+		t.Errorf("ReviewLoop.DevinAPIKeyFile = %q, want %q", cfg.ReviewLoop.DevinAPIKeyFile, DefaultDevinAPIKeyFile)
+	}
+}
+
+func TestMerge_ReviewLoopRetriggerAndKeyFileOverrides(t *testing.T) {
+	retriggerOff := false
+	keyFile := "/etc/secrets/devin_key"
+	global := &GlobalConfig{
+		ReviewLoop: ReviewLoopRaw{Retrigger: &retriggerOff, DevinAPIKeyFile: &keyFile},
+	}
+
+	cfg := Merge(global, &RepoConfig{})
+
+	if cfg.ReviewLoop.Retrigger {
+		t.Errorf("ReviewLoop.Retrigger = true, want false from global override")
+	}
+	if cfg.ReviewLoop.DevinAPIKeyFile != keyFile {
+		t.Errorf("ReviewLoop.DevinAPIKeyFile = %q, want %q from global override", cfg.ReviewLoop.DevinAPIKeyFile, keyFile)
+	}
+}
+
+// TestMerge_ReviewLoopBlankKeyFileKeepsDefault asserts a whitespace-only
+// devin_api_key_file override is ignored so the default path survives.
+func TestMerge_ReviewLoopBlankKeyFileKeepsDefault(t *testing.T) {
+	blank := "   "
+	global := &GlobalConfig{ReviewLoop: ReviewLoopRaw{DevinAPIKeyFile: &blank}}
+
+	cfg := Merge(global, &RepoConfig{})
+
+	if cfg.ReviewLoop.DevinAPIKeyFile != DefaultDevinAPIKeyFile {
+		t.Errorf("ReviewLoop.DevinAPIKeyFile = %q, want default %q (blank override ignored)", cfg.ReviewLoop.DevinAPIKeyFile, DefaultDevinAPIKeyFile)
+	}
 }
 
 func TestMerge_ReviewLoopReplyOnFixOverride(t *testing.T) {
@@ -227,6 +263,49 @@ func TestEffectiveRepoConfig_StripsPushedReviewLoop(t *testing.T) {
 	// The pushed config must not be mutated.
 	if pushed.ReviewLoop.BotLogin == nil || *pushed.ReviewLoop.BotLogin != "attacker-bot[bot]" {
 		t.Errorf("pushed config was mutated: bot_login = %v", pushed.ReviewLoop.BotLogin)
+	}
+}
+
+// TestEffectiveRepoConfig_StripsPushedDevinKeyFile proves the security
+// requirement that a pushed branch cannot redirect devin_api_key_file to read an
+// arbitrary file: the effective key-file path comes from the trusted copy.
+func TestEffectiveRepoConfig_StripsPushedDevinKeyFile(t *testing.T) {
+	pushedKeyFile := "/etc/passwd"
+	pushed := &RepoConfig{
+		ReviewLoop: ReviewLoopRaw{DevinAPIKeyFile: &pushedKeyFile},
+	}
+	trustedKeyFile := "~/.config/devin/api_key"
+	trusted := &RepoConfig{
+		ReviewLoop: ReviewLoopRaw{DevinAPIKeyFile: &trustedKeyFile},
+	}
+
+	got := EffectiveRepoConfig(pushed, trusted, false)
+
+	if got.ReviewLoop.DevinAPIKeyFile == nil || *got.ReviewLoop.DevinAPIKeyFile != trustedKeyFile {
+		t.Errorf("DevinAPIKeyFile = %v, want trusted %q, not pushed /etc/passwd", got.ReviewLoop.DevinAPIKeyFile, trustedKeyFile)
+	}
+}
+
+func TestLoadGlobal_ReviewLoopRetriggerAndKeyFileParse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `review_loop:
+  enabled: true
+  retrigger: false
+  devin_api_key_file: "/secrets/devin"
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal() error = %v", err)
+	}
+	if cfg.ReviewLoop.Retrigger == nil || *cfg.ReviewLoop.Retrigger {
+		t.Errorf("ReviewLoop.Retrigger = %v, want false", cfg.ReviewLoop.Retrigger)
+	}
+	if cfg.ReviewLoop.DevinAPIKeyFile == nil || *cfg.ReviewLoop.DevinAPIKeyFile != "/secrets/devin" {
+		t.Errorf("ReviewLoop.DevinAPIKeyFile = %v, want /secrets/devin", cfg.ReviewLoop.DevinAPIKeyFile)
 	}
 }
 

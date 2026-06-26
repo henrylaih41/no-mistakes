@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/devin"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -285,6 +287,10 @@ func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, 
 		if pushed {
 			s.replyOnFix(sctx, host, pr, findings)
 		}
+		// Explicitly (re-)trigger a Devin review of the NEW head so a paused/
+		// rate-limited auto-review does not stall the loop. Once-per-head guarded +
+		// best-effort; the next poll's pending path is the backstop.
+		s.maybeRetriggerDevin(sctx, pr, sctx.Run.HeadSHA)
 		sctx.Log(cimonitor.ReReviewingMsg)
 	} else {
 		// No changes produced: don't record the key so a later round can retry
@@ -321,4 +327,65 @@ func (s *CIStep) replyOnFix(sctx *pipeline.StepContext, host scm.Host, pr *scm.P
 			slog.Warn("review loop: failed to reply to addressed finding", "pr", prNum, "comment_id", f.ID, "err", err)
 		}
 	}
+}
+
+// devinRetriggerTimeout bounds an explicit Devin re-trigger so a hung POST cannot
+// stall the CI poll loop. The trigger is best-effort, so on timeout we just warn.
+const devinRetriggerTimeout = 30 * time.Second
+
+// maybeRetriggerDevin EXPLICITLY (re-)triggers a Devin review of headSHA via the
+// Devin HTTP API, a backstop for Devin's auto-review (which is rate-limited /
+// pausable — empirically it has failed to auto-review a PR mid-loop). It fires
+// IFF retrigger is enabled, a Devin API key resolves, headSHA is known, and we
+// have not already triggered for this head.
+//
+// The once-per-head guard is COST-CRITICAL: the CI loop polls every few seconds
+// and each trigger creates a paid Devin session, so we must POST at most once per
+// head SHA. The head is claimed BEFORE the network call so a failed/rate-limited
+// trigger is not retried every poll.
+//
+// It is BEST-EFFORT: any error (no key, network, non-2xx/rate-limited) is logged
+// at warn (NEVER with the key) and the loop continues its existing
+// wait-for-auto-review behavior. It NEVER fails the round or changes control
+// flow. Callers gate it on reviewLoopActive; it additionally honors cfg.Retrigger
+// so a Retrigger=false config keeps the path inert (byte-identical).
+func (s *CIStep) maybeRetriggerDevin(sctx *pipeline.StepContext, pr *scm.PR, headSHA string) {
+	cfg := sctx.Config.ReviewLoop
+	// Inert unless the loop is enabled AND retrigger is on. The call sites already
+	// gate on reviewLoopActive (which also requires the host's review capability);
+	// re-checking Enabled here is defense-in-depth so a disabled loop is a no-op
+	// even if a future caller forgets the gate.
+	if !cfg.Enabled || !cfg.Retrigger || headSHA == "" {
+		return
+	}
+	// Cheap guard read first: skip resolving the key / hitting the network once we
+	// have already triggered for this head.
+	if headSHA == s.retriggeredSHA() {
+		return
+	}
+	apiKey := devin.ResolveAPIKey(cfg.DevinAPIKeyFile)
+	if apiKey == "" {
+		// No key -> SKIP the trigger (best-effort). Do NOT consume the once-per-head
+		// guard, so a key that appears later can still trigger this head.
+		return
+	}
+	// Claim the head BEFORE the call so a failed/rate-limited POST is not retried
+	// every poll. Caps the spend at one paid Devin session per head SHA.
+	if !s.claimRetrigger(headSHA) {
+		return
+	}
+
+	trigger := s.triggerReview
+	if trigger == nil {
+		trigger = (&devin.Client{}).TriggerReview
+	}
+	ctx, cancel := context.WithTimeout(sctx.Ctx, devinRetriggerTimeout)
+	defer cancel()
+	sessionID, err := trigger(ctx, apiKey, pr.URL, headSHA)
+	if err != nil {
+		// Best-effort: log without the key and keep waiting for the auto-review.
+		slog.Warn("review loop: Devin re-trigger failed", "pr", pr.Number, "head", shortSHA(headSHA), "err", err)
+		return
+	}
+	sctx.Log(fmt.Sprintf("triggered Devin review of %s (session %s)", shortSHA(headSHA), sessionID))
 }

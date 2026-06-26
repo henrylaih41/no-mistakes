@@ -177,11 +177,13 @@ const DefaultReviewLoopBotLogin = "devin-ai-integration[bot]"
 // layer). Pointer fields distinguish "not set" (nil) from explicit zero/false
 // values so global defaults survive a partially-specified repo block.
 type ReviewLoopRaw struct {
-	Enabled    *bool   `yaml:"enabled"`
-	BotLogin   *string `yaml:"bot_login"`
-	MaxRounds  *int    `yaml:"max_rounds"`
-	FailOpen   *bool   `yaml:"fail_open"`
-	ReplyOnFix *bool   `yaml:"reply_on_fix"`
+	Enabled         *bool   `yaml:"enabled"`
+	BotLogin        *string `yaml:"bot_login"`
+	MaxRounds       *int    `yaml:"max_rounds"`
+	FailOpen        *bool   `yaml:"fail_open"`
+	ReplyOnFix      *bool   `yaml:"reply_on_fix"`
+	Retrigger       *bool   `yaml:"retrigger"`
+	DevinAPIKeyFile *string `yaml:"devin_api_key_file"`
 }
 
 // ReviewLoop is the resolved post-PR review-loop config. When Enabled is false
@@ -212,6 +214,22 @@ type ReviewLoop struct {
 	// loop did. It only takes effect when Enabled, so the loop-disabled path stays
 	// byte-identical.
 	ReplyOnFix bool
+	// Retrigger (default true) controls whether the loop EXPLICITLY (re-)triggers a
+	// Devin review via the Devin HTTP API instead of relying solely on Devin's
+	// auto-review (which is rate-limited / pausable). It only takes effect when
+	// Enabled and only when a Devin API key resolves (see DevinAPIKeyFile), so the
+	// loop-disabled path stays byte-identical. COST: each trigger creates a paid
+	// Devin session (ACUs), so the loop fires it AT MOST ONCE PER HEAD SHA.
+	Retrigger bool
+	// DevinAPIKeyFile is the path read for the Devin API key when the DEVIN_API_KEY
+	// environment variable is empty (a leading ~ expands to the user home dir).
+	// Default ~/.config/devin/api_key.
+	//
+	// SECURITY: this is part of the (already trust-gated) ReviewLoop, honored ONLY
+	// from the trusted default-branch copy. Trust-gating the key-file path is a
+	// security requirement: an untrusted PR branch must not be able to redirect it
+	// to read/exfiltrate an arbitrary file via the Devin trigger.
+	DevinAPIKeyFile string
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -354,6 +372,16 @@ intent:
 #   # idle timeout to escalate. That timer re-arms whenever the base branch
 #   # advances, so on an actively-moving base a permanently-silent reviewer may
 #   # never trigger escalation - abort the run explicitly if that happens.
+#   retrigger: true   # explicitly (re-)trigger a Devin review via the Devin HTTP
+#                     # API instead of relying solely on Devin's auto-review
+#                     # (which is rate-limited / pausable). Best-effort: a missing
+#                     # key or any API error is logged and the loop continues.
+#                     # COST: each trigger creates a paid Devin session (ACUs); the
+#                     # loop fires it at most once per head SHA to bound the spend.
+#   # devin_api_key_file: "~/.config/devin/api_key"  # read when DEVIN_API_KEY is
+#                     # unset. SECURITY: honored only from the trusted default
+#                     # branch, so a pushed branch cannot redirect it to read an
+#                     # arbitrary file.
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -857,9 +885,11 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // ReviewLoop is gated even though the fixer it drives is always no-mistakes
 // itself (never a contributor-named binary): a pushed branch that could flip
 // enabled, swap bot_login to an attacker-controlled account whose comments are
-// fed verbatim into the fix prompt, or change max_rounds would be steering CI
-// gating and prompt content, exactly the execution-affecting surface that
-// Review is gated for. So it is taken ONLY from the trusted default-branch copy.
+// fed verbatim into the fix prompt, change max_rounds, or redirect
+// devin_api_key_file to read/exfiltrate an arbitrary file via the Devin trigger
+// would be steering CI gating, prompt content, and secret-file access — exactly
+// the execution-affecting surface that Review is gated for. So it is taken ONLY
+// from the trusted default-branch copy.
 //
 // The remaining non-executing fields (ignore patterns, auto-fix, intent, test)
 // are always taken from the pushed copy, matching prior behavior, since they
@@ -984,13 +1014,19 @@ func resolveReview(raw ReviewRaw) Review {
 // finding is the helpful default (it is inert while Enabled is false).
 func reviewLoopDefaults() ReviewLoop {
 	return ReviewLoop{
-		Enabled:    false,
-		BotLogin:   DefaultReviewLoopBotLogin,
-		MaxRounds:  3,
-		FailOpen:   true,
-		ReplyOnFix: true,
+		Enabled:         false,
+		BotLogin:        DefaultReviewLoopBotLogin,
+		MaxRounds:       3,
+		FailOpen:        true,
+		ReplyOnFix:      true,
+		Retrigger:       true,
+		DevinAPIKeyFile: DefaultDevinAPIKeyFile,
 	}
 }
+
+// DefaultDevinAPIKeyFile is the default path the review loop reads the Devin API
+// key from when DEVIN_API_KEY is unset (a leading ~ is expanded at use time).
+const DefaultDevinAPIKeyFile = "~/.config/devin/api_key"
 
 // applyReviewLoopOverrides applies non-nil raw values onto resolved defaults.
 func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
@@ -1008,6 +1044,12 @@ func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
 	}
 	if src.ReplyOnFix != nil {
 		dst.ReplyOnFix = *src.ReplyOnFix
+	}
+	if src.Retrigger != nil {
+		dst.Retrigger = *src.Retrigger
+	}
+	if src.DevinAPIKeyFile != nil && strings.TrimSpace(*src.DevinAPIKeyFile) != "" {
+		dst.DevinAPIKeyFile = strings.TrimSpace(*src.DevinAPIKeyFile)
 	}
 }
 
