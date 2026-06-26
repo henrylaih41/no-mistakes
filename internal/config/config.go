@@ -177,10 +177,11 @@ const DefaultReviewLoopBotLogin = "devin-ai-integration[bot]"
 // layer). Pointer fields distinguish "not set" (nil) from explicit zero/false
 // values so global defaults survive a partially-specified repo block.
 type ReviewLoopRaw struct {
-	Enabled   *bool   `yaml:"enabled"`
-	BotLogin  *string `yaml:"bot_login"`
-	MaxRounds *int    `yaml:"max_rounds"`
-	FailOpen  *bool   `yaml:"fail_open"`
+	Enabled    *bool   `yaml:"enabled"`
+	BotLogin   *string `yaml:"bot_login"`
+	MaxRounds  *int    `yaml:"max_rounds"`
+	FailOpen   *bool   `yaml:"fail_open"`
+	ReplyOnFix *bool   `yaml:"reply_on_fix"`
 }
 
 // ReviewLoop is the resolved post-PR review-loop config. When Enabled is false
@@ -205,6 +206,12 @@ type ReviewLoop struct {
 	BotLogin  string
 	MaxRounds int
 	FailOpen  bool
+	// ReplyOnFix (default true) controls whether the loop, after it successfully
+	// pushes a fix for the bot's findings, posts a threaded reply on each
+	// addressed review comment so a human (and the bot's re-review) sees what the
+	// loop did. It only takes effect when Enabled, so the loop-disabled path stays
+	// byte-identical.
+	ReplyOnFix bool
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -973,12 +980,15 @@ func resolveReview(raw ReviewRaw) Review {
 // reviewLoopDefaults returns the default post-PR review-loop settings. The loop
 // is off by default (Enabled false) so behavior is byte-identical until a user
 // opts in. FailOpen defaults true: a silent reviewer must not block the PR.
+// ReplyOnFix defaults true: when the loop is enabled, acknowledging an addressed
+// finding is the helpful default (it is inert while Enabled is false).
 func reviewLoopDefaults() ReviewLoop {
 	return ReviewLoop{
-		Enabled:   false,
-		BotLogin:  DefaultReviewLoopBotLogin,
-		MaxRounds: 3,
-		FailOpen:  true,
+		Enabled:    false,
+		BotLogin:   DefaultReviewLoopBotLogin,
+		MaxRounds:  3,
+		FailOpen:   true,
+		ReplyOnFix: true,
 	}
 }
 
@@ -995,6 +1005,9 @@ func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
 	}
 	if src.FailOpen != nil {
 		dst.FailOpen = *src.FailOpen
+	}
+	if src.ReplyOnFix != nil {
+		dst.ReplyOnFix = *src.ReplyOnFix
 	}
 }
 

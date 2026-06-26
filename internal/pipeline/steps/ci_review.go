@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -278,6 +279,12 @@ func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, 
 	if pushed || sctx.Run.HeadSHA != previousHeadSHA {
 		s.recordDevinFixKey(fixKey)
 		s.lastFixedCompletedAt = fixCompletedAt
+		// A successful push means each addressed finding's code changed under it.
+		// Acknowledge them best-effort so a human (and Devin's re-review) can see
+		// what the loop did. This must never affect the fix round's control flow.
+		if pushed {
+			s.replyOnFix(sctx, host, pr, findings)
+		}
 		sctx.Log(cimonitor.ReReviewingMsg)
 	} else {
 		// No changes produced: don't record the key so a later round can retry
@@ -285,4 +292,33 @@ func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, 
 		sctx.Log("Devin fix produced no changes, will retry if rounds remain...")
 	}
 	return nil
+}
+
+// replyOnFix posts a best-effort threaded acknowledgement on each addressed Devin
+// finding after a successful fix push, so a human (and Devin's re-review) can see
+// what the loop did. It is gated on the (already trust-gated) ReviewLoop being
+// enabled with ReplyOnFix set, which keeps the loop-disabled path byte-identical.
+//
+// It is BEST-EFFORT: a reply error is logged at warn and never fails the fix
+// round or changes control flow. Findings without a comment id (ID==0, e.g. a
+// top-level summary, or a host that does not expose the id) are skipped because
+// there is nothing to thread a reply under.
+func (s *CIStep) replyOnFix(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, findings []scm.ReviewComment) {
+	cfg := sctx.Config.ReviewLoop
+	if !cfg.Enabled || !cfg.ReplyOnFix {
+		return
+	}
+	prNum, err := strconv.Atoi(pr.Number)
+	if err != nil {
+		return
+	}
+	body := fmt.Sprintf("Addressed in %s by no-mistakes.", shortSHA(sctx.Run.HeadSHA))
+	for _, f := range findings {
+		if f.ID == 0 {
+			continue
+		}
+		if err := host.ReplyToReviewComment(sctx.Ctx, prNum, f.ID, body); err != nil {
+			slog.Warn("review loop: failed to reply to addressed finding", "pr", prNum, "comment_id", f.ID, "err", err)
+		}
+	}
 }

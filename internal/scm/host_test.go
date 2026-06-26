@@ -104,3 +104,6 @@ func (fakeHost) GetReviewVerdict(context.Context, int, string, string) (ReviewVe
 func (fakeHost) GetBotFindings(context.Context, int, string, string) ([]ReviewComment, error) {
 	return nil, ErrUnsupported
 }
+func (fakeHost) ReplyToReviewComment(context.Context, int, int64, string) error {
+	return ErrUnsupported
+}

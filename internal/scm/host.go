@@ -127,6 +127,12 @@ const (
 // summary. Severity is a coarse bucket parsed from the body ("high", "medium",
 // or "low"). CommitID is the commit the finding was made against when known.
 type ReviewComment struct {
+	// ID is the review comment's REST/database id (GitHub's databaseId). It is
+	// the handle ReplyToReviewComment needs to thread a reply under this comment.
+	// It is zero when the source does not expose it (e.g. a top-level summary, a
+	// provider without review support, or an older read path); callers that reply
+	// must skip findings with ID==0.
+	ID       int64
 	Path     string
 	Line     int
 	Body     string
@@ -179,4 +185,12 @@ type Host interface {
 	// to the current head SHA (file-scoped inline comments tied to headSHA, plus
 	// the bot's top-level review comments which carry no SHA).
 	GetBotFindings(ctx context.Context, prNumber int, headSHA, botLogin string) ([]ReviewComment, error)
+
+	// ReplyToReviewComment posts a threaded reply under an existing review comment
+	// identified by its REST/database id (see ReviewComment.ID). It is optional;
+	// implementations without Capabilities().Reviews must return ErrUnsupported,
+	// and callers should consult Capabilities first. The post-PR review loop uses
+	// it to acknowledge, on each addressed finding, the fix it pushed so a human
+	// (and the bot's re-review) can see what the loop did.
+	ReplyToReviewComment(ctx context.Context, prNumber int, commentID int64, body string) error
 }
