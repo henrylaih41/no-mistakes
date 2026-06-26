@@ -422,6 +422,52 @@ func TestGetReviewVerdictNoneWhenBotNeverReviewed(t *testing.T) {
 	}
 }
 
+// TestGetReviewVerdictEmptyHeadSHAIsNotYetReviewed verifies the fail-safe for an
+// empty (or whitespace-only) head SHA: without a head to scope to, the verdict
+// must be VerdictNone with no findings instead of treating the empty SHA as a
+// wildcard that matches every review/comment in the PR's history. It must also
+// short-circuit before any `gh` round-trip, so the cmd factory is given no
+// responses (any call would fail the command).
+func TestGetReviewVerdictEmptyHeadSHAIsNotYetReviewed(t *testing.T) {
+	t.Parallel()
+
+	for _, head := range []string{"", "   "} {
+		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "test/repo")
+		verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, head, botUser)
+		if err != nil {
+			t.Fatalf("GetReviewVerdict(head=%q) error = %v", head, err)
+		}
+		if verdict != scm.VerdictNone {
+			t.Fatalf("GetReviewVerdict(head=%q) = %q, want %q (can't scope to a head)", head, verdict, scm.VerdictNone)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("GetReviewVerdict(head=%q) findings = %d, want 0", head, len(findings))
+		}
+	}
+}
+
+// TestGetBotFindingsEmptyHeadSHAMatchesNoInlineFindings verifies commentMatchesHead
+// is fail-safe: with no head SHA, inline comments from any commit must not be
+// returned as head-scoped findings (no file-scoped finding leaks through).
+func TestGetBotFindingsEmptyHeadSHAMatchesNoInlineFindings(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/comments --paginate":  {stdout: inlineCommentsJSON},
+		"gh api repos/test/repo/issues/7/comments --paginate": {stdout: issueCommentsJSON},
+	}), nil, "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, "", botUser)
+	if err != nil {
+		t.Fatalf("GetBotFindings() error = %v", err)
+	}
+	for _, f := range findings {
+		if f.Path != "" {
+			t.Fatalf("empty head must not yield file-scoped findings, got %+v", f)
+		}
+	}
+}
+
 func TestGetReviewVerdictPaginatesPastFirstPage(t *testing.T) {
 	t.Parallel()
 

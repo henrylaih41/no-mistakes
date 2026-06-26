@@ -2,10 +2,13 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -346,5 +349,65 @@ func TestHandleDevinFixRound_WaitsWhenKeyAlreadyFixed(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "re-reviewing") {
 		t.Fatalf("expected re-reviewing log, got: %v", logs)
+	}
+}
+
+// TestHandleDevinFixRound_TransientFixFailureDoesNotConsumeRound asserts that a
+// fix attempt that errors (a transient network/API hiccup) does NOT permanently
+// consume one of the bounded MaxRounds: the round is counted only after the fix
+// attempt completes. Repeated transient failures must keep polling, not escalate.
+func TestHandleDevinFixRound_TransientFixFailureDoesNotConsumeRound(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+	var logs []string
+	sctx := newReviewTestContext(cfg, "head", func(s string) { logs = append(logs, s) })
+	sctx.WorkDir = t.TempDir()
+	sctx.Repo = &db.Repo{ID: "repo-1", DefaultBranch: "main", UpstreamURL: "https://github.com/test/repo"}
+	sctx.Run.BaseSHA = "0000000000000000000000000000000000000000"
+	sctx.LogChunk = func(string) {}
+	// An agent that always errors models a transient hiccup mid-fix: autoFixCI
+	// returns (false, err) before producing or pushing any change.
+	sctx.Agent = &mockAgent{runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return nil, errors.New("transient network error")
+	}}
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
+	findings := []scm.ReviewComment{severeFinding()}
+	step := &CIStep{}
+
+	// Far more iterations than MaxRounds: none should be consumed, none escalate.
+	for i := 0; i < 5; i++ {
+		outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "9"}, findings, "freshkey", nil)
+		if outcome != nil {
+			t.Fatalf("iteration %d: transient fix failure must keep polling, got escalation %+v", i, outcome)
+		}
+		if step.devinFixRounds != 0 {
+			t.Fatalf("iteration %d: transient fix failure consumed a round (devinFixRounds=%d)", i, step.devinFixRounds)
+		}
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "Devin fix failed") {
+		t.Fatalf("expected a fix-failed warning log, got: %v", logs)
+	}
+}
+
+// TestCIStepDevinFieldsRaceSafe exercises the devinMu-guarded accessors
+// concurrently so `go test -race` flags any unsynchronized access to the new
+// Devin mutable fields.
+func TestCIStepDevinFieldsRaceSafe(t *testing.T) {
+	t.Parallel()
+	step := &CIStep{}
+	now := func() time.Time { return time.Unix(0, 0) }
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			step.devinAnchorReset("head", now)
+			step.recordDevinRound()
+			_ = step.devinRounds()
+		}(i)
+	}
+	wg.Wait()
+	if got := step.devinRounds(); got != 8 {
+		t.Fatalf("recordDevinRound under contention = %d, want 8", got)
 	}
 }

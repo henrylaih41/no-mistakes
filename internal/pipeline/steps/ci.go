@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
@@ -32,14 +33,25 @@ const (
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, auto-fixing CI failures.
 type CIStep struct {
+	// lastFixedChecks, lastFixedCompletedAt, and ciFixAttempts are written only by
+	// the single CIStep.Execute goroutine (one CIStep per run). The Devin
+	// review-loop fields below share that same single-writer assumption but are
+	// additionally guarded by devinMu per AGENTS.md, since this PR introduced them
+	// and their access spans helper methods that a future caller could reach off
+	// the Execute goroutine.
 	lastFixedChecks      string               // sorted check names from last fix attempt, to avoid re-fixing
 	lastFixedCompletedAt map[string]time.Time // failing check completion times seen before the last fix attempt
 	ciFixAttempts        int                  // number of CI auto-fix attempts made
-	devinFixRounds       int                  // number of post-PR review-loop (Devin) fix rounds made
-	devinAnchorSHA       string               // head SHA the Devin grace window is anchored to
-	devinAnchorAt        time.Time            // when the current head SHA was first seen (Devin grace start)
-	checksGracePeriod    time.Duration        // minimum wait before trusting empty CI checks (0 = default 60s)
-	pollIntervalOverride time.Duration        // if set, overrides computed poll interval (for testing)
+
+	// devinMu guards the post-PR review-loop (Devin) mutable fields below. Reach
+	// them only through the devinRounds/recordDevinRound/devinAnchorReset helpers.
+	devinMu        sync.Mutex
+	devinFixRounds int       // number of post-PR review-loop (Devin) fix rounds made
+	devinAnchorSHA string    // head SHA the Devin grace window is anchored to
+	devinAnchorAt  time.Time // when the current head SHA was first seen (Devin grace start)
+
+	checksGracePeriod    time.Duration // minimum wait before trusting empty CI checks (0 = default 60s)
+	pollIntervalOverride time.Duration // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error
 	now                  func() time.Time
 	// baseBranchTip resolves the current tip SHA of the upstream default
@@ -56,6 +68,38 @@ func (s *CIStep) gracePeriod() time.Duration {
 		return s.checksGracePeriod
 	}
 	return defaultChecksGracePeriod
+}
+
+// devinRounds returns the number of completed post-PR review-loop fix rounds,
+// read under devinMu. See CIStep for the single-writer note.
+func (s *CIStep) devinRounds() int {
+	s.devinMu.Lock()
+	defer s.devinMu.Unlock()
+	return s.devinFixRounds
+}
+
+// recordDevinRound counts a completed review-loop fix round (a push or a clean
+// no-op) and returns the new total, written under devinMu. A round is recorded
+// only after the fix attempt completes, so a transient failure does not consume
+// one.
+func (s *CIStep) recordDevinRound() int {
+	s.devinMu.Lock()
+	defer s.devinMu.Unlock()
+	s.devinFixRounds++
+	return s.devinFixRounds
+}
+
+// devinAnchorReset resets the Devin grace anchor whenever the head advances (so
+// each new commit gets a fresh window for the bot to re-review) and returns the
+// anchor time for the current head. All anchor reads/writes happen under devinMu.
+func (s *CIStep) devinAnchorReset(headSHA string, now func() time.Time) time.Time {
+	s.devinMu.Lock()
+	defer s.devinMu.Unlock()
+	if headSHA != s.devinAnchorSHA {
+		s.devinAnchorSHA = headSHA
+		s.devinAnchorAt = now()
+	}
+	return s.devinAnchorAt
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
@@ -352,7 +396,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// (instead of "checks passed") keeps the agent from declaring
 					// the run done before the review lands.
 					reviewMsg := cimonitor.WaitingOnReviewMsg
-					if s.devinFixRounds > 0 {
+					if s.devinRounds() > 0 {
 						reviewMsg = cimonitor.ReReviewingMsg
 					}
 					lastMonitorLog = logCIMonitorStatus(sctx, reviewMsg, lastMonitorLog)
