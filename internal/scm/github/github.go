@@ -473,6 +473,16 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 		botLogin = DefaultBotLogin
 	}
 
+	// Fail-safe: without a head SHA we cannot scope reviews/findings to the
+	// current commit. Rather than letting an empty SHA act as a wildcard that
+	// matches every review and inline comment in the PR's history, report
+	// not-yet-reviewed so the caller's grace window / fail policy decides. This
+	// also keeps GetReviewVerdict and GetBotFindings consistent (commentMatchesHead
+	// likewise matches nothing on an empty head).
+	if strings.TrimSpace(headSHA) == "" {
+		return scm.VerdictNone, nil, nil
+	}
+
 	reviewsOut, err := h.cmd(ctx, "gh", h.paginatedAPIArgs(fmt.Sprintf("pulls/%d/reviews", prNumber))...).Output()
 	if err != nil {
 		return "", nil, fmt.Errorf("gh api pulls reviews: %w", err)
@@ -575,11 +585,14 @@ func bodyWordSet(text string) map[string]bool {
 
 // commentMatchesHead reports whether an inline comment is tied to headSHA via
 // either original_commit_id (the commit it was first made against) or commit_id
-// (GitHub's running update). An empty headSHA cannot be scoped, so it matches.
+// (GitHub's running update). An empty headSHA cannot be scoped to a commit, so
+// it matches nothing (fail-safe): treating it as a wildcard would make every
+// inline comment from any commit a finding on the current head. Callers must
+// pass a real head SHA to collect head-scoped findings.
 func commentMatchesHead(commitID, originalCommitID, headSHA string) bool {
 	head := strings.TrimSpace(headSHA)
 	if head == "" {
-		return true
+		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(originalCommitID), head) ||
 		strings.EqualFold(strings.TrimSpace(commitID), head)

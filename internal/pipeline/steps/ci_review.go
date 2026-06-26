@@ -177,11 +177,9 @@ func (s *CIStep) evalDevinReview(sctx *pipeline.StepContext, host scm.Host, pr *
 		now = time.Now
 	}
 	// Reset the grace anchor whenever the head advances so each new commit gets a
-	// fresh window for the bot to (re-)review.
-	if headSHA != s.devinAnchorSHA {
-		s.devinAnchorSHA = headSHA
-		s.devinAnchorAt = now()
-	}
+	// fresh window for the bot to (re-)review. Anchor state is guarded by devinMu;
+	// capture the anchor time here and derive elapsed from it after the host call.
+	anchorAt := s.devinAnchorReset(headSHA, now)
 
 	// GetReviewVerdict returns the findings it already read to derive the verdict,
 	// so the loop consumes both from one host round-trip instead of re-fetching.
@@ -202,7 +200,7 @@ func (s *CIStep) evalDevinReview(sctx *pipeline.StepContext, host scm.Host, pr *
 		findings = verdictFindings
 	}
 
-	elapsed := now().Sub(s.devinAnchorAt)
+	elapsed := now().Sub(anchorAt)
 	return evalDevinGate(verdict, findings, cfg, elapsed), findings
 }
 
@@ -218,18 +216,26 @@ func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, 
 		return nil
 	}
 	maxRounds := sctx.Config.ReviewLoop.MaxRounds
-	if s.devinFixRounds >= maxRounds {
-		sctx.Log(fmt.Sprintf("Devin still requesting changes after %d/%d round(s) - escalating for manual review...", s.devinFixRounds, maxRounds))
+	rounds := s.devinRounds()
+	if rounds >= maxRounds {
+		sctx.Log(fmt.Sprintf("Devin still requesting changes after %d/%d round(s) - escalating for manual review...", rounds, maxRounds))
 		return devinFailureOutcome(findings, "Devin review loop exhausted its bounded rounds with unresolved findings")
 	}
-	s.devinFixRounds++
-	sctx.Log(fmt.Sprintf("%s - auto-fixing (round %d/%d)...", cimonitor.ReviewChangesRequestedMsg, s.devinFixRounds, maxRounds))
+	// The round number shown is the attempt about to run (rounds+1). The round is
+	// counted only AFTER autoFixCI completes, so a transient fix failure
+	// (network/API hiccup) does not permanently consume a bounded round - a later
+	// poll retries until MaxRounds genuinely run.
+	sctx.Log(fmt.Sprintf("%s - auto-fixing (round %d/%d)...", cimonitor.ReviewChangesRequestedMsg, rounds+1, maxRounds))
 	previousHeadSHA := sctx.Run.HeadSHA
 	pushed, err := s.autoFixCI(sctx, host, pr, nil, false, findings)
 	if err != nil {
+		// Transient failure: the fix attempt did not complete, so do not consume a
+		// round. Keep polling and retry on a later iteration.
 		sctx.Log(fmt.Sprintf("warning: Devin fix failed: %v", err))
 		return nil
 	}
+	// The attempt completed (a push or a clean no-op): count the round.
+	s.recordDevinRound()
 	if pushed || sctx.Run.HeadSHA != previousHeadSHA {
 		s.lastFixedChecks = fixKey
 		s.lastFixedCompletedAt = fixCompletedAt
