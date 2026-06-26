@@ -81,6 +81,26 @@ func TestChecksPassed(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "cleared while waiting on Devin review",
+			logs: []string{ChecksPassedMsg, WaitingOnReviewMsg},
+			want: false,
+		},
+		{
+			name: "cleared while Devin re-reviews a new commit",
+			logs: []string{ChecksPassedMsg, ReReviewingMsg},
+			want: false,
+		},
+		{
+			name: "cleared when Devin requested changes",
+			logs: []string{ChecksPassedMsg, ReviewChangesRequestedMsg + " - auto-fixing (round 1/3)..."},
+			want: false,
+		},
+		{
+			name: "ready again once Devin-green after a wait",
+			logs: []string{WaitingOnReviewMsg, ChecksPassedMsg},
+			want: true,
+		},
+		{
 			name: "empty",
 			logs: nil,
 			want: false,

@@ -35,6 +35,9 @@ type CIStep struct {
 	lastFixedChecks      string               // sorted check names from last fix attempt, to avoid re-fixing
 	lastFixedCompletedAt map[string]time.Time // failing check completion times seen before the last fix attempt
 	ciFixAttempts        int                  // number of CI auto-fix attempts made
+	devinFixRounds       int                  // number of post-PR review-loop (Devin) fix rounds made
+	devinAnchorSHA       string               // head SHA the Devin grace window is anchored to
+	devinAnchorAt        time.Time            // when the current head SHA was first seen (Devin grace start)
 	checksGracePeriod    time.Duration        // minimum wait before trusting empty CI checks (0 = default 60s)
 	pollIntervalOverride time.Duration        // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error
@@ -73,6 +76,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("skipping CI: %v", err))
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
+
+	// reviewLoop is the post-PR review loop (Devin). It is inert unless both the
+	// config flag and the host's review capability are present; when inactive the
+	// CI step's control flow and log vocabulary are byte-identical to before.
+	loopActive := reviewLoopActive(sctx.Config.ReviewLoop, host)
 
 	// Get PR URL from run record
 	prURL := ""
@@ -227,7 +235,21 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			failing := failingCheckNames(checks)
 			sort.Strings(failing)
 			hasFailures := len(failing) > 0
-			hasIssues := hasFailures || mergeConflict
+
+			// Post-PR review loop: read the bot's verdict for the current head.
+			// Only consults the host when the loop is active, so behavior is
+			// unchanged otherwise. A "not green" verdict is folded into hasIssues
+			// so the existing fix machinery (no-mistakes is the fixer) runs.
+			devinDecision := devinDecisionDisabled
+			var devinFindings []scm.ReviewComment
+			var devinPrints []string
+			if loopActive {
+				devinDecision, devinFindings = s.evalDevinReview(sctx, host, pr)
+				devinPrints = devinFindingFingerprints(devinFindings)
+			}
+			devinNotGreen := devinDecision == devinDecisionNotGreen
+
+			hasIssues := hasFailures || mergeConflict || devinNotGreen
 			timeoutFailingChecks = append(timeoutFailingChecks[:0], failing...)
 
 			// If a failing check completed after our last fix push, CI has
@@ -260,11 +282,20 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						issueDesc = "merge conflict"
 					}
 				}
-				if sctx.Fixing && !manualFixAttempted {
+				if loopActive && devinNotGreen && !hasFailures && !mergeConflict {
+					// Checks are clean but the review bot requested changes:
+					// run a bounded review-loop fix round. Anti-thrash keys on
+					// (headSHA, finding fingerprints) so a pushed fix waits for
+					// the bot to re-review the new commit before re-evaluating.
+					devinKey := encodeDevinFixKey(nil, false, sctx.Run.HeadSHA, devinPrints)
+					if outcome := s.handleDevinFixRound(sctx, host, pr, devinFindings, devinKey, fixCompletedAt); outcome != nil {
+						return outcome, nil
+					}
+				} else if sctx.Fixing && !manualFixAttempted {
 					manualFixAttempted = true
 					sctx.Log(fmt.Sprintf("issues detected: %s - manual fix requested...", issueDesc))
 					previousHeadSHA := sctx.Run.HeadSHA
-					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
+					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict, devinFindings)
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI manual fix failed: %v", err))
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
@@ -288,7 +319,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					s.ciFixAttempts++
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fixing (attempt %d/%d)...", issueDesc, s.ciFixAttempts, ciFixLimit))
 					previousHeadSHA := sctx.Run.HeadSHA
-					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
+					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict, devinFindings)
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI auto-fix failed: %v", err))
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
@@ -303,6 +334,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			} else {
 				s.lastFixedChecks = ""
 				s.lastFixedCompletedAt = nil
+				passedMsg := ciChecksPassedMsg
+				if len(checks) == 0 {
+					passedMsg = ciNoChecksPassedMsg
+				}
 				switch {
 				case !prStateKnown || !mergeabilityKnown:
 					lastMonitorLog = ""
@@ -311,10 +346,27 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// so a PR that passed checks and starts re-running clears the
 					// previous passed-checks signal instead of looking stale.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+				case loopActive && devinDecision == devinDecisionPending:
+					// Checks are clean but the review bot has not posted a verdict
+					// for the current head yet: not ready to merge. Surfacing this
+					// (instead of "checks passed") keeps the agent from declaring
+					// the run done before the review lands.
+					reviewMsg := cimonitor.WaitingOnReviewMsg
+					if s.devinFixRounds > 0 {
+						reviewMsg = cimonitor.ReReviewingMsg
+					}
+					lastMonitorLog = logCIMonitorStatus(sctx, reviewMsg, lastMonitorLog)
 				case len(checks) == 0 && elapsed < s.gracePeriod():
 					// CI checks may not be registered yet, keep polling.
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
+				case loopActive && devinDecision == devinDecisionFailOpen:
+					// The bot stayed silent past the grace window and fail-open is
+					// configured: fall back to checks-only green, but loudly.
+					if passedMsg != lastMonitorLog {
+						sctx.Log("WARNING: Devin posted no review within the grace window; proceeding on checks-only green (review_loop.fail_open=true)")
+					}
+					lastMonitorLog = logCIMonitorStatus(sctx, passedMsg, lastMonitorLog)
 				case len(checks) == 0:
 					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
 				default:
