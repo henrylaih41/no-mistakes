@@ -3,6 +3,9 @@ package steps
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -24,12 +27,24 @@ type fakeReviewHost struct {
 	verdErr  error
 	findings []scm.ReviewComment
 	findErr  error
+	replyErr error // when set, every ReplyToReviewComment returns it
 
 	verdictCalls  int
 	findingsCalls int
 	gotHeadSHA    string
 	gotBotLogin   string
 	gotPRNumber   int
+
+	// replies records each ReplyToReviewComment call so tests can assert which
+	// findings were acknowledged after a fix push.
+	replies []reviewReply
+}
+
+// reviewReply captures one ReplyToReviewComment call.
+type reviewReply struct {
+	prNumber  int
+	commentID int64
+	body      string
 }
 
 func (h *fakeReviewHost) Provider() scm.Provider          { return scm.ProviderGitHub }
@@ -69,6 +84,10 @@ func (h *fakeReviewHost) GetReviewVerdict(_ context.Context, prNumber int, headS
 func (h *fakeReviewHost) GetBotFindings(context.Context, int, string, string) ([]scm.ReviewComment, error) {
 	h.findingsCalls++
 	return h.findings, h.findErr
+}
+func (h *fakeReviewHost) ReplyToReviewComment(_ context.Context, prNumber int, commentID int64, body string) error {
+	h.replies = append(h.replies, reviewReply{prNumber: prNumber, commentID: commentID, body: body})
+	return h.replyErr
 }
 
 func severeFinding() scm.ReviewComment {
@@ -414,6 +433,183 @@ func TestHandleDevinFixRound_TransientFixFailureDoesNotConsumeRound(t *testing.T
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "Devin fix failed") {
 		t.Fatalf("expected a fix-failed warning log, got: %v", logs)
+	}
+}
+
+// setupDevinFixRepo builds a working repo on `feature` plus a bare upstream so a
+// review-loop fix round can actually commit and push (autoFixCI -> commitAndPush).
+// Returns (workdir, baseSHA, headSHA, upstreamURL).
+func setupDevinFixRepo(t *testing.T) (string, string, string, string) {
+	t.Helper()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	os.WriteFile(filepath.Join(dir, "init.txt"), []byte("init"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "initial")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+	return dir, baseSHA, headSHA, upstream
+}
+
+// devinFixRoundResult bundles the observable state after one handleDevinFixRound.
+type devinFixRoundResult struct {
+	step    *CIStep
+	host    *fakeReviewHost
+	sctx    *pipeline.StepContext
+	outcome *pipeline.StepOutcome
+}
+
+// runDevinFixRound drives a single handleDevinFixRound end-to-end against a real
+// git repo + bare upstream. produceChanges controls whether the fix agent writes a
+// file (and thus whether autoFixCI actually pushes); replyErr is returned by every
+// ReplyToReviewComment so the best-effort path can be exercised.
+func runDevinFixRound(t *testing.T, cfg config.ReviewLoop, produceChanges bool, replyErr error, findings []scm.ReviewComment) devinFixRoundResult {
+	t.Helper()
+	dir, baseSHA, headSHA, upstream := setupDevinFixRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if produceChanges {
+			if err := os.WriteFile(filepath.Join(opts.CWD, "devin-fix.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+		}
+		return &agent.Result{}, nil
+	}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.ReviewLoop = cfg
+	sctx.Log = func(string) {}
+	sctx.LogChunk = func(string) {}
+
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}, replyErr: replyErr}
+	step := &CIStep{}
+	outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "42"}, findings, "freshkey", nil)
+	return devinFixRoundResult{step: step, host: host, sctx: sctx, outcome: outcome}
+}
+
+// TestHandleDevinFixRound_RepliesPerAddressedFindingAfterPush asserts that after a
+// successful fix push the loop posts one threaded reply per addressed finding that
+// carries a comment id, skipping findings with ID==0.
+func TestHandleDevinFixRound_RepliesPerAddressedFindingAfterPush(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true, ReplyOnFix: true}
+	findings := []scm.ReviewComment{
+		{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug 1"},
+		{ID: 222, Path: "b.go", Line: 2, Severity: "medium", Body: "bug 2"},
+		{ID: 0, Path: "c.go", Line: 3, Severity: "high", Body: "no id, must be skipped"},
+	}
+	res := runDevinFixRound(t, cfg, true, nil, findings)
+
+	if res.outcome != nil {
+		t.Fatalf("expected nil outcome (keep polling), got %+v", res.outcome)
+	}
+	if res.step.devinFixRounds != 1 {
+		t.Fatalf("devinFixRounds = %d, want 1", res.step.devinFixRounds)
+	}
+	if len(res.host.replies) != 2 {
+		t.Fatalf("len(replies) = %d, want 2 (one per finding with an ID; ID==0 skipped): %+v", len(res.host.replies), res.host.replies)
+	}
+	wantBody := fmt.Sprintf("Addressed in %s by no-mistakes.", shortSHA(res.sctx.Run.HeadSHA))
+	got := map[int64]bool{}
+	for _, r := range res.host.replies {
+		if r.prNumber != 42 {
+			t.Errorf("reply prNumber = %d, want 42", r.prNumber)
+		}
+		if r.body != wantBody {
+			t.Errorf("reply body = %q, want %q (short NEW head SHA)", r.body, wantBody)
+		}
+		got[r.commentID] = true
+	}
+	if !got[111] || !got[222] {
+		t.Fatalf("expected replies on findings 111 and 222, got %v", got)
+	}
+	if got[0] {
+		t.Fatal("a reply was posted for a finding with ID==0, which must be skipped")
+	}
+}
+
+// TestHandleDevinFixRound_NoReplyWhenFixDidNotPush asserts no acknowledgement is
+// posted when the fix agent produced no changes (no push).
+func TestHandleDevinFixRound_NoReplyWhenFixDidNotPush(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true, ReplyOnFix: true}
+	findings := []scm.ReviewComment{{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug"}}
+	res := runDevinFixRound(t, cfg, false, nil, findings)
+
+	if res.outcome != nil {
+		t.Fatalf("expected nil outcome, got %+v", res.outcome)
+	}
+	if res.step.devinFixRounds != 1 {
+		t.Fatalf("devinFixRounds = %d, want 1 (the round is counted even on a clean no-op)", res.step.devinFixRounds)
+	}
+	if len(res.host.replies) != 0 {
+		t.Fatalf("expected no replies when the fix did not push, got %+v", res.host.replies)
+	}
+}
+
+// TestHandleDevinFixRound_NoReplyWhenReplyOnFixDisabled asserts the feature flag
+// gates the acknowledgement even after a successful push.
+func TestHandleDevinFixRound_NoReplyWhenReplyOnFixDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true, ReplyOnFix: false}
+	findings := []scm.ReviewComment{{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug"}}
+	res := runDevinFixRound(t, cfg, true, nil, findings)
+
+	if len(res.host.replies) != 0 {
+		t.Fatalf("expected no replies when ReplyOnFix is false, got %+v", res.host.replies)
+	}
+}
+
+// TestHandleDevinFixRound_NoReplyWhenLoopDisabled asserts a disabled review loop
+// posts nothing even with ReplyOnFix set (keeps the disabled path inert).
+func TestHandleDevinFixRound_NoReplyWhenLoopDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: false, MaxRounds: 3, FailOpen: true, ReplyOnFix: true}
+	findings := []scm.ReviewComment{{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug"}}
+	res := runDevinFixRound(t, cfg, true, nil, findings)
+
+	if len(res.host.replies) != 0 {
+		t.Fatalf("expected no replies when the review loop is disabled, got %+v", res.host.replies)
+	}
+}
+
+// TestHandleDevinFixRound_ReplyErrorDoesNotFailRound asserts the acknowledgement
+// is best-effort: a reply error neither escalates the round nor prevents the fix
+// key / round count from being recorded.
+func TestHandleDevinFixRound_ReplyErrorDoesNotFailRound(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true, ReplyOnFix: true}
+	findings := []scm.ReviewComment{
+		{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug 1"},
+		{ID: 222, Path: "b.go", Line: 2, Severity: "medium", Body: "bug 2"},
+	}
+	res := runDevinFixRound(t, cfg, true, errors.New("reply boom"), findings)
+
+	if res.outcome != nil {
+		t.Fatalf("a reply error must not escalate the round, got %+v", res.outcome)
+	}
+	if res.step.devinFixRounds != 1 {
+		t.Fatalf("devinFixRounds = %d, want 1 (round completes despite the reply error)", res.step.devinFixRounds)
+	}
+	if res.step.devinFixKey() != "freshkey" {
+		t.Fatalf("fix key not recorded after a successful push: %q", res.step.devinFixKey())
+	}
+	if len(res.host.replies) != 2 {
+		t.Fatalf("expected a reply attempt per finding even when they error, got %+v", res.host.replies)
 	}
 }
 

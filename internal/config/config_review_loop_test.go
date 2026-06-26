@@ -22,6 +22,22 @@ func TestMerge_ReviewLoopDefaults(t *testing.T) {
 	if !cfg.ReviewLoop.FailOpen {
 		t.Errorf("ReviewLoop.FailOpen = false, want true (silent reviewer must not block)")
 	}
+	if !cfg.ReviewLoop.ReplyOnFix {
+		t.Errorf("ReviewLoop.ReplyOnFix = false, want true (acknowledge addressed findings by default)")
+	}
+}
+
+func TestMerge_ReviewLoopReplyOnFixOverride(t *testing.T) {
+	replyOff := false
+	global := &GlobalConfig{
+		ReviewLoop: ReviewLoopRaw{ReplyOnFix: &replyOff},
+	}
+
+	cfg := Merge(global, &RepoConfig{})
+
+	if cfg.ReviewLoop.ReplyOnFix {
+		t.Errorf("ReviewLoop.ReplyOnFix = true, want false from global override")
+	}
 }
 
 func TestMerge_ReviewLoopFromGlobal(t *testing.T) {

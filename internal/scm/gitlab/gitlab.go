@@ -129,6 +129,12 @@ func (h *Host) GetBotFindings(_ context.Context, _ int, _, _ string) ([]scm.Revi
 	return nil, scm.ErrUnsupported
 }
 
+// ReplyToReviewComment is unsupported on GitLab; see GetReviewVerdict.
+// Capabilities().Reviews is false, so callers should not invoke this.
+func (h *Host) ReplyToReviewComment(_ context.Context, _ int, _ int64, _ string) error {
+	return scm.ErrUnsupported
+}
+
 func (h *Host) Available(ctx context.Context) error {
 	if h.cliAvailable != nil && !h.cliAvailable() {
 		return errors.New("glab CLI is not installed")

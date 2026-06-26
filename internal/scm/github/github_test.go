@@ -249,27 +249,45 @@ const (
 // production code uses, so the canned response is keyed byte-for-byte as the call
 // site emits it (the query string carries spaces, so hand-writing the key is
 // brittle).
-func graphqlThreadsKey(repo string, prNumber int) string {
+func graphqlThreadsKey(repo string, prNumber int, cursor ...string) string {
 	h := &Host{repo: repo}
-	return strings.TrimSpace("gh " + strings.Join(h.reviewThreadsArgs(prNumber), " "))
+	c := ""
+	if len(cursor) > 0 {
+		c = cursor[0]
+	}
+	return strings.TrimSpace("gh " + strings.Join(h.reviewThreadsArgs(prNumber, c), " "))
 }
 
 // reviewThreadsResponse wraps thread nodes in the graphql envelope the production
-// parser expects (data.repository.pullRequest.reviewThreads.nodes).
+// parser expects. It models a SINGLE page (hasNextPage:false); use
+// reviewThreadsPage to model a paginated response.
 func reviewThreadsResponse(nodes ...string) githubTestResponse {
+	return reviewThreadsPage(false, "", nodes...)
+}
+
+// reviewThreadsPage renders one page of the reviewThreads envelope, including the
+// pageInfo{hasNextPage endCursor} the production cursor-pagination loop consumes.
+func reviewThreadsPage(hasNextPage bool, endCursor string, nodes ...string) githubTestResponse {
 	return githubTestResponse{
-		stdout: `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[` +
-			strings.Join(nodes, ",") + `]}}}}}` + "\n",
+		stdout: fmt.Sprintf(
+			`{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":%t,"endCursor":%q},"nodes":[`,
+			hasNextPage, endCursor,
+		) + strings.Join(nodes, ",") + `]}}}}}` + "\n",
 	}
 }
 
-// thread renders one reviewThreads node: its resolution/outdated flags plus a
-// single anchoring comment (author/path/line/body).
-func thread(resolved, outdated bool, author, path string, line int, body string) string {
+// threadID renders one reviewThreads node: its resolution/outdated flags plus a
+// single anchoring comment (author/databaseId/path/line/body).
+func threadID(databaseID int64, resolved, outdated bool, author, path string, line int, body string) string {
 	return fmt.Sprintf(
-		`{"isResolved":%t,"isOutdated":%t,"comments":{"nodes":[{"author":{"login":%q},"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/7#discussion"}]}}`,
-		resolved, outdated, author, path, line, line, body,
+		`{"isResolved":%t,"isOutdated":%t,"comments":{"nodes":[{"author":{"login":%q},"databaseId":%d,"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/7#discussion"}]}}`,
+		resolved, outdated, author, databaseID, path, line, line, body,
 	)
+}
+
+// thread is threadID with a zero databaseId, for tests that don't exercise the id.
+func thread(resolved, outdated bool, author, path string, line int, body string) string {
+	return threadID(0, resolved, outdated, author, path, line, body)
 }
 
 // liveThreads is the MIX used across the read-layer tests: two LIVE bot findings
@@ -601,6 +619,102 @@ func TestGetBotFindingsCollectsAllLiveThreadsAndSevereFlipsVerdict(t *testing.T)
 	}
 	if verdict != scm.VerdictChangesRequested {
 		t.Fatalf("GetReviewVerdict() = %q, want CHANGES_REQUESTED (a live severe finding remains)", verdict)
+	}
+}
+
+// TestGetReviewVerdictPaginatesReviewThreads guards the false-APPROVED risk: when
+// the PR's review threads span more than one page, a live severe finding that
+// lands on page 2 must still be seen. reviewThreads returns threads oldest-first
+// and counts addressed/resolved threads toward the first:100 window, so without
+// cursor pagination the newest severe finding could be truncated past page 1 and
+// the verdict would wrongly read APPROVED.
+func TestGetReviewVerdictPaginatesReviewThreads(t *testing.T) {
+	t.Parallel()
+
+	// Page 1 carries only non-severe / already-addressed threads, so on its own it
+	// would read APPROVED. The cursor advances to page 2.
+	page1 := []string{
+		thread(false, false, botUser, "p1-nit.go", 1, "nit: minor style"),
+		thread(false, true, botUser, "p1-outdated.go", 2, "🔴 **Outdated severe (addressed)**"),
+	}
+	// Page 2 carries the LIVE severe finding that must flip the verdict.
+	page2 := []string{
+		thread(false, false, botUser, "p2-live.go", 9, "🔴 **Live severe bug on page 2**"),
+	}
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		graphqlThreadsKey("test/repo", 7):            reviewThreadsPage(true, "CURSOR1", page1...),
+		graphqlThreadsKey("test/repo", 7, "CURSOR1"): reviewThreadsPage(false, "", page2...),
+	}), nil, "test/repo")
+
+	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictChangesRequested {
+		t.Fatalf("verdict = %q, want CHANGES_REQUESTED (the live severe finding on page 2 must be seen, not truncated)", verdict)
+	}
+	sawPage2 := false
+	for _, f := range findings {
+		if f.Path == "p2-live.go" {
+			sawPage2 = true
+		}
+	}
+	if !sawPage2 {
+		t.Fatalf("page-2 live severe finding missing from accumulated findings: %+v", findings)
+	}
+}
+
+// TestGetBotFindingsPopulatesCommentID asserts the graphql databaseId is surfaced
+// as ReviewComment.ID, which the review loop needs to thread a reply on a finding.
+func TestGetBotFindingsPopulatesCommentID(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
+			threadID(987654321, false, false, botUser, "a.go", 3, "🔴 **bug**"),
+		)}), nil, "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetBotFindings() error = %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("len(findings) = %d, want 1", len(findings))
+	}
+	if findings[0].ID != 987654321 {
+		t.Fatalf("findings[0].ID = %d, want 987654321 (the comment databaseId)", findings[0].ID)
+	}
+}
+
+// TestReplyToReviewComment asserts the POST is issued to the replies endpoint with
+// the body passed as a raw -f field.
+func TestReplyToReviewComment(t *testing.T) {
+	t.Parallel()
+
+	const body = "Addressed in deadbeef by no-mistakes."
+	key := "gh api repos/test/repo/pulls/7/comments/4242/replies -f body=" + body
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		key: {stdout: `{"id":1}` + "\n"},
+	}), nil, "test/repo")
+
+	if err := host.ReplyToReviewComment(context.Background(), 7, 4242, body); err != nil {
+		t.Fatalf("ReplyToReviewComment() error = %v", err)
+	}
+}
+
+// TestReplyToReviewCommentSurfacesError asserts a failed gh call returns an error
+// (so the caller can log it best-effort).
+func TestReplyToReviewCommentSurfacesError(t *testing.T) {
+	t.Parallel()
+
+	// No canned response => the factory returns a non-zero exit for the call.
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "test/repo")
+	if err := host.ReplyToReviewComment(context.Background(), 7, 4242, "body"); err == nil {
+		t.Fatal("expected an error when the gh api replies call fails")
 	}
 }
 

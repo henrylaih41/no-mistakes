@@ -359,8 +359,15 @@ type ghUser struct {
 // the verdict never clears. The GraphQL reviewThreads API exposes the truth:
 // isResolved (a human/bot resolved the thread) and isOutdated (the code the
 // comment was anchored to has changed = effectively addressed). The first
-// comment in a thread carries its author and anchor (path/line); replies follow.
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved isOutdated comments(first:10){nodes{author{login} path line originalLine body url}}}}}}}`
+// comment in a thread carries its author, anchor (path/line), and databaseId
+// (the REST id needed to reply); replies follow.
+//
+// It is CURSOR-PAGINATED via $cursor / pageInfo: reviewThreads returns threads
+// oldest-first and counts live, outdated, and resolved threads alike toward the
+// first:100 window. On a busy PR a newest live severe finding could land past
+// the first page, get truncated, and wrongly read as APPROVED, so GetBotFindings
+// walks every page (after:$cursor) before filtering.
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login} databaseId path line originalLine body url}}}}}}}`
 
 // ghReviewThreadsResponse is the `gh api graphql` payload for reviewThreadsQuery.
 type ghReviewThreadsResponse struct {
@@ -368,6 +375,10 @@ type ghReviewThreadsResponse struct {
 		Repository struct {
 			PullRequest struct {
 				ReviewThreads struct {
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
 					Nodes []ghReviewThread `json:"nodes"`
 				} `json:"reviewThreads"`
 			} `json:"pullRequest"`
@@ -385,9 +396,11 @@ type ghReviewThread struct {
 	} `json:"comments"`
 }
 
-// ghThreadComment is a single comment node within a review thread.
+// ghThreadComment is a single comment node within a review thread. DatabaseID is
+// the comment's REST id, used as ReviewComment.ID so the loop can reply to it.
 type ghThreadComment struct {
 	Author       ghUser `json:"author"`
+	DatabaseID   int64  `json:"databaseId"`
 	Path         string `json:"path"`
 	Line         int    `json:"line"`
 	OriginalLine int    `json:"originalLine"`
@@ -408,18 +421,29 @@ func (h *Host) ownerName() (string, string) {
 	return owner, name
 }
 
-// reviewThreadsArgs builds the `gh api graphql` invocation that fetches the PR's
-// review threads (reviewThreadsQuery) bound to this host's repo and prNumber.
-// It reuses the same CmdFactory as every other gh call; only the args differ.
-func (h *Host) reviewThreadsArgs(prNumber int) []string {
+// reviewThreadsArgs builds the `gh api graphql` invocation that fetches one page
+// of the PR's review threads (reviewThreadsQuery) bound to this host's repo and
+// prNumber. cursor is the endCursor of the previous page ("" for the first page,
+// where $cursor resolves to null = start from the beginning). It reuses the same
+// CmdFactory as every other gh call; only the args differ.
+//
+// owner and name are passed with -f (raw string), not -F: -F magic-coerces an
+// all-numeric value (e.g. a repo literally named "123") into a JSON number,
+// which then fails to bind to the String! GraphQL variable. The integer number
+// variable still uses -F so it binds to Int!.
+func (h *Host) reviewThreadsArgs(prNumber int, cursor string) []string {
 	owner, name := h.ownerName()
-	return []string{
+	args := []string{
 		"api", "graphql",
 		"-f", "query=" + reviewThreadsQuery,
-		"-F", "owner=" + owner,
-		"-F", "name=" + name,
+		"-f", "owner=" + owner,
+		"-f", "name=" + name,
 		"-F", fmt.Sprintf("number=%d", prNumber),
 	}
+	if cursor != "" {
+		args = append(args, "-f", "cursor="+cursor)
+	}
+	return args
 }
 
 // ghReview is a PR review object from `gh api repos/{owner}/{repo}/pulls/{n}/reviews`.
@@ -465,16 +489,31 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 		return nil, nil
 	}
 
-	out, err := h.cmd(ctx, "gh", h.reviewThreadsArgs(prNumber)...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("gh api graphql reviewThreads: %w", err)
-	}
-	var resp ghReviewThreadsResponse
-	if err := json.Unmarshal(out, &resp); err != nil {
-		return nil, fmt.Errorf("parse review threads: %w", err)
+	// Walk every page of review threads before filtering. reviewThreads returns
+	// threads oldest-first and counts resolved/outdated threads toward the
+	// first:100 window, so on a busy PR a newest live severe finding can land past
+	// page 1; reading only the first page could truncate it and wrongly read the
+	// verdict as APPROVED. The empty-endCursor guard prevents an infinite loop if
+	// the API ever reports hasNextPage:true without advancing the cursor.
+	var threads []ghReviewThread
+	cursor := ""
+	for {
+		out, err := h.cmd(ctx, "gh", h.reviewThreadsArgs(prNumber, cursor)...).Output()
+		if err != nil {
+			return nil, fmt.Errorf("gh api graphql reviewThreads: %w", err)
+		}
+		var resp ghReviewThreadsResponse
+		if err := json.Unmarshal(out, &resp); err != nil {
+			return nil, fmt.Errorf("parse review threads: %w", err)
+		}
+		rt := resp.Data.Repository.PullRequest.ReviewThreads
+		threads = append(threads, rt.Nodes...)
+		if !rt.PageInfo.HasNextPage || strings.TrimSpace(rt.PageInfo.EndCursor) == "" {
+			break
+		}
+		cursor = rt.PageInfo.EndCursor
 	}
 
-	threads := resp.Data.Repository.PullRequest.ReviewThreads.Nodes
 	findings := make([]scm.ReviewComment, 0, len(threads))
 	for _, t := range threads {
 		// A resolved thread (someone marked it done) or an outdated thread (the
@@ -494,6 +533,7 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 			continue // not a file-scoped finding
 		}
 		findings = append(findings, scm.ReviewComment{
+			ID:       first.DatabaseID,
 			Path:     first.Path,
 			Line:     pickLine(first.Line, first.OriginalLine),
 			Body:     first.Body,
@@ -610,6 +650,21 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 		}
 	}
 	return scm.VerdictApproved, findings, nil
+}
+
+// ReplyToReviewComment posts a threaded reply under an existing PR review comment
+// (identified by its REST/database id) via
+// `gh api repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies` (a POST: gh
+// switches to POST automatically once a -f field is supplied). It reuses
+// apiArgs() for the repo-scoped path, mirroring every other gh-api call. The
+// review loop calls it best-effort to acknowledge addressed findings; callers
+// should gate on Capabilities().Reviews.
+func (h *Host) ReplyToReviewComment(ctx context.Context, prNumber int, commentID int64, body string) error {
+	args := append(h.apiArgs(fmt.Sprintf("pulls/%d/comments/%d/replies", prNumber, commentID)), "-f", "body="+body)
+	if out, err := h.cmd(ctx, "gh", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("gh api reply to review comment: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 const (
