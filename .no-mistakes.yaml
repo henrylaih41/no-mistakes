@@ -1,0 +1,11 @@
+# no-mistakes' own dogfood config.
+# Makes the gate deterministic: every gated PR runs the exact test/lint/format
+# commands the maintainers run locally, instead of leaving it to agent
+# auto-detection. `go test -race` is the key addition — concurrency races (the
+# #1311 class) are caught automatically on every push.
+# See docs/src/content/docs/reference/repo-config.md
+
+commands:
+  test: "go test -race ./..."
+  lint: "make lint"
+  format: "gofmt -w ."
