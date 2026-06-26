@@ -233,50 +233,85 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 	}
 }
 
-// Canned `gh api` JSON modeled on a real Devin PR: the bot posts a COMMENTED
-// review (never CHANGES_REQUESTED) with inline findings whose bodies carry the
-// 🔴 (bug/high) and 🚩 (analysis/medium) severity markers, plus a top-level
-// summary comment that carries no SHA.
+// Canned `gh api graphql` data modeled on a real Devin PR. The read layer now
+// reads review THREADS (not flat REST comments) so it can honor each thread's
+// isResolved/isOutdated state: GitHub re-anchors a bot's old comments onto the
+// head, so a REST read reports already-addressed comments as live and the
+// verdict never clears. Only live (unresolved AND not-outdated) bot threads are
+// findings.
 const (
 	headSHA = "abc123def"
-	oldSHA  = "0000oldsha"
 	botUser = "devin-ai-integration[bot]"
 )
 
-// inlineCommentsJSON has, in order: a 🔴 finding on headSHA, a 🚩 finding on
-// headSHA, a stale 🔴 finding on an OLD sha (must be scoped out), and a human's
-// inline comment on headSHA (must be filtered out by login).
-const inlineCommentsJSON = `[
-  {"path":"internal/batch/download.go","line":42,"original_line":40,"body":"🔴 **Batch download crashes on empty manifest**","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"https://github.com/test/repo/pull/7#discussion_r1","user":{"login":"devin-ai-integration[bot]"}},
-  {"path":"internal/batch/path.go","line":17,"original_line":17,"body":"🚩 **Batch path swallows the second error**","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"https://github.com/test/repo/pull/7#discussion_r2","user":{"login":"devin-ai-integration[bot]"}},
-  {"path":"internal/old/stale.go","line":3,"original_line":3,"body":"🔴 **Stale finding from a previous commit**","commit_id":"0000oldsha","original_commit_id":"0000oldsha","html_url":"https://github.com/test/repo/pull/7#discussion_r0","user":{"login":"devin-ai-integration[bot]"}},
-  {"path":"internal/human/note.go","line":9,"original_line":9,"body":"high severity concern from a human","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"https://github.com/test/repo/pull/7#discussion_rh","user":{"login":"some-human"}}
-]` + "\n"
+// graphqlThreadsKey is the cmd-factory key for the `gh api graphql` reviewThreads
+// read GetBotFindings issues. It is derived from the same args builder the
+// production code uses, so the canned response is keyed byte-for-byte as the call
+// site emits it (the query string carries spaces, so hand-writing the key is
+// brittle).
+func graphqlThreadsKey(repo string, prNumber int) string {
+	h := &Host{repo: repo}
+	return strings.TrimSpace("gh " + strings.Join(h.reviewThreadsArgs(prNumber), " "))
+}
 
-func TestGetBotFindingsFiltersBotParsesSeverityAndScopesToHead(t *testing.T) {
+// reviewThreadsResponse wraps thread nodes in the graphql envelope the production
+// parser expects (data.repository.pullRequest.reviewThreads.nodes).
+func reviewThreadsResponse(nodes ...string) githubTestResponse {
+	return githubTestResponse{
+		stdout: `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[` +
+			strings.Join(nodes, ",") + `]}}}}}` + "\n",
+	}
+}
+
+// thread renders one reviewThreads node: its resolution/outdated flags plus a
+// single anchoring comment (author/path/line/body).
+func thread(resolved, outdated bool, author, path string, line int, body string) string {
+	return fmt.Sprintf(
+		`{"isResolved":%t,"isOutdated":%t,"comments":{"nodes":[{"author":{"login":%q},"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/7#discussion"}]}}`,
+		resolved, outdated, author, path, line, line, body,
+	)
+}
+
+// liveThreads is the MIX used across the read-layer tests: two LIVE bot findings
+// (🔴 high + 🚩 medium), one OUTDATED bot finding (the anchored code changed =
+// addressed), one RESOLVED bot finding (someone closed it), and one LIVE
+// human-authored thread (fails the bot-login filter). Only the two live bot
+// threads are findings.
+func liveThreads() []string {
+	return []string{
+		thread(false, false, botUser, "internal/batch/download.go", 42, "🔴 **Batch download crashes on empty manifest**"),
+		thread(false, false, botUser, "internal/batch/path.go", 17, "🚩 **Batch path swallows the second error**"),
+		thread(false, true, botUser, "internal/old/outdated.go", 3, "🔴 **Outdated: the code this anchored to changed**"),
+		thread(true, false, botUser, "internal/old/resolved.go", 5, "🔴 **Resolved: someone marked this done**"),
+		thread(false, false, "some-human", "internal/human/note.go", 9, "🔴 high severity concern from a human"),
+	}
+}
+
+func TestGetBotFindingsReturnsOnlyLiveBotThreads(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: inlineCommentsJSON}}), nil, "test/repo")
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...),
+	}), nil, "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
 		t.Fatalf("GetBotFindings() error = %v", err)
 	}
+	// Only the two LIVE bot threads survive: the outdated and resolved bot threads
+	// are addressed, and the human thread fails the first-comment-author filter.
 	if len(findings) != 2 {
-		t.Fatalf("len(findings) = %d, want 2 (two head-scoped inline; stale-sha, human, and top-level summary dropped): %+v", len(findings), findings)
+		t.Fatalf("len(findings) = %d, want 2 (live bot threads only; outdated/resolved/human dropped): %+v", len(findings), findings)
 	}
 
-	// Top-level issue/summary comments must never leak in as findings: they carry
-	// no Path/SHA and so cannot be scoped to a head. Every returned finding must be
-	// a file-scoped inline comment.
+	// Every returned finding must be file-scoped (a thread with a path anchor).
 	for i, f := range findings {
 		if f.Path == "" {
-			t.Errorf("findings[%d] = %+v, want a file-scoped finding (no top-level summary leak)", i, f)
+			t.Errorf("findings[%d] = %+v, want a file-scoped finding", i, f)
 		}
 	}
 
-	// findings[0]: 🔴 inline -> high, file-scoped to headSHA.
+	// findings[0]: 🔴 -> high, file-scoped, with the thread comment URL preserved.
 	if findings[0].Severity != "high" {
 		t.Errorf("findings[0].Severity = %q, want high", findings[0].Severity)
 	}
@@ -286,16 +321,21 @@ func TestGetBotFindingsFiltersBotParsesSeverityAndScopesToHead(t *testing.T) {
 	if findings[0].Line != 42 {
 		t.Errorf("findings[0].Line = %d, want 42", findings[0].Line)
 	}
-	if findings[0].CommitID != headSHA {
-		t.Errorf("findings[0].CommitID = %q, want %q", findings[0].CommitID, headSHA)
-	}
 	if findings[0].URL == "" {
 		t.Errorf("findings[0].URL is empty, want the discussion URL")
 	}
 
-	// findings[1]: 🚩 inline -> medium.
+	// findings[1]: 🚩 -> medium.
 	if findings[1].Severity != "medium" {
 		t.Errorf("findings[1].Severity = %q, want medium", findings[1].Severity)
+	}
+
+	// No outdated/resolved finding may leak in: none of the addressed paths appear.
+	for _, f := range findings {
+		switch f.Path {
+		case "internal/old/outdated.go", "internal/old/resolved.go", "internal/human/note.go":
+			t.Errorf("addressed/non-bot thread leaked as a finding: %+v", f)
+		}
 	}
 }
 
@@ -306,19 +346,20 @@ func TestGetReviewVerdictChangesRequested(t *testing.T) {
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
 		},
-		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: inlineCommentsJSON}}), nil, "test/repo")
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...)}), nil, "test/repo")
 
 	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
 		t.Fatalf("GetReviewVerdict() error = %v", err)
 	}
 	if verdict != scm.VerdictChangesRequested {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (severe inline findings on headSHA)", verdict, scm.VerdictChangesRequested)
+		t.Fatalf("GetReviewVerdict() = %q, want %q (a live severe finding remains)", verdict, scm.VerdictChangesRequested)
 	}
 	// The verdict path returns the findings it read so the caller need not refetch:
-	// two head-scoped inline findings (the top-level summary is not a finding).
+	// two LIVE findings (the outdated/resolved bot threads and the human thread are
+	// excluded).
 	if len(findings) != 2 {
-		t.Fatalf("GetReviewVerdict() findings = %d, want 2 (returned alongside the verdict)", len(findings))
+		t.Fatalf("GetReviewVerdict() findings = %d, want 2 (live findings returned alongside the verdict)", len(findings))
 	}
 }
 
@@ -332,9 +373,11 @@ func TestGetReviewVerdictHonorsChangesRequestedState(t *testing.T) {
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
 		},
-		"gh api repos/test/repo/pulls/7/comments --paginate": {
-			stdout: `[{"path":"a.go","line":1,"body":"please follow up here","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"u","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
-		}}), nil, "test/repo")
+		// One LIVE thread whose body parses as a non-severe nit, so only the native
+		// CHANGES_REQUESTED state can be driving the verdict.
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
+			thread(false, false, botUser, "a.go", 1, "nit: please follow up here"),
+		)}), nil, "test/repo")
 
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -358,7 +401,7 @@ func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"devin-ai-integration[bot]"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
 		},
-		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: `[]` + "\n"},
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
 	}), nil, "test/repo")
 
 	verdict, _, err := approvedLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
@@ -375,7 +418,7 @@ func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T02:00:00Z","user":{"login":"devin-ai-integration[bot]"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
 		},
-		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: `[]` + "\n"},
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
 	}), nil, "test/repo")
 
 	verdict2, _, err := changesLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
@@ -387,25 +430,35 @@ func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
 	}
 }
 
-func TestGetReviewVerdictApproved(t *testing.T) {
+// TestGetReviewVerdictConvergesWhenSevereThreadsAddressed is the convergence
+// case: the bot reviewed the head and its only severe threads are now outdated
+// (code changed) or resolved. With no LIVE severe finding and no native
+// CHANGES_REQUESTED state, the verdict must clear to APPROVED so the post-PR
+// review loop can finally converge — Devin re-anchors old comments onto the head,
+// so a REST read would still count these as live and the loop would never clear.
+func TestGetReviewVerdictConvergesWhenSevereThreadsAddressed(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
 		},
-		// Bot reviewed headSHA but left only a top-level summary (no file-scoped
-		// findings), and a stale finding from a prior commit that scopes out.
-		"gh api repos/test/repo/pulls/7/comments --paginate": {
-			stdout: `[{"path":"internal/old/stale.go","line":3,"body":"🔴 **Stale finding from a previous commit**","commit_id":"0000oldsha","original_commit_id":"0000oldsha","html_url":"u","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
-		}}), nil, "test/repo")
+		// Two severe bot threads, but both are addressed: one outdated, one resolved.
+		// No live severe finding remains.
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
+			thread(false, true, botUser, "internal/old/outdated.go", 3, "🔴 **Outdated severe finding**"),
+			thread(true, false, botUser, "internal/old/resolved.go", 5, "🔴 **Resolved severe finding**"),
+		)}), nil, "test/repo")
 
-	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
 		t.Fatalf("GetReviewVerdict() error = %v", err)
 	}
 	if verdict != scm.VerdictApproved {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (reviewed headSHA, no severe head-scoped findings)", verdict, scm.VerdictApproved)
+		t.Fatalf("GetReviewVerdict() = %q, want %q (all severe threads outdated/resolved)", verdict, scm.VerdictApproved)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("GetReviewVerdict() findings = %d, want 0 (no live findings remain): %+v", len(findings), findings)
 	}
 }
 
@@ -417,9 +470,8 @@ func TestGetReviewVerdictPendingWhenHeadNotYetReviewed(t *testing.T) {
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"COMMENTED","commit_id":"0000oldsha","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
 		},
-		// The bot only reviewed an older commit, so its inline comments scope out
-		// of headSHA: no head-scoped findings remain.
-		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: `[]` + "\n"}}), nil, "test/repo")
+		// No live review threads remain on the head.
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse()}), nil, "test/repo")
 
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -473,78 +525,82 @@ func TestGetReviewVerdictEmptyHeadSHAIsNotYetReviewed(t *testing.T) {
 	}
 }
 
-// TestGetBotFindingsEmptyHeadSHAMatchesNoInlineFindings verifies commentMatchesHead
-// is fail-safe: with no head SHA, inline comments from any commit must not be
-// returned as head-scoped findings (no file-scoped finding leaks through).
-func TestGetBotFindingsEmptyHeadSHAMatchesNoInlineFindings(t *testing.T) {
+// TestGetBotFindingsEmptyHeadSHAIsFailSafe verifies the empty-head fail-safe:
+// with no head SHA the read layer reports no findings and short-circuits before
+// any gh round-trip (the cmd factory is given no responses, so any call would
+// fail the command). This mirrors GetReviewVerdict's empty-head behavior.
+func TestGetBotFindingsEmptyHeadSHAIsFailSafe(t *testing.T) {
 	t.Parallel()
 
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: inlineCommentsJSON}}), nil, "test/repo")
+	for _, head := range []string{"", "   "} {
+		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "test/repo")
 
-	findings, err := host.GetBotFindings(context.Background(), 7, "", botUser)
-	if err != nil {
-		t.Fatalf("GetBotFindings() error = %v", err)
-	}
-	for _, f := range findings {
-		if f.Path != "" {
-			t.Fatalf("empty head must not yield file-scoped findings, got %+v", f)
+		findings, err := host.GetBotFindings(context.Background(), 7, head, botUser)
+		if err != nil {
+			t.Fatalf("GetBotFindings(head=%q) error = %v", head, err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("GetBotFindings(head=%q) = %d findings, want 0 (fail-safe, no gh call)", head, len(findings))
 		}
 	}
 }
 
-func TestGetReviewVerdictPaginatesPastFirstPage(t *testing.T) {
+// TestGetBotFindingsCollectsAllLiveThreadsAndSevereFlipsVerdict models a busy PR:
+// many live low/nit threads plus one live severe thread, interleaved with
+// addressed (outdated/resolved) severe threads that must NOT count. The read
+// layer must return every live thread and the verdict must be CHANGES_REQUESTED
+// because a live severe finding remains.
+func TestGetBotFindingsCollectsAllLiveThreadsAndSevereFlipsVerdict(t *testing.T) {
 	t.Parallel()
 
-	// `gh api --paginate` merges every page into one JSON array. Model a response
-	// whose first 30 entries are benign (low) and whose 31st - which only exists
-	// because page 2 was fetched - is a severe finding tied to headSHA. If the
-	// read stopped at page 1 this severe finding would be dropped and the gate
-	// would wrongly approve.
-	var b strings.Builder
-	b.WriteString("[")
+	var nodes []string
 	for i := 0; i < 30; i++ {
-		if i > 0 {
-			b.WriteString(",")
-		}
-		fmt.Fprintf(&b, `{"path":"p%d.go","line":%d,"body":"nit: minor style","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"u%d","user":{"login":"devin-ai-integration[bot]"}}`, i, i+1, i)
+		nodes = append(nodes, thread(false, false, botUser, fmt.Sprintf("p%d.go", i), i+1, "nit: minor style"))
 	}
-	b.WriteString(`,{"path":"deep/page2.go","line":99,"body":"🔴 **Severe bug only visible on page 2**","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"u-page2","user":{"login":"devin-ai-integration[bot]"}}`)
-	b.WriteString("]\n")
+	// Addressed severe threads (must be excluded) and one live severe thread.
+	nodes = append(nodes,
+		thread(false, true, botUser, "addressed/outdated.go", 7, "🔴 **Outdated severe finding**"),
+		thread(true, false, botUser, "addressed/resolved.go", 8, "🔴 **Resolved severe finding**"),
+		thread(false, false, botUser, "deep/live.go", 99, "🔴 **Live severe bug**"),
+	)
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
 		},
-		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: b.String()}}), nil, "test/repo")
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(nodes...)}), nil, "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
 		t.Fatalf("GetBotFindings() error = %v", err)
 	}
+	// 30 live nits + 1 live severe = 31; the two addressed severe threads drop out.
 	if len(findings) != 31 {
-		t.Fatalf("GetBotFindings() = %d findings, want 31 (all pages merged)", len(findings))
+		t.Fatalf("GetBotFindings() = %d findings, want 31 (all live threads, addressed excluded)", len(findings))
 	}
-	sawPage2 := false
+	sawLiveSevere := false
 	for _, f := range findings {
-		if f.Path == "deep/page2.go" {
-			sawPage2 = true
+		switch f.Path {
+		case "deep/live.go":
+			sawLiveSevere = true
 			if f.Severity != "high" {
-				t.Errorf("page-2 finding severity = %q, want high", f.Severity)
+				t.Errorf("live severe finding severity = %q, want high", f.Severity)
 			}
+		case "addressed/outdated.go", "addressed/resolved.go":
+			t.Errorf("addressed thread leaked as a finding: %+v", f)
 		}
 	}
-	if !sawPage2 {
-		t.Fatal("page-2 finding was dropped: pagination not applied to PR review comments")
+	if !sawLiveSevere {
+		t.Fatal("live severe finding was dropped")
 	}
 
-	// The severe page-2 finding must flip the verdict to changes-requested.
+	// The live severe finding must flip the verdict to changes-requested.
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
 		t.Fatalf("GetReviewVerdict() error = %v", err)
 	}
 	if verdict != scm.VerdictChangesRequested {
-		t.Fatalf("GetReviewVerdict() = %q, want CHANGES_REQUESTED (severe finding beyond page 1)", verdict)
+		t.Fatalf("GetReviewVerdict() = %q, want CHANGES_REQUESTED (a live severe finding remains)", verdict)
 	}
 }
 
