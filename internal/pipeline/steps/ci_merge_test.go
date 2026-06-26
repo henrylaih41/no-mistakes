@@ -289,7 +289,7 @@ func TestCIStep_MergeConflictAutoFixPromptUsesBaseBranchTip(t *testing.T) {
 		t.Fatalf("buildHost returned nil: %s", skip)
 	}
 	pr := &scm.PR{Number: "42", URL: prURL}
-	_, err := step.autoFixCI(sctx, host, pr, nil, true)
+	_, err := step.autoFixCI(sctx, host, pr, nil, true, nil)
 	if err != nil {
 		t.Fatalf("auto-fix CI: %v", err)
 	}

@@ -25,6 +25,20 @@ const (
 	// ChecksRunningMsg is logged when checks are (re-)running with no failures
 	// yet, which clears any previous passed-checks state.
 	ChecksRunningMsg = "CI checks running, waiting for results..."
+
+	// WaitingOnReviewMsg is logged when CI checks have passed but the post-PR
+	// review bot (Devin) has not yet posted a verdict for the current head SHA,
+	// so the PR is not yet ready to merge. Only emitted when the review loop is
+	// enabled; with the loop disabled (the default) it never appears, so the
+	// "checks passed" vocabulary is byte-identical to before.
+	WaitingOnReviewMsg = "waiting on Devin review before the PR is ready to merge"
+	// ReviewChangesRequestedMsg is logged when the review bot has requested
+	// changes (unresolved severe findings) on the current head SHA; no-mistakes
+	// will auto-fix and push.
+	ReviewChangesRequestedMsg = "Devin requested changes on the current commit"
+	// ReReviewingMsg is logged after a fix push while the review bot re-reviews
+	// the new head SHA; the PR is not ready to merge until that re-review lands.
+	ReReviewingMsg = "Devin re-reviewing new commit"
 )
 
 // Activity summarizes what the CI step has been doing, derived from its logs.
@@ -62,6 +76,19 @@ func ParseActivity(logs []string) Activity {
 		case line == ChecksPassedMsg || line == NoChecksPassedMsg:
 			a.AutoFixing = false
 			a.Ready = true
+			a.LastEvent = line
+		case strings.Contains(line, ReviewChangesRequestedMsg):
+			// The review bot wants changes; a fix push follows. Not ready, and
+			// an auto-fix round is effectively in progress.
+			a.AutoFixing = true
+			a.Ready = false
+			a.LastEvent = line
+		case strings.Contains(line, WaitingOnReviewMsg),
+			strings.Contains(line, ReReviewingMsg):
+			// Checks may be green, but the review verdict for the current head
+			// is still pending/in-flight, so the PR is not ready to merge.
+			a.AutoFixing = false
+			a.Ready = false
 			a.LastEvent = line
 		case strings.Contains(line, "issues detected"),
 			strings.Contains(line, "CI checks running"),

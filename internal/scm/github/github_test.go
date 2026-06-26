@@ -233,6 +233,526 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 	}
 }
 
+// Canned `gh api graphql` data modeled on a real Devin PR. The read layer now
+// reads review THREADS (not flat REST comments) so it can honor each thread's
+// isResolved/isOutdated state: GitHub re-anchors a bot's old comments onto the
+// head, so a REST read reports already-addressed comments as live and the
+// verdict never clears. Only live (unresolved AND not-outdated) bot threads are
+// findings.
+const (
+	headSHA = "abc123def"
+	botUser = "devin-ai-integration[bot]"
+)
+
+// graphqlThreadsKey is the cmd-factory key for the `gh api graphql` reviewThreads
+// read GetBotFindings issues. It is derived from the same args builder the
+// production code uses, so the canned response is keyed byte-for-byte as the call
+// site emits it (the query string carries spaces, so hand-writing the key is
+// brittle).
+func graphqlThreadsKey(repo string, prNumber int, cursor ...string) string {
+	h := &Host{repo: repo}
+	c := ""
+	if len(cursor) > 0 {
+		c = cursor[0]
+	}
+	return strings.TrimSpace("gh " + strings.Join(h.reviewThreadsArgs(prNumber, c), " "))
+}
+
+// reviewThreadsResponse wraps thread nodes in the graphql envelope the production
+// parser expects. It models a SINGLE page (hasNextPage:false); use
+// reviewThreadsPage to model a paginated response.
+func reviewThreadsResponse(nodes ...string) githubTestResponse {
+	return reviewThreadsPage(false, "", nodes...)
+}
+
+// reviewThreadsPage renders one page of the reviewThreads envelope, including the
+// pageInfo{hasNextPage endCursor} the production cursor-pagination loop consumes.
+func reviewThreadsPage(hasNextPage bool, endCursor string, nodes ...string) githubTestResponse {
+	return githubTestResponse{
+		stdout: fmt.Sprintf(
+			`{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":%t,"endCursor":%q},"nodes":[`,
+			hasNextPage, endCursor,
+		) + strings.Join(nodes, ",") + `]}}}}}` + "\n",
+	}
+}
+
+// threadID renders one reviewThreads node: its resolution/outdated flags plus a
+// single anchoring comment (author/databaseId/path/line/body).
+func threadID(databaseID int64, resolved, outdated bool, author, path string, line int, body string) string {
+	return fmt.Sprintf(
+		`{"isResolved":%t,"isOutdated":%t,"comments":{"nodes":[{"author":{"login":%q},"databaseId":%d,"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/7#discussion"}]}}`,
+		resolved, outdated, author, databaseID, path, line, line, body,
+	)
+}
+
+// thread is threadID with a zero databaseId, for tests that don't exercise the id.
+func thread(resolved, outdated bool, author, path string, line int, body string) string {
+	return threadID(0, resolved, outdated, author, path, line, body)
+}
+
+// liveThreads is the MIX used across the read-layer tests: two LIVE bot findings
+// (🔴 high + 🚩 medium), one OUTDATED bot finding (the anchored code changed =
+// addressed), one RESOLVED bot finding (someone closed it), and one LIVE
+// human-authored thread (fails the bot-login filter). Only the two live bot
+// threads are findings.
+func liveThreads() []string {
+	return []string{
+		thread(false, false, botUser, "internal/batch/download.go", 42, "🔴 **Batch download crashes on empty manifest**"),
+		thread(false, false, botUser, "internal/batch/path.go", 17, "🚩 **Batch path swallows the second error**"),
+		thread(false, true, botUser, "internal/old/outdated.go", 3, "🔴 **Outdated: the code this anchored to changed**"),
+		thread(true, false, botUser, "internal/old/resolved.go", 5, "🔴 **Resolved: someone marked this done**"),
+		thread(false, false, "some-human", "internal/human/note.go", 9, "🔴 high severity concern from a human"),
+	}
+}
+
+func TestGetBotFindingsReturnsOnlyLiveBotThreads(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...),
+	}), nil, "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetBotFindings() error = %v", err)
+	}
+	// Only the two LIVE bot threads survive: the outdated and resolved bot threads
+	// are addressed, and the human thread fails the first-comment-author filter.
+	if len(findings) != 2 {
+		t.Fatalf("len(findings) = %d, want 2 (live bot threads only; outdated/resolved/human dropped): %+v", len(findings), findings)
+	}
+
+	// Every returned finding must be file-scoped (a thread with a path anchor).
+	for i, f := range findings {
+		if f.Path == "" {
+			t.Errorf("findings[%d] = %+v, want a file-scoped finding", i, f)
+		}
+	}
+
+	// findings[0]: 🔴 -> high, file-scoped, with the thread comment URL preserved.
+	if findings[0].Severity != "high" {
+		t.Errorf("findings[0].Severity = %q, want high", findings[0].Severity)
+	}
+	if findings[0].Path != "internal/batch/download.go" {
+		t.Errorf("findings[0].Path = %q, want internal/batch/download.go", findings[0].Path)
+	}
+	if findings[0].Line != 42 {
+		t.Errorf("findings[0].Line = %d, want 42", findings[0].Line)
+	}
+	if findings[0].URL == "" {
+		t.Errorf("findings[0].URL is empty, want the discussion URL")
+	}
+
+	// findings[1]: 🚩 -> medium.
+	if findings[1].Severity != "medium" {
+		t.Errorf("findings[1].Severity = %q, want medium", findings[1].Severity)
+	}
+
+	// No outdated/resolved finding may leak in: none of the addressed paths appear.
+	for _, f := range findings {
+		switch f.Path {
+		case "internal/old/outdated.go", "internal/old/resolved.go", "internal/human/note.go":
+			t.Errorf("addressed/non-bot thread leaked as a finding: %+v", f)
+		}
+	}
+}
+
+func TestGetReviewVerdictChangesRequested(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...)}), nil, "test/repo")
+
+	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictChangesRequested {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (a live severe finding remains)", verdict, scm.VerdictChangesRequested)
+	}
+	// The verdict path returns the findings it read so the caller need not refetch:
+	// two LIVE findings (the outdated/resolved bot threads and the human thread are
+	// excluded).
+	if len(findings) != 2 {
+		t.Fatalf("GetReviewVerdict() findings = %d, want 2 (live findings returned alongside the verdict)", len(findings))
+	}
+}
+
+func TestGetReviewVerdictHonorsChangesRequestedState(t *testing.T) {
+	t.Parallel()
+
+	// A native CHANGES_REQUESTED review on the head with NO inline finding that
+	// parses as severe must still be not-green: the explicit request-changes state
+	// is authoritative on its own.
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		// One LIVE thread whose body parses as a non-severe nit, so only the native
+		// CHANGES_REQUESTED state can be driving the verdict.
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
+			thread(false, false, botUser, "a.go", 1, "nit: please follow up here"),
+		)}), nil, "test/repo")
+
+	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictChangesRequested {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (native CHANGES_REQUESTED state honored)", verdict, scm.VerdictChangesRequested)
+	}
+}
+
+// TestGetReviewVerdictUsesMostRecentHeadReview verifies the verdict follows the
+// MOST RECENT bot review on the head (by submitted_at), not the OR of every
+// state in the head's review history: a bot that requested changes and then
+// re-reviewed the SAME SHA as APPROVED must clear (and vice versa).
+func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
+	t.Parallel()
+
+	// Earlier CHANGES_REQUESTED, later APPROVED on the same head, no severe inline
+	// findings: the most recent review approves, so the verdict clears.
+	approvedLast := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"devin-ai-integration[bot]"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
+	}), nil, "test/repo")
+
+	verdict, _, err := approvedLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictApproved {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (most recent head review approved)", verdict, scm.VerdictApproved)
+	}
+
+	// Reverse order (timestamps deliberately out of array order): a later
+	// CHANGES_REQUESTED after an earlier APPROVED stays not-green.
+	changesLast := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T02:00:00Z","user":{"login":"devin-ai-integration[bot]"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
+	}), nil, "test/repo")
+
+	verdict2, _, err := changesLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict2 != scm.VerdictChangesRequested {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (most recent head review requested changes)", verdict2, scm.VerdictChangesRequested)
+	}
+}
+
+// TestGetReviewVerdictConvergesWhenSevereThreadsAddressed is the convergence
+// case: the bot reviewed the head and its only severe threads are now outdated
+// (code changed) or resolved. With no LIVE severe finding and no native
+// CHANGES_REQUESTED state, the verdict must clear to APPROVED so the post-PR
+// review loop can finally converge — Devin re-anchors old comments onto the head,
+// so a REST read would still count these as live and the loop would never clear.
+func TestGetReviewVerdictConvergesWhenSevereThreadsAddressed(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		// Two severe bot threads, but both are addressed: one outdated, one resolved.
+		// No live severe finding remains.
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
+			thread(false, true, botUser, "internal/old/outdated.go", 3, "🔴 **Outdated severe finding**"),
+			thread(true, false, botUser, "internal/old/resolved.go", 5, "🔴 **Resolved severe finding**"),
+		)}), nil, "test/repo")
+
+	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictApproved {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (all severe threads outdated/resolved)", verdict, scm.VerdictApproved)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("GetReviewVerdict() findings = %d, want 0 (no live findings remain): %+v", len(findings), findings)
+	}
+}
+
+func TestGetReviewVerdictPendingWhenHeadNotYetReviewed(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		// Bot has reviewed before, but only an older commit - not headSHA.
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"COMMENTED","commit_id":"0000oldsha","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		// No live review threads remain on the head.
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse()}), nil, "test/repo")
+
+	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictPending {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (bot reviewed an older sha, not headSHA)", verdict, scm.VerdictPending)
+	}
+}
+
+func TestGetReviewVerdictNoneWhenBotNeverReviewed(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		// Only a human review exists; the bot has never reviewed.
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"APPROVED","commit_id":"abc123def","user":{"login":"some-human"}}]` + "\n",
+		},
+	}), nil, "test/repo")
+
+	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictNone {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (bot never reviewed)", verdict, scm.VerdictNone)
+	}
+}
+
+// TestGetReviewVerdictEmptyHeadSHAIsNotYetReviewed verifies the fail-safe for an
+// empty (or whitespace-only) head SHA: without a head to scope to, the verdict
+// must be VerdictNone with no findings instead of treating the empty SHA as a
+// wildcard that matches every review/comment in the PR's history. It must also
+// short-circuit before any `gh` round-trip, so the cmd factory is given no
+// responses (any call would fail the command).
+func TestGetReviewVerdictEmptyHeadSHAIsNotYetReviewed(t *testing.T) {
+	t.Parallel()
+
+	for _, head := range []string{"", "   "} {
+		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "test/repo")
+		verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, head, botUser)
+		if err != nil {
+			t.Fatalf("GetReviewVerdict(head=%q) error = %v", head, err)
+		}
+		if verdict != scm.VerdictNone {
+			t.Fatalf("GetReviewVerdict(head=%q) = %q, want %q (can't scope to a head)", head, verdict, scm.VerdictNone)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("GetReviewVerdict(head=%q) findings = %d, want 0", head, len(findings))
+		}
+	}
+}
+
+// TestGetBotFindingsEmptyHeadSHAIsFailSafe verifies the empty-head fail-safe:
+// with no head SHA the read layer reports no findings and short-circuits before
+// any gh round-trip (the cmd factory is given no responses, so any call would
+// fail the command). This mirrors GetReviewVerdict's empty-head behavior.
+func TestGetBotFindingsEmptyHeadSHAIsFailSafe(t *testing.T) {
+	t.Parallel()
+
+	for _, head := range []string{"", "   "} {
+		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "test/repo")
+
+		findings, err := host.GetBotFindings(context.Background(), 7, head, botUser)
+		if err != nil {
+			t.Fatalf("GetBotFindings(head=%q) error = %v", head, err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("GetBotFindings(head=%q) = %d findings, want 0 (fail-safe, no gh call)", head, len(findings))
+		}
+	}
+}
+
+// TestGetBotFindingsCollectsAllLiveThreadsAndSevereFlipsVerdict models a busy PR:
+// many live low/nit threads plus one live severe thread, interleaved with
+// addressed (outdated/resolved) severe threads that must NOT count. The read
+// layer must return every live thread and the verdict must be CHANGES_REQUESTED
+// because a live severe finding remains.
+func TestGetBotFindingsCollectsAllLiveThreadsAndSevereFlipsVerdict(t *testing.T) {
+	t.Parallel()
+
+	var nodes []string
+	for i := 0; i < 30; i++ {
+		nodes = append(nodes, thread(false, false, botUser, fmt.Sprintf("p%d.go", i), i+1, "nit: minor style"))
+	}
+	// Addressed severe threads (must be excluded) and one live severe thread.
+	nodes = append(nodes,
+		thread(false, true, botUser, "addressed/outdated.go", 7, "🔴 **Outdated severe finding**"),
+		thread(true, false, botUser, "addressed/resolved.go", 8, "🔴 **Resolved severe finding**"),
+		thread(false, false, botUser, "deep/live.go", 99, "🔴 **Live severe bug**"),
+	)
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(nodes...)}), nil, "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetBotFindings() error = %v", err)
+	}
+	// 30 live nits + 1 live severe = 31; the two addressed severe threads drop out.
+	if len(findings) != 31 {
+		t.Fatalf("GetBotFindings() = %d findings, want 31 (all live threads, addressed excluded)", len(findings))
+	}
+	sawLiveSevere := false
+	for _, f := range findings {
+		switch f.Path {
+		case "deep/live.go":
+			sawLiveSevere = true
+			if f.Severity != "high" {
+				t.Errorf("live severe finding severity = %q, want high", f.Severity)
+			}
+		case "addressed/outdated.go", "addressed/resolved.go":
+			t.Errorf("addressed thread leaked as a finding: %+v", f)
+		}
+	}
+	if !sawLiveSevere {
+		t.Fatal("live severe finding was dropped")
+	}
+
+	// The live severe finding must flip the verdict to changes-requested.
+	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictChangesRequested {
+		t.Fatalf("GetReviewVerdict() = %q, want CHANGES_REQUESTED (a live severe finding remains)", verdict)
+	}
+}
+
+// TestGetReviewVerdictPaginatesReviewThreads guards the false-APPROVED risk: when
+// the PR's review threads span more than one page, a live severe finding that
+// lands on page 2 must still be seen. reviewThreads returns threads oldest-first
+// and counts addressed/resolved threads toward the first:100 window, so without
+// cursor pagination the newest severe finding could be truncated past page 1 and
+// the verdict would wrongly read APPROVED.
+func TestGetReviewVerdictPaginatesReviewThreads(t *testing.T) {
+	t.Parallel()
+
+	// Page 1 carries only non-severe / already-addressed threads, so on its own it
+	// would read APPROVED. The cursor advances to page 2.
+	page1 := []string{
+		thread(false, false, botUser, "p1-nit.go", 1, "nit: minor style"),
+		thread(false, true, botUser, "p1-outdated.go", 2, "🔴 **Outdated severe (addressed)**"),
+	}
+	// Page 2 carries the LIVE severe finding that must flip the verdict.
+	page2 := []string{
+		thread(false, false, botUser, "p2-live.go", 9, "🔴 **Live severe bug on page 2**"),
+	}
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		graphqlThreadsKey("test/repo", 7):            reviewThreadsPage(true, "CURSOR1", page1...),
+		graphqlThreadsKey("test/repo", 7, "CURSOR1"): reviewThreadsPage(false, "", page2...),
+	}), nil, "test/repo")
+
+	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictChangesRequested {
+		t.Fatalf("verdict = %q, want CHANGES_REQUESTED (the live severe finding on page 2 must be seen, not truncated)", verdict)
+	}
+	sawPage2 := false
+	for _, f := range findings {
+		if f.Path == "p2-live.go" {
+			sawPage2 = true
+		}
+	}
+	if !sawPage2 {
+		t.Fatalf("page-2 live severe finding missing from accumulated findings: %+v", findings)
+	}
+}
+
+// TestGetBotFindingsPopulatesCommentID asserts the graphql databaseId is surfaced
+// as ReviewComment.ID, which the review loop needs to thread a reply on a finding.
+func TestGetBotFindingsPopulatesCommentID(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
+			threadID(987654321, false, false, botUser, "a.go", 3, "🔴 **bug**"),
+		)}), nil, "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetBotFindings() error = %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("len(findings) = %d, want 1", len(findings))
+	}
+	if findings[0].ID != 987654321 {
+		t.Fatalf("findings[0].ID = %d, want 987654321 (the comment databaseId)", findings[0].ID)
+	}
+}
+
+// TestReplyToReviewComment asserts the POST is issued to the replies endpoint with
+// the body passed as a raw -f field.
+func TestReplyToReviewComment(t *testing.T) {
+	t.Parallel()
+
+	const body = "Addressed in deadbeef by no-mistakes."
+	key := "gh api repos/test/repo/pulls/7/comments/4242/replies -f body=" + body
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		key: {stdout: `{"id":1}` + "\n"},
+	}), nil, "test/repo")
+
+	if err := host.ReplyToReviewComment(context.Background(), 7, 4242, body); err != nil {
+		t.Fatalf("ReplyToReviewComment() error = %v", err)
+	}
+}
+
+// TestReplyToReviewCommentSurfacesError asserts a failed gh call returns an error
+// (so the caller can log it best-effort).
+func TestReplyToReviewCommentSurfacesError(t *testing.T) {
+	t.Parallel()
+
+	// No canned response => the factory returns a non-zero exit for the call.
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "test/repo")
+	if err := host.ReplyToReviewComment(context.Background(), 7, 4242, "body"); err == nil {
+		t.Fatal("expected an error when the gh api replies call fails")
+	}
+}
+
+func TestSeverityFromBody(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		body string
+		want string
+	}{
+		// high requires the explicit 🔴 marker; 🚩 marks medium.
+		{"🔴 **Batch download crashes**", "high"},
+		{"🚩 **Batch path swallows error**", "medium"},
+		{"low severity issue", "low"},
+		{"nit: rename this", "low"},
+		{"some unmarked observation", "medium"},
+		// The keyword fallback never escalates to high: bare/negated/contextual
+		// mentions of severe words must NOT register as high (they default to the
+		// conservative medium, which still gates).
+		{"This is a clear bug in the loop", "medium"},
+		{"this is not a bug", "medium"},
+		{"no critical issues here", "medium"},
+		{"high severity issue", "medium"},
+		{"medium severity issue", "medium"},
+		// Word-boundary matching: "low" as a substring of these words must not
+		// downgrade an otherwise-unmarked (default medium) finding to low.
+		{"please follow up on this", "medium"},
+		{"we should allow this pattern", "medium"},
+		{"this sits just below the limit", "medium"},
+		{"the data should flow through here", "medium"},
+	}
+	for _, tc := range cases {
+		if got := severityFromBody(tc.body); got != tc.want {
+			t.Errorf("severityFromBody(%q) = %q, want %q", tc.body, got, tc.want)
+		}
+	}
+}
+
 type githubTestResponse struct {
 	stdout string
 	stderr string

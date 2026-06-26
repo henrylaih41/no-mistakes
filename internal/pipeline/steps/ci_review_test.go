@@ -1,0 +1,637 @@
+package steps
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
+)
+
+// fakeReviewHost is a minimal scm.Host that serves canned review verdict/findings
+// (and records the args the loop calls them with). Only the review methods carry
+// behavior; the rest satisfy the interface and are unused by the review loop.
+type fakeReviewHost struct {
+	caps     scm.Capabilities
+	verdict  scm.ReviewVerdict
+	verdErr  error
+	findings []scm.ReviewComment
+	findErr  error
+	replyErr error // when set, every ReplyToReviewComment returns it
+
+	verdictCalls  int
+	findingsCalls int
+	gotHeadSHA    string
+	gotBotLogin   string
+	gotPRNumber   int
+
+	// replies records each ReplyToReviewComment call so tests can assert which
+	// findings were acknowledged after a fix push.
+	replies []reviewReply
+}
+
+// reviewReply captures one ReplyToReviewComment call.
+type reviewReply struct {
+	prNumber  int
+	commentID int64
+	body      string
+}
+
+func (h *fakeReviewHost) Provider() scm.Provider          { return scm.ProviderGitHub }
+func (h *fakeReviewHost) Capabilities() scm.Capabilities  { return h.caps }
+func (h *fakeReviewHost) Available(context.Context) error { return nil }
+func (h *fakeReviewHost) FindPR(context.Context, string, string) (*scm.PR, error) {
+	return nil, nil
+}
+func (h *fakeReviewHost) CreatePR(context.Context, string, string, scm.PRContent) (*scm.PR, error) {
+	return nil, nil
+}
+func (h *fakeReviewHost) UpdatePR(context.Context, *scm.PR, scm.PRContent) (*scm.PR, error) {
+	return nil, nil
+}
+func (h *fakeReviewHost) GetPRState(context.Context, *scm.PR) (scm.PRState, error) {
+	return scm.PRStateOpen, nil
+}
+func (h *fakeReviewHost) GetChecks(context.Context, *scm.PR) ([]scm.Check, error) {
+	return nil, nil
+}
+func (h *fakeReviewHost) GetMergeableState(context.Context, *scm.PR) (scm.MergeableState, error) {
+	return scm.MergeableUnknown, scm.ErrUnsupported
+}
+func (h *fakeReviewHost) FetchFailedCheckLogs(context.Context, *scm.PR, string, string, []string) (string, error) {
+	return "", scm.ErrUnsupported
+}
+func (h *fakeReviewHost) GetReviewVerdict(_ context.Context, prNumber int, headSHA, botLogin string) (scm.ReviewVerdict, []scm.ReviewComment, error) {
+	h.verdictCalls++
+	h.gotPRNumber = prNumber
+	h.gotHeadSHA = headSHA
+	h.gotBotLogin = botLogin
+	if h.verdErr != nil {
+		return h.verdict, nil, h.verdErr
+	}
+	return h.verdict, h.findings, nil
+}
+func (h *fakeReviewHost) GetBotFindings(context.Context, int, string, string) ([]scm.ReviewComment, error) {
+	h.findingsCalls++
+	return h.findings, h.findErr
+}
+func (h *fakeReviewHost) ReplyToReviewComment(_ context.Context, prNumber int, commentID int64, body string) error {
+	h.replies = append(h.replies, reviewReply{prNumber: prNumber, commentID: commentID, body: body})
+	return h.replyErr
+}
+
+func severeFinding() scm.ReviewComment {
+	return scm.ReviewComment{Path: "a.go", Line: 10, Severity: "high", Body: "off-by-one"}
+}
+
+func TestEvalDevinGate(t *testing.T) {
+	t.Parallel()
+	enabled := config.ReviewLoop{Enabled: true, BotLogin: "bot", MaxRounds: 3, FailOpen: true}
+	failClosed := config.ReviewLoop{Enabled: true, BotLogin: "bot", MaxRounds: 3, FailOpen: false}
+	disabled := config.ReviewLoop{Enabled: false, FailOpen: true}
+
+	tests := []struct {
+		name     string
+		verdict  scm.ReviewVerdict
+		findings []scm.ReviewComment
+		cfg      config.ReviewLoop
+		elapsed  time.Duration
+		want     devinGateDecision
+	}{
+		{"disabled is inert", scm.VerdictChangesRequested, []scm.ReviewComment{severeFinding()}, disabled, time.Hour, devinDecisionDisabled},
+		{"approved is green", scm.VerdictApproved, nil, enabled, time.Hour, devinDecisionGreen},
+		{"changes requested is not green", scm.VerdictChangesRequested, nil, enabled, time.Minute, devinDecisionNotGreen},
+		{"severe finding overrides pending verdict", scm.VerdictPending, []scm.ReviewComment{severeFinding()}, enabled, time.Minute, devinDecisionNotGreen},
+		{"pending within grace waits", scm.VerdictPending, nil, enabled, devinGraceWindow - time.Minute, devinDecisionPending},
+		{"none within grace waits", scm.VerdictNone, nil, enabled, time.Minute, devinDecisionPending},
+		{"silent past grace fails open", scm.VerdictNone, nil, enabled, devinGraceWindow + time.Minute, devinDecisionFailOpen},
+		{"silent past grace fail-closed keeps waiting", scm.VerdictNone, nil, failClosed, devinGraceWindow + time.Minute, devinDecisionPending},
+		{"low finding within grace is not severe", scm.VerdictPending, []scm.ReviewComment{{Path: "a.go", Line: 1, Severity: "low", Body: "nit"}}, enabled, time.Minute, devinDecisionPending},
+		{"top-level summary is not severe", scm.VerdictPending, []scm.ReviewComment{{Severity: "high", Body: "overall looks risky"}}, enabled, time.Minute, devinDecisionPending},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := evalDevinGate(tt.verdict, tt.findings, tt.cfg, tt.elapsed); got != tt.want {
+				t.Errorf("evalDevinGate(%s) = %v, want %v", tt.verdict, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasUnresolvedSevereFindings(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   []scm.ReviewComment
+		want bool
+	}{
+		{"nil", nil, false},
+		{"file-scoped high", []scm.ReviewComment{severeFinding()}, true},
+		{"file-scoped medium", []scm.ReviewComment{{Path: "x", Line: 2, Severity: "MEDIUM"}}, true},
+		{"file-scoped low", []scm.ReviewComment{{Path: "x", Line: 2, Severity: "low"}}, false},
+		{"top-level high ignored", []scm.ReviewComment{{Severity: "high", Body: "summary"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasUnresolvedSevereFindings(tc.in); got != tc.want {
+				t.Errorf("hasUnresolvedSevereFindings = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDevinFindingFingerprints(t *testing.T) {
+	t.Parallel()
+	a := []scm.ReviewComment{
+		{Path: "a.go", Line: 1, Severity: "high", Body: "x"},
+		{Path: "b.go", Line: 2, Severity: "medium", Body: "y"},
+	}
+	// Order-independent and dedup-stable.
+	reordered := []scm.ReviewComment{a[1], a[0], a[0]}
+	if got, want := devinFindingFingerprints(a), devinFindingFingerprints(reordered); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("fingerprints not order/dedup stable: %v vs %v", got, want)
+	}
+	// Rewording a finding body must NOT change its fingerprint: the fingerprint
+	// keys on (Path, Line, Severity) only, so minor bot rewrites don't defeat
+	// anti-thrash.
+	reworded := []scm.ReviewComment{{Path: "a.go", Line: 1, Severity: "high", Body: "x2 reworded"}, a[1]}
+	if strings.Join(devinFindingFingerprints(a), ",") != strings.Join(devinFindingFingerprints(reworded), ",") {
+		t.Fatal("expected identical fingerprints when only the body changes")
+	}
+	// A changed severity (like a changed path or line) DOES produce a different
+	// fingerprint set, so a genuinely different finding re-triggers a fix.
+	changed := []scm.ReviewComment{{Path: "a.go", Line: 1, Severity: "medium", Body: "x"}, a[1]}
+	if strings.Join(devinFindingFingerprints(a), ",") == strings.Join(devinFindingFingerprints(changed), ",") {
+		t.Fatal("expected different fingerprints when a finding's severity changes")
+	}
+	if devinFindingFingerprints(nil) != nil {
+		t.Fatal("expected nil fingerprints for no findings")
+	}
+}
+
+func TestEncodeDevinFixKey(t *testing.T) {
+	t.Parallel()
+	// Empty inputs => empty key.
+	if got := encodeDevinFixKey(nil, false, "", nil); got != "" {
+		t.Fatalf("expected empty key, got %q", got)
+	}
+	// Devin-only key round-trips through decode (validity now considers prints).
+	key := encodeDevinFixKey(nil, false, "deadbeef", []string{"fp1", "fp2"})
+	if key == "" {
+		t.Fatal("expected non-empty Devin key")
+	}
+	issues, ok := decodeLastFixedChecks(key)
+	if !ok {
+		t.Fatal("expected Devin-only key to decode as valid")
+	}
+	if issues.HeadSHA != "deadbeef" || len(issues.DevinPrints) != 2 {
+		t.Fatalf("decoded key mismatch: %+v", issues)
+	}
+	// Different head SHA => different key (so a new commit re-evaluates).
+	if encodeDevinFixKey(nil, false, "cafe", []string{"fp1", "fp2"}) == key {
+		t.Fatal("expected different key for a different head SHA")
+	}
+}
+
+func TestEncodeLastFixedChecksByteIdenticalWhenDevinAbsent(t *testing.T) {
+	t.Parallel()
+	// The check/merge-conflict key must marshal identically whether produced by
+	// the legacy encoder or the Devin encoder with empty Devin inputs, so the
+	// review-loop-disabled anti-thrash bytes are unchanged.
+	legacy := encodeLastFixedChecks([]string{"build", "lint"}, true)
+	withDevin := encodeDevinFixKey([]string{"build", "lint"}, true, "", nil)
+	if legacy != withDevin {
+		t.Fatalf("key drift: legacy=%q devin=%q", legacy, withDevin)
+	}
+}
+
+func TestDevinFindingsPromptSection(t *testing.T) {
+	t.Parallel()
+	if got := devinFindingsPromptSection(nil); got != "" {
+		t.Fatalf("expected empty section for no findings, got %q", got)
+	}
+	got := devinFindingsPromptSection([]scm.ReviewComment{
+		{Path: "a.go", Line: 12, Severity: "high", Body: "leak"},
+		{Severity: "", Body: "general note"},
+		{Body: "   "}, // blank body skipped
+	})
+	if !strings.Contains(got, "a.go:12") || !strings.Contains(got, "leak") {
+		t.Fatalf("expected file-scoped finding rendered, got: %q", got)
+	}
+	if !strings.Contains(got, "(general)") || !strings.Contains(got, "unspecified") {
+		t.Fatalf("expected general/unspecified rendering, got: %q", got)
+	}
+	if strings.Count(got, "\n- ") != 2 {
+		t.Fatalf("expected 2 rendered findings (blank skipped), got: %q", got)
+	}
+	// Each finding body is fenced and labeled as untrusted data (prompt-injection
+	// hardening): a fence opener/closer per rendered finding plus the header note.
+	if !strings.Contains(got, "untrusted") {
+		t.Fatalf("expected the section to label finding text as untrusted, got: %q", got)
+	}
+	if strings.Count(got, "REVIEWER_TEXT") < 4 { // header note + (open+close) x2 findings
+		t.Fatalf("expected each finding body fenced in a REVIEWER_TEXT block, got: %q", got)
+	}
+
+	// An over-long (or hostile) body is truncated so it cannot flood the prompt.
+	long := strings.Repeat("A", devinFindingBodyMaxRunes+50)
+	truncated := devinFindingsPromptSection([]scm.ReviewComment{{Path: "z.go", Line: 1, Severity: "high", Body: long}})
+	if strings.Contains(truncated, long) {
+		t.Fatalf("expected the long body to be truncated, but it was interpolated verbatim")
+	}
+	if !strings.Contains(truncated, "truncated") {
+		t.Fatalf("expected a truncation marker, got: %q", truncated)
+	}
+}
+
+// newReviewTestContext builds a minimal StepContext (no DB/git) sufficient for the
+// review-loop integration points.
+func newReviewTestContext(cfg config.ReviewLoop, headSHA string, log func(string)) *pipeline.StepContext {
+	return &pipeline.StepContext{
+		Ctx:    context.Background(),
+		Run:    &db.Run{ID: "run-1", Branch: "refs/heads/feature", HeadSHA: headSHA},
+		Config: &config.Config{ReviewLoop: cfg},
+		Log:    log,
+	}
+}
+
+func TestReviewLoopActive(t *testing.T) {
+	t.Parallel()
+	withReviews := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
+	noReviews := &fakeReviewHost{caps: scm.Capabilities{Reviews: false}}
+	on := config.ReviewLoop{Enabled: true}
+	off := config.ReviewLoop{Enabled: false}
+
+	if reviewLoopActive(off, withReviews) {
+		t.Error("disabled config must be inert even with review capability")
+	}
+	if reviewLoopActive(on, noReviews) {
+		t.Error("enabled config must be inert without review capability")
+	}
+	if reviewLoopActive(on, nil) {
+		t.Error("nil host must be inert")
+	}
+	if !reviewLoopActive(on, withReviews) {
+		t.Error("enabled config + review capability must be active")
+	}
+}
+
+func TestEvalDevinReview_VerdictToDecision(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, BotLogin: "my-bot", MaxRounds: 3, FailOpen: true}
+	host := &fakeReviewHost{
+		caps:     scm.Capabilities{Reviews: true},
+		verdict:  scm.VerdictChangesRequested,
+		findings: []scm.ReviewComment{severeFinding()},
+	}
+	sctx := newReviewTestContext(cfg, "headsha", func(string) {})
+	pr := &scm.PR{Number: "42"}
+	step := &CIStep{now: func() time.Time { return time.Unix(0, 0) }}
+
+	decision, findings := step.evalDevinReview(sctx, host, pr)
+	if decision != devinDecisionNotGreen {
+		t.Fatalf("decision = %v, want notGreen", decision)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	if host.gotPRNumber != 42 || host.gotHeadSHA != "headsha" || host.gotBotLogin != "my-bot" {
+		t.Fatalf("host called with pr=%d head=%q bot=%q", host.gotPRNumber, host.gotHeadSHA, host.gotBotLogin)
+	}
+}
+
+func TestEvalDevinReview_DefaultsBotLoginAndVerdictReadError(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, BotLogin: "", MaxRounds: 3, FailOpen: true}
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}, verdErr: context.DeadlineExceeded}
+	var logs []string
+	sctx := newReviewTestContext(cfg, "h1", func(s string) { logs = append(logs, s) })
+	// Within grace, a read error is treated as not-yet-posted => pending.
+	step := &CIStep{now: func() time.Time { return time.Unix(0, 0) }}
+	decision, _ := step.evalDevinReview(sctx, host, &scm.PR{Number: "7"})
+	if decision != devinDecisionPending {
+		t.Fatalf("decision = %v, want pending on read error within grace", decision)
+	}
+	if host.gotBotLogin != config.DefaultReviewLoopBotLogin {
+		t.Fatalf("expected default bot login, got %q", host.gotBotLogin)
+	}
+	// The loop now consumes findings from the verdict path, so it never makes a
+	// separate GetBotFindings round-trip (least of all after a verdict read error).
+	if host.findingsCalls != 0 {
+		t.Fatalf("findings should not be fetched separately from the verdict, got %d calls", host.findingsCalls)
+	}
+}
+
+func TestEvalDevinReview_GraceAnchorResetsOnHeadAdvance(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}, verdict: scm.VerdictNone}
+
+	current := time.Unix(0, 0)
+	step := &CIStep{now: func() time.Time { return current }}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+	pr := &scm.PR{Number: "1"}
+
+	// First sighting of headA at t=0 anchors the grace window.
+	if d, _ := step.evalDevinReview(sctx, host, pr); d != devinDecisionPending {
+		t.Fatalf("headA t=0: want pending, got %v", d)
+	}
+	// Past the grace window on headA => fail-open.
+	current = current.Add(devinGraceWindow + time.Minute)
+	if d, _ := step.evalDevinReview(sctx, host, pr); d != devinDecisionFailOpen {
+		t.Fatalf("headA past grace: want failOpen, got %v", d)
+	}
+	// A fix advances the head; the anchor must reset so headB gets a fresh window.
+	sctx.Run.HeadSHA = "headB"
+	if d, _ := step.evalDevinReview(sctx, host, pr); d != devinDecisionPending {
+		t.Fatalf("headB right after advance: want pending (fresh grace), got %v", d)
+	}
+	if step.devinAnchorSHA != "headB" || !step.devinAnchorAt.Equal(current) {
+		t.Fatalf("anchor not reset: sha=%q at=%v now=%v", step.devinAnchorSHA, step.devinAnchorAt, current)
+	}
+}
+
+func TestHandleDevinFixRound_EscalatesAtMaxRounds(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 2, FailOpen: true}
+	var logs []string
+	sctx := newReviewTestContext(cfg, "head", func(s string) { logs = append(logs, s) })
+	step := &CIStep{devinFixRounds: 2} // already at the bound
+	findings := []scm.ReviewComment{severeFinding()}
+
+	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, findings, "freshkey", nil)
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("expected escalation to human gate, got %+v", outcome)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "escalating for manual review") {
+		t.Fatalf("expected escalation log, got: %v", logs)
+	}
+}
+
+func TestHandleDevinFixRound_WaitsWhenKeyAlreadyFixed(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+	var logs []string
+	sctx := newReviewTestContext(cfg, "head", func(s string) { logs = append(logs, s) })
+	// The Devin loop keys its already-fixed check on its own dedicated field, not
+	// the shared lastFixedChecks (which the CI-check fix path uses).
+	step := &CIStep{lastDevinFixKey: "samekey"}
+
+	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, nil, "samekey", nil)
+	if outcome != nil {
+		t.Fatalf("expected nil outcome (keep polling) when key already fixed, got %+v", outcome)
+	}
+	if step.devinFixRounds != 0 {
+		t.Fatalf("expected no new fix round when waiting for re-review, got %d", step.devinFixRounds)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "re-reviewing") {
+		t.Fatalf("expected re-reviewing log, got: %v", logs)
+	}
+}
+
+// TestHandleDevinFixRound_TransientFixFailureDoesNotConsumeRound asserts that a
+// fix attempt that errors (a transient network/API hiccup) does NOT permanently
+// consume one of the bounded MaxRounds: the round is counted only after the fix
+// attempt completes. Repeated transient failures must keep polling, not escalate.
+func TestHandleDevinFixRound_TransientFixFailureDoesNotConsumeRound(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+	var logs []string
+	sctx := newReviewTestContext(cfg, "head", func(s string) { logs = append(logs, s) })
+	sctx.WorkDir = t.TempDir()
+	sctx.Repo = &db.Repo{ID: "repo-1", DefaultBranch: "main", UpstreamURL: "https://github.com/test/repo"}
+	sctx.Run.BaseSHA = "0000000000000000000000000000000000000000"
+	sctx.LogChunk = func(string) {}
+	// An agent that always errors models a transient hiccup mid-fix: autoFixCI
+	// returns (false, err) before producing or pushing any change.
+	sctx.Agent = &mockAgent{runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return nil, errors.New("transient network error")
+	}}
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
+	findings := []scm.ReviewComment{severeFinding()}
+	step := &CIStep{}
+
+	// Far more iterations than MaxRounds: none should be consumed, none escalate.
+	for i := 0; i < 5; i++ {
+		outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "9"}, findings, "freshkey", nil)
+		if outcome != nil {
+			t.Fatalf("iteration %d: transient fix failure must keep polling, got escalation %+v", i, outcome)
+		}
+		if step.devinFixRounds != 0 {
+			t.Fatalf("iteration %d: transient fix failure consumed a round (devinFixRounds=%d)", i, step.devinFixRounds)
+		}
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "Devin fix failed") {
+		t.Fatalf("expected a fix-failed warning log, got: %v", logs)
+	}
+}
+
+// setupDevinFixRepo builds a working repo on `feature` plus a bare upstream so a
+// review-loop fix round can actually commit and push (autoFixCI -> commitAndPush).
+// Returns (workdir, baseSHA, headSHA, upstreamURL).
+func setupDevinFixRepo(t *testing.T) (string, string, string, string) {
+	t.Helper()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	os.WriteFile(filepath.Join(dir, "init.txt"), []byte("init"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "initial")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+	return dir, baseSHA, headSHA, upstream
+}
+
+// devinFixRoundResult bundles the observable state after one handleDevinFixRound.
+type devinFixRoundResult struct {
+	step    *CIStep
+	host    *fakeReviewHost
+	sctx    *pipeline.StepContext
+	outcome *pipeline.StepOutcome
+}
+
+// runDevinFixRound drives a single handleDevinFixRound end-to-end against a real
+// git repo + bare upstream. produceChanges controls whether the fix agent writes a
+// file (and thus whether autoFixCI actually pushes); replyErr is returned by every
+// ReplyToReviewComment so the best-effort path can be exercised.
+func runDevinFixRound(t *testing.T, cfg config.ReviewLoop, produceChanges bool, replyErr error, findings []scm.ReviewComment) devinFixRoundResult {
+	t.Helper()
+	dir, baseSHA, headSHA, upstream := setupDevinFixRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if produceChanges {
+			if err := os.WriteFile(filepath.Join(opts.CWD, "devin-fix.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+		}
+		return &agent.Result{}, nil
+	}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.ReviewLoop = cfg
+	sctx.Log = func(string) {}
+	sctx.LogChunk = func(string) {}
+
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}, replyErr: replyErr}
+	step := &CIStep{}
+	outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "42"}, findings, "freshkey", nil)
+	return devinFixRoundResult{step: step, host: host, sctx: sctx, outcome: outcome}
+}
+
+// TestHandleDevinFixRound_RepliesPerAddressedFindingAfterPush asserts that after a
+// successful fix push the loop posts one threaded reply per addressed finding that
+// carries a comment id, skipping findings with ID==0.
+func TestHandleDevinFixRound_RepliesPerAddressedFindingAfterPush(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true, ReplyOnFix: true}
+	findings := []scm.ReviewComment{
+		{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug 1"},
+		{ID: 222, Path: "b.go", Line: 2, Severity: "medium", Body: "bug 2"},
+		{ID: 0, Path: "c.go", Line: 3, Severity: "high", Body: "no id, must be skipped"},
+	}
+	res := runDevinFixRound(t, cfg, true, nil, findings)
+
+	if res.outcome != nil {
+		t.Fatalf("expected nil outcome (keep polling), got %+v", res.outcome)
+	}
+	if res.step.devinFixRounds != 1 {
+		t.Fatalf("devinFixRounds = %d, want 1", res.step.devinFixRounds)
+	}
+	if len(res.host.replies) != 2 {
+		t.Fatalf("len(replies) = %d, want 2 (one per finding with an ID; ID==0 skipped): %+v", len(res.host.replies), res.host.replies)
+	}
+	wantBody := fmt.Sprintf("Addressed in %s by no-mistakes.", shortSHA(res.sctx.Run.HeadSHA))
+	got := map[int64]bool{}
+	for _, r := range res.host.replies {
+		if r.prNumber != 42 {
+			t.Errorf("reply prNumber = %d, want 42", r.prNumber)
+		}
+		if r.body != wantBody {
+			t.Errorf("reply body = %q, want %q (short NEW head SHA)", r.body, wantBody)
+		}
+		got[r.commentID] = true
+	}
+	if !got[111] || !got[222] {
+		t.Fatalf("expected replies on findings 111 and 222, got %v", got)
+	}
+	if got[0] {
+		t.Fatal("a reply was posted for a finding with ID==0, which must be skipped")
+	}
+}
+
+// TestHandleDevinFixRound_NoReplyWhenFixDidNotPush asserts no acknowledgement is
+// posted when the fix agent produced no changes (no push).
+func TestHandleDevinFixRound_NoReplyWhenFixDidNotPush(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true, ReplyOnFix: true}
+	findings := []scm.ReviewComment{{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug"}}
+	res := runDevinFixRound(t, cfg, false, nil, findings)
+
+	if res.outcome != nil {
+		t.Fatalf("expected nil outcome, got %+v", res.outcome)
+	}
+	if res.step.devinFixRounds != 1 {
+		t.Fatalf("devinFixRounds = %d, want 1 (the round is counted even on a clean no-op)", res.step.devinFixRounds)
+	}
+	if len(res.host.replies) != 0 {
+		t.Fatalf("expected no replies when the fix did not push, got %+v", res.host.replies)
+	}
+}
+
+// TestHandleDevinFixRound_NoReplyWhenReplyOnFixDisabled asserts the feature flag
+// gates the acknowledgement even after a successful push.
+func TestHandleDevinFixRound_NoReplyWhenReplyOnFixDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true, ReplyOnFix: false}
+	findings := []scm.ReviewComment{{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug"}}
+	res := runDevinFixRound(t, cfg, true, nil, findings)
+
+	if len(res.host.replies) != 0 {
+		t.Fatalf("expected no replies when ReplyOnFix is false, got %+v", res.host.replies)
+	}
+}
+
+// TestHandleDevinFixRound_NoReplyWhenLoopDisabled asserts a disabled review loop
+// posts nothing even with ReplyOnFix set (keeps the disabled path inert).
+func TestHandleDevinFixRound_NoReplyWhenLoopDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: false, MaxRounds: 3, FailOpen: true, ReplyOnFix: true}
+	findings := []scm.ReviewComment{{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug"}}
+	res := runDevinFixRound(t, cfg, true, nil, findings)
+
+	if len(res.host.replies) != 0 {
+		t.Fatalf("expected no replies when the review loop is disabled, got %+v", res.host.replies)
+	}
+}
+
+// TestHandleDevinFixRound_ReplyErrorDoesNotFailRound asserts the acknowledgement
+// is best-effort: a reply error neither escalates the round nor prevents the fix
+// key / round count from being recorded.
+func TestHandleDevinFixRound_ReplyErrorDoesNotFailRound(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true, ReplyOnFix: true}
+	findings := []scm.ReviewComment{
+		{ID: 111, Path: "a.go", Line: 1, Severity: "high", Body: "bug 1"},
+		{ID: 222, Path: "b.go", Line: 2, Severity: "medium", Body: "bug 2"},
+	}
+	res := runDevinFixRound(t, cfg, true, errors.New("reply boom"), findings)
+
+	if res.outcome != nil {
+		t.Fatalf("a reply error must not escalate the round, got %+v", res.outcome)
+	}
+	if res.step.devinFixRounds != 1 {
+		t.Fatalf("devinFixRounds = %d, want 1 (round completes despite the reply error)", res.step.devinFixRounds)
+	}
+	if res.step.devinFixKey() != "freshkey" {
+		t.Fatalf("fix key not recorded after a successful push: %q", res.step.devinFixKey())
+	}
+	if len(res.host.replies) != 2 {
+		t.Fatalf("expected a reply attempt per finding even when they error, got %+v", res.host.replies)
+	}
+}
+
+// TestCIStepDevinFieldsRaceSafe exercises the devinMu-guarded accessors
+// concurrently so `go test -race` flags any unsynchronized access to the new
+// Devin mutable fields.
+func TestCIStepDevinFieldsRaceSafe(t *testing.T) {
+	t.Parallel()
+	step := &CIStep{}
+	now := func() time.Time { return time.Unix(0, 0) }
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			step.devinAnchorReset("head", now)
+			step.recordDevinRound()
+			_ = step.devinRounds()
+		}(i)
+	}
+	wg.Wait()
+	if got := step.devinRounds(); got != 8 {
+		t.Fatalf("recordDevinRound under contention = %d, want 8", got)
+	}
+}

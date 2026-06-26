@@ -11,10 +11,13 @@ import (
 )
 
 // autoFixCI runs the agent to fix CI failures and/or merge conflicts, then
-// commits and pushes to the configured push remote.
+// commits and pushes to the configured push remote. When the post-PR review loop
+// is active, devinFindings carries the review bot's flagged issues so the same
+// (single, no-mistakes-owned) fix agent also addresses them; it is nil/empty
+// otherwise and the prompt is unchanged.
 // Returns (true, nil) when changes were committed and pushed, (false, nil)
 // when the agent produced no changes, or (false, err) on failure.
-func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, failingNames []string, mergeConflict bool) (bool, error) {
+func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, failingNames []string, mergeConflict bool, devinFindings []scm.ReviewComment) (bool, error) {
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 	rebaseBaseSHA := resolveDefaultBranchTipSHA(ctx, sctx.WorkDir, sctx.Repo.UpstreamURL, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
@@ -39,6 +42,13 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	var promptIntro string
 	var promptRules string
 	switch {
+	case len(failingNames) == 0 && !mergeConflict && len(devinFindings) > 0:
+		promptIntro = "A reviewing bot flagged the following issues on this PR. Diagnose and fix the flagged bugs."
+		promptRules = `- You MUST produce file changes that resolve the flagged findings. Do not conclude that nothing needs to change.
+		- Address the root cause of each finding listed below; do not merely suppress or comment it out.
+		- Make the smallest correct root-cause fix.
+		- Do not refactor beyond what is needed for those fixes.
+		- Verify the fix by running the most relevant commands locally before finishing.`
 	case len(failingNames) > 0 && mergeConflict:
 		promptIntro = "The following CI checks have failed and the PR has merge conflicts with the base branch. Diagnose and fix the CI issues, then rebase onto the base branch and resolve the merge conflicts."
 		promptRules = `- You MUST produce file changes that fix the failing checks. Do not conclude that nothing needs to change.
@@ -93,6 +103,7 @@ Context:
 CI logs:
 %s`, logOutput)
 	}
+	prompt += devinFindingsPromptSection(devinFindings)
 	prompt += userIntentPromptSection(sctx)
 
 	sctx.Log("running agent to fix CI issues...")

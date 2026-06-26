@@ -50,6 +50,7 @@ type GlobalConfig struct {
 	Intent               IntentRaw
 	Test                 TestRaw
 	Review               ReviewRaw
+	ReviewLoop           ReviewLoopRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -66,6 +67,7 @@ type globalConfigRaw struct {
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
 	Review               ReviewRaw           `yaml:"review"`
+	ReviewLoop           ReviewLoopRaw       `yaml:"review_loop"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -79,11 +81,12 @@ type RepoConfig struct {
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
 	// the pushed branch controls nothing that executes.
-	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
-	AutoFix           AutoFixRaw `yaml:"auto_fix"`
-	Intent            IntentRaw  `yaml:"intent"`
-	Test              TestRaw    `yaml:"test"`
-	Review            ReviewRaw  `yaml:"review"`
+	AllowRepoCommands bool          `yaml:"allow_repo_commands"`
+	AutoFix           AutoFixRaw    `yaml:"auto_fix"`
+	Intent            IntentRaw     `yaml:"intent"`
+	Test              TestRaw       `yaml:"test"`
+	Review            ReviewRaw     `yaml:"review"`
+	ReviewLoop        ReviewLoopRaw `yaml:"review_loop"`
 }
 
 // Commands holds optional per-repo command overrides.
@@ -131,6 +134,7 @@ type Config struct {
 	Intent               Intent
 	Test                 Test
 	Review               Review
+	ReviewLoop           ReviewLoop
 }
 
 // ReviewerSpec identifies one reviewer in the cross-family review panel. Agent
@@ -161,6 +165,53 @@ type Review struct {
 	Reviewers   []ReviewerSpec
 	MaxParallel int
 	FailOpen    bool
+}
+
+// DefaultReviewLoopBotLogin is the GitHub account whose PR reviews the post-PR
+// review loop reads by default. The reviewer is an external bot (Devin); the
+// fixer that acts on its findings is always no-mistakes itself, so no fixer
+// agent is configured here.
+const DefaultReviewLoopBotLogin = "devin-ai-integration[bot]"
+
+// ReviewLoopRaw is the YAML representation of the post-PR review loop (read
+// layer). Pointer fields distinguish "not set" (nil) from explicit zero/false
+// values so global defaults survive a partially-specified repo block.
+type ReviewLoopRaw struct {
+	Enabled    *bool   `yaml:"enabled"`
+	BotLogin   *string `yaml:"bot_login"`
+	MaxRounds  *int    `yaml:"max_rounds"`
+	FailOpen   *bool   `yaml:"fail_open"`
+	ReplyOnFix *bool   `yaml:"reply_on_fix"`
+}
+
+// ReviewLoop is the resolved post-PR review-loop config. When Enabled is false
+// (the default) the loop is inert and pipeline behavior is byte-identical.
+// BotLogin selects whose PR reviews are read (default DefaultReviewLoopBotLogin).
+// MaxRounds bounds how many review/fix rounds the loop will run. FailOpen
+// (default true) means a silent reviewer does not block: if the bot never posts
+// a verdict, the loop proceeds rather than holding the PR. The fixer is always
+// no-mistakes (the reviewing bot is review-only), so no fixer agent is config'd.
+//
+// Accepted tradeoff with FailOpen=false: the fail-closed path waits for the bot
+// and relies on the CI step's idle timeout to escalate to the human gate. That
+// idle timer re-arms every time the base branch advances (see CITimeout), so on
+// a PR whose base branch is actively moving while the bot stays silent, the
+// timeout may never elapse and escalation may never fire - the loop just keeps
+// waiting. This is intentional (FailOpen=true is the default and does not have
+// this property); a FailOpen=false user on an active base branch should rely on
+// an explicit `no-mistakes axi abort` rather than the idle timeout to stop a
+// run held open by a permanently-silent reviewer.
+type ReviewLoop struct {
+	Enabled   bool
+	BotLogin  string
+	MaxRounds int
+	FailOpen  bool
+	// ReplyOnFix (default true) controls whether the loop, after it successfully
+	// pushes a fix for the bot's findings, posts a threaded reply on each
+	// addressed review comment so a human (and the bot's re-review) sees what the
+	// loop did. It only takes effect when Enabled, so the loop-disabled path stays
+	// byte-identical.
+	ReplyOnFix bool
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -289,6 +340,20 @@ intent:
 #   evidence:
 #     store_in_repo: true
 #     dir: .no-mistakes/evidence
+
+# Post-PR review loop (read layer; off by default). When enabled, no-mistakes
+# reads an external review bot's PR verdict + findings and feeds them back to its
+# own fixer (the bot is review-only; no-mistakes is always the fixer). With the
+# default disabled state the pipeline behaves identically.
+# review_loop:
+#   enabled: false
+#   bot_login: "devin-ai-integration[bot]"
+#   max_rounds: 3
+#   fail_open: true   # a silent reviewer does not block the PR
+#   # Note: with fail_open=false the loop waits for the bot and leans on the CI
+#   # idle timeout to escalate. That timer re-arms whenever the base branch
+#   # advances, so on an actively-moving base a permanently-silent reviewer may
+#   # never trigger escalation - abort the run explicitly if that happens.
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -699,6 +764,10 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		return nil, err
 	}
 	cfg.Review = raw.Review
+	if err := validateReviewLoop(raw.ReviewLoop); err != nil {
+		return nil, err
+	}
+	cfg.ReviewLoop = raw.ReviewLoop
 
 	return cfg, nil
 }
@@ -758,6 +827,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := validateReviewers(cfg.Review.Reviewers); err != nil {
 		return nil, err
 	}
+	if err := validateReviewLoop(cfg.ReviewLoop); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
@@ -765,23 +837,33 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // EffectiveRepoConfig returns the repo config that should drive the pipeline
 // given a pushed-branch copy and the trusted default-branch copy.
 //
-// The code-executing selection fields — Commands (run verbatim via sh -c on
-// the daemon host), Agent (selects which process launches with the
-// maintainer's credentials, including acp: targets), and Review (the review
-// panel, which likewise selects which reviewer binaries launch) — are taken
-// only from the trusted copy when it is present, so a contributor's pushed
-// branch cannot inject shell or pick an agent. When allowRepoCommands is true the
-// maintainer has explicitly opted in (via allow_repo_commands on the
-// TRUSTED default-branch copy) to honoring the pushed-branch copy wholesale.
-// When there is no trusted copy and the maintainer has not opted in, both
-// fields are forced empty (Agent "" inherits the global agent; Commands{}
-// yields built-in defaults) rather than falling back to the pushed branch —
-// this blocks the supply-chain vector for repos that ship .no-mistakes.yaml
-// only on feature branches.
+// The execution-affecting selection fields — Commands (run verbatim via sh -c
+// on the daemon host), Agent (selects which process launches with the
+// maintainer's credentials, including acp: targets), Review (the review panel,
+// which likewise selects which reviewer binaries launch), and ReviewLoop (which
+// gates whether the post-PR review loop runs, names the bot login whose
+// comments become fix-prompt content, and bounds how many automated fix rounds
+// execute) — are taken only from the trusted copy when it is present, so a
+// contributor's pushed branch cannot inject shell, pick an agent, or steer the
+// review loop. When allowRepoCommands is true the maintainer has explicitly
+// opted in (via allow_repo_commands on the TRUSTED default-branch copy) to
+// honoring the pushed-branch copy wholesale. When there is no trusted copy and
+// the maintainer has not opted in, these fields are forced empty/zero (Agent ""
+// inherits the global agent; Commands{} yields built-in defaults; ReviewLoopRaw{}
+// leaves the loop off) rather than falling back to the pushed branch — this
+// blocks the supply-chain vector for repos that ship .no-mistakes.yaml only on
+// feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, intent, test) are always
-// taken from the pushed copy, matching prior behavior, since they cannot
-// run arbitrary shell or select a process.
+// ReviewLoop is gated even though the fixer it drives is always no-mistakes
+// itself (never a contributor-named binary): a pushed branch that could flip
+// enabled, swap bot_login to an attacker-controlled account whose comments are
+// fed verbatim into the fix prompt, or change max_rounds would be steering CI
+// gating and prompt content, exactly the execution-affecting surface that
+// Review is gated for. So it is taken ONLY from the trusted default-branch copy.
+//
+// The remaining non-executing fields (ignore patterns, auto-fix, intent, test)
+// are always taken from the pushed copy, matching prior behavior, since they
+// cannot run arbitrary shell, select a process, or steer CI gating.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -797,10 +879,15 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// with the maintainer's credentials, so it is code-executing config.
 		// Take it from the trusted default-branch copy, never the pushed SHA.
 		effective.Review = trusted.Review
+		// SECURITY: the review loop gates CI, names the bot login whose comments
+		// become fix-prompt content, and bounds how many fix rounds run - all
+		// execution-affecting, like Review. Take it from the trusted copy only.
+		effective.ReviewLoop = trusted.ReviewLoop
 	} else {
 		effective.Commands = Commands{}
 		effective.Agent = ""
 		effective.Review = ReviewRaw{}
+		effective.ReviewLoop = ReviewLoopRaw{}
 	}
 	return &effective
 }
@@ -890,6 +977,51 @@ func resolveReview(raw ReviewRaw) Review {
 	}
 }
 
+// reviewLoopDefaults returns the default post-PR review-loop settings. The loop
+// is off by default (Enabled false) so behavior is byte-identical until a user
+// opts in. FailOpen defaults true: a silent reviewer must not block the PR.
+// ReplyOnFix defaults true: when the loop is enabled, acknowledging an addressed
+// finding is the helpful default (it is inert while Enabled is false).
+func reviewLoopDefaults() ReviewLoop {
+	return ReviewLoop{
+		Enabled:    false,
+		BotLogin:   DefaultReviewLoopBotLogin,
+		MaxRounds:  3,
+		FailOpen:   true,
+		ReplyOnFix: true,
+	}
+}
+
+// applyReviewLoopOverrides applies non-nil raw values onto resolved defaults.
+func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.BotLogin != nil && strings.TrimSpace(*src.BotLogin) != "" {
+		dst.BotLogin = strings.TrimSpace(*src.BotLogin)
+	}
+	if src.MaxRounds != nil {
+		dst.MaxRounds = *src.MaxRounds
+	}
+	if src.FailOpen != nil {
+		dst.FailOpen = *src.FailOpen
+	}
+	if src.ReplyOnFix != nil {
+		dst.ReplyOnFix = *src.ReplyOnFix
+	}
+}
+
+// validateReviewLoop rejects a negative max_rounds; the remaining values (a bot
+// login string and booleans) need no shape validation. This is input
+// validation only - the trust boundary (review_loop is execution-affecting and
+// so honored only from the trusted copy) is enforced in EffectiveRepoConfig.
+func validateReviewLoop(raw ReviewLoopRaw) error {
+	if raw.MaxRounds != nil && *raw.MaxRounds < 0 {
+		return fmt.Errorf("invalid review_loop.max_rounds: %d (must be >= 0)", *raw.MaxRounds)
+	}
+	return nil
+}
+
 // autoFixDefaults returns the default auto-fix configuration.
 func autoFixDefaults() AutoFix {
 	return AutoFix{
@@ -970,6 +1102,10 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		review = resolveReview(repo.Review)
 	}
 
+	reviewLoop := reviewLoopDefaults()
+	applyReviewLoopOverrides(&reviewLoop, &global.ReviewLoop)
+	applyReviewLoopOverrides(&reviewLoop, &repo.ReviewLoop)
+
 	cfg := &Config{
 		Agent:                global.Agent,
 		ACPXPath:             global.ACPXPath,
@@ -984,6 +1120,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:               intent,
 		Test:                 test,
 		Review:               review,
+		ReviewLoop:           reviewLoop,
 	}
 
 	if repo.Agent != "" {
