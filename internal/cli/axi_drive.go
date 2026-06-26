@@ -338,6 +338,14 @@ func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID
 // show all checks have passed, meaning the PR is ready for a human to merge. It
 // reads CI state through the same parser the TUI uses (see cimonitor) so the two
 // surfaces never disagree about when a run is "done" from the agent's view.
+//
+// When the post-PR review loop is enabled, "ready" additionally requires the
+// review bot (Devin) to be green: the CI step emits the waiting/re-reviewing/
+// changes-requested log states while the bot's verdict for the current head is
+// pending or not green, and cimonitor.ChecksPassed treats those as not-ready. So
+// this stays a pure function of the CI log vocabulary and requires no config or
+// host access here; with the loop disabled those states never appear and the
+// behavior is byte-identical.
 func ciReadyToMerge(rv runView, ciLogs []string) bool {
 	for _, s := range rv.Steps {
 		if s.Name == string(types.StepCI) {
