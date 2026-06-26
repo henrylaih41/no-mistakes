@@ -253,27 +253,27 @@ const inlineCommentsJSON = `[
   {"path":"internal/human/note.go","line":9,"original_line":9,"body":"high severity concern from a human","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"https://github.com/test/repo/pull/7#discussion_rh","user":{"login":"some-human"}}
 ]` + "\n"
 
-// issueCommentsJSON has a Devin top-level summary (kept, no SHA, no Path) and a
-// human's reply (filtered out).
-const issueCommentsJSON = `[
-  {"body":"Devin reviewed the latest changes; see inline comments.","html_url":"https://github.com/test/repo/pull/7#issuecomment-1","user":{"login":"devin-ai-integration[bot]"}},
-  {"body":"thanks!","html_url":"https://github.com/test/repo/pull/7#issuecomment-2","user":{"login":"some-human"}}
-]` + "\n"
-
 func TestGetBotFindingsFiltersBotParsesSeverityAndScopesToHead(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/comments --paginate":  {stdout: inlineCommentsJSON},
-		"gh api repos/test/repo/issues/7/comments --paginate": {stdout: issueCommentsJSON},
-	}), nil, "test/repo")
+		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: inlineCommentsJSON}}), nil, "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
 		t.Fatalf("GetBotFindings() error = %v", err)
 	}
-	if len(findings) != 3 {
-		t.Fatalf("len(findings) = %d, want 3 (two head-scoped inline + one top-level; stale-sha and human dropped): %+v", len(findings), findings)
+	if len(findings) != 2 {
+		t.Fatalf("len(findings) = %d, want 2 (two head-scoped inline; stale-sha, human, and top-level summary dropped): %+v", len(findings), findings)
+	}
+
+	// Top-level issue/summary comments must never leak in as findings: they carry
+	// no Path/SHA and so cannot be scoped to a head. Every returned finding must be
+	// a file-scoped inline comment.
+	for i, f := range findings {
+		if f.Path == "" {
+			t.Errorf("findings[%d] = %+v, want a file-scoped finding (no top-level summary leak)", i, f)
+		}
 	}
 
 	// findings[0]: 🔴 inline -> high, file-scoped to headSHA.
@@ -297,14 +297,6 @@ func TestGetBotFindingsFiltersBotParsesSeverityAndScopesToHead(t *testing.T) {
 	if findings[1].Severity != "medium" {
 		t.Errorf("findings[1].Severity = %q, want medium", findings[1].Severity)
 	}
-
-	// findings[2]: top-level Devin summary -> no Path/Line/CommitID, default medium.
-	if findings[2].Path != "" || findings[2].Line != 0 || findings[2].CommitID != "" {
-		t.Errorf("findings[2] = %+v, want top-level (empty Path/Line/CommitID)", findings[2])
-	}
-	if findings[2].Severity != "medium" {
-		t.Errorf("findings[2].Severity = %q, want medium (default for unmarked body)", findings[2].Severity)
-	}
 }
 
 func TestGetReviewVerdictChangesRequested(t *testing.T) {
@@ -314,9 +306,7 @@ func TestGetReviewVerdictChangesRequested(t *testing.T) {
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
 		},
-		"gh api repos/test/repo/pulls/7/comments --paginate":  {stdout: inlineCommentsJSON},
-		"gh api repos/test/repo/issues/7/comments --paginate": {stdout: issueCommentsJSON},
-	}), nil, "test/repo")
+		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: inlineCommentsJSON}}), nil, "test/repo")
 
 	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -325,9 +315,10 @@ func TestGetReviewVerdictChangesRequested(t *testing.T) {
 	if verdict != scm.VerdictChangesRequested {
 		t.Fatalf("GetReviewVerdict() = %q, want %q (severe inline findings on headSHA)", verdict, scm.VerdictChangesRequested)
 	}
-	// The verdict path returns the findings it read so the caller need not refetch.
-	if len(findings) != 3 {
-		t.Fatalf("GetReviewVerdict() findings = %d, want 3 (returned alongside the verdict)", len(findings))
+	// The verdict path returns the findings it read so the caller need not refetch:
+	// two head-scoped inline findings (the top-level summary is not a finding).
+	if len(findings) != 2 {
+		t.Fatalf("GetReviewVerdict() findings = %d, want 2 (returned alongside the verdict)", len(findings))
 	}
 }
 
@@ -343,9 +334,7 @@ func TestGetReviewVerdictHonorsChangesRequestedState(t *testing.T) {
 		},
 		"gh api repos/test/repo/pulls/7/comments --paginate": {
 			stdout: `[{"path":"a.go","line":1,"body":"please follow up here","commit_id":"abc123def","original_commit_id":"abc123def","html_url":"u","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
-		},
-		"gh api repos/test/repo/issues/7/comments --paginate": {stdout: `[]` + "\n"},
-	}), nil, "test/repo")
+		}}), nil, "test/repo")
 
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -353,6 +342,48 @@ func TestGetReviewVerdictHonorsChangesRequestedState(t *testing.T) {
 	}
 	if verdict != scm.VerdictChangesRequested {
 		t.Fatalf("GetReviewVerdict() = %q, want %q (native CHANGES_REQUESTED state honored)", verdict, scm.VerdictChangesRequested)
+	}
+}
+
+// TestGetReviewVerdictUsesMostRecentHeadReview verifies the verdict follows the
+// MOST RECENT bot review on the head (by submitted_at), not the OR of every
+// state in the head's review history: a bot that requested changes and then
+// re-reviewed the SAME SHA as APPROVED must clear (and vice versa).
+func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
+	t.Parallel()
+
+	// Earlier CHANGES_REQUESTED, later APPROVED on the same head, no severe inline
+	// findings: the most recent review approves, so the verdict clears.
+	approvedLast := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"devin-ai-integration[bot]"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: `[]` + "\n"},
+	}), nil, "test/repo")
+
+	verdict, _, err := approvedLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictApproved {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (most recent head review approved)", verdict, scm.VerdictApproved)
+	}
+
+	// Reverse order (timestamps deliberately out of array order): a later
+	// CHANGES_REQUESTED after an earlier APPROVED stays not-green.
+	changesLast := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T02:00:00Z","user":{"login":"devin-ai-integration[bot]"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+		},
+		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: `[]` + "\n"},
+	}), nil, "test/repo")
+
+	verdict2, _, err := changesLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict2 != scm.VerdictChangesRequested {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (most recent head review requested changes)", verdict2, scm.VerdictChangesRequested)
 	}
 }
 
@@ -367,9 +398,7 @@ func TestGetReviewVerdictApproved(t *testing.T) {
 		// findings), and a stale finding from a prior commit that scopes out.
 		"gh api repos/test/repo/pulls/7/comments --paginate": {
 			stdout: `[{"path":"internal/old/stale.go","line":3,"body":"🔴 **Stale finding from a previous commit**","commit_id":"0000oldsha","original_commit_id":"0000oldsha","html_url":"u","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
-		},
-		"gh api repos/test/repo/issues/7/comments --paginate": {stdout: issueCommentsJSON},
-	}), nil, "test/repo")
+		}}), nil, "test/repo")
 
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -390,9 +419,7 @@ func TestGetReviewVerdictPendingWhenHeadNotYetReviewed(t *testing.T) {
 		},
 		// The bot only reviewed an older commit, so its inline comments scope out
 		// of headSHA: no head-scoped findings remain.
-		"gh api repos/test/repo/pulls/7/comments --paginate":  {stdout: `[]` + "\n"},
-		"gh api repos/test/repo/issues/7/comments --paginate": {stdout: `[]` + "\n"},
-	}), nil, "test/repo")
+		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: `[]` + "\n"}}), nil, "test/repo")
 
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -453,9 +480,7 @@ func TestGetBotFindingsEmptyHeadSHAMatchesNoInlineFindings(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/comments --paginate":  {stdout: inlineCommentsJSON},
-		"gh api repos/test/repo/issues/7/comments --paginate": {stdout: issueCommentsJSON},
-	}), nil, "test/repo")
+		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: inlineCommentsJSON}}), nil, "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, "", botUser)
 	if err != nil {
@@ -491,9 +516,7 @@ func TestGetReviewVerdictPaginatesPastFirstPage(t *testing.T) {
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
 		},
-		"gh api repos/test/repo/pulls/7/comments --paginate":  {stdout: b.String()},
-		"gh api repos/test/repo/issues/7/comments --paginate": {stdout: `[]` + "\n"},
-	}), nil, "test/repo")
+		"gh api repos/test/repo/pulls/7/comments --paginate": {stdout: b.String()}}), nil, "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -532,14 +555,20 @@ func TestSeverityFromBody(t *testing.T) {
 		body string
 		want string
 	}{
+		// high requires the explicit 🔴 marker; 🚩 marks medium.
 		{"🔴 **Batch download crashes**", "high"},
 		{"🚩 **Batch path swallows error**", "medium"},
-		{"This is a clear bug in the loop", "high"},
-		{"high severity issue", "high"},
-		{"medium severity issue", "medium"},
 		{"low severity issue", "low"},
 		{"nit: rename this", "low"},
 		{"some unmarked observation", "medium"},
+		// The keyword fallback never escalates to high: bare/negated/contextual
+		// mentions of severe words must NOT register as high (they default to the
+		// conservative medium, which still gates).
+		{"This is a clear bug in the loop", "medium"},
+		{"this is not a bug", "medium"},
+		{"no critical issues here", "medium"},
+		{"high severity issue", "medium"},
+		{"medium severity issue", "medium"},
 		// Word-boundary matching: "low" as a substring of these words must not
 		// downgrade an otherwise-unmarked (default medium) finding to low.
 		{"please follow up on this", "medium"},

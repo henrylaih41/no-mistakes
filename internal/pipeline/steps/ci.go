@@ -44,11 +44,17 @@ type CIStep struct {
 	ciFixAttempts        int                  // number of CI auto-fix attempts made
 
 	// devinMu guards the post-PR review-loop (Devin) mutable fields below. Reach
-	// them only through the devinRounds/recordDevinRound/devinAnchorReset helpers.
+	// them only through the devinRounds/recordDevinRound/devinAnchorReset/
+	// devinFixKey/recordDevinFixKey helpers.
 	devinMu        sync.Mutex
 	devinFixRounds int       // number of post-PR review-loop (Devin) fix rounds made
 	devinAnchorSHA string    // head SHA the Devin grace window is anchored to
 	devinAnchorAt  time.Time // when the current head SHA was first seen (Devin grace start)
+	// lastDevinFixKey is the anti-thrash key for the last completed Devin fix round
+	// — (headSHA, finding fingerprints). It is dedicated to the review loop rather
+	// than reusing lastFixedChecks (the CI-check fix path's key) so the two paths
+	// cannot collide on each other's keys.
+	lastDevinFixKey string
 
 	checksGracePeriod    time.Duration // minimum wait before trusting empty CI checks (0 = default 60s)
 	pollIntervalOverride time.Duration // if set, overrides computed poll interval (for testing)
@@ -100,6 +106,23 @@ func (s *CIStep) devinAnchorReset(headSHA string, now func() time.Time) time.Tim
 		s.devinAnchorAt = now()
 	}
 	return s.devinAnchorAt
+}
+
+// devinFixKey returns the anti-thrash key recorded for the last completed Devin
+// fix round, read under devinMu. See CIStep for the single-writer note.
+func (s *CIStep) devinFixKey() string {
+	s.devinMu.Lock()
+	defer s.devinMu.Unlock()
+	return s.lastDevinFixKey
+}
+
+// recordDevinFixKey stores the anti-thrash key for the Devin fix round just
+// pushed, written under devinMu. Dedicated to the review loop so it never
+// collides with the CI-check path's lastFixedChecks.
+func (s *CIStep) recordDevinFixKey(key string) {
+	s.devinMu.Lock()
+	defer s.devinMu.Unlock()
+	s.lastDevinFixKey = key
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
