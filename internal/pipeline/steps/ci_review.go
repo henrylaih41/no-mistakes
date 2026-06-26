@@ -183,21 +183,23 @@ func (s *CIStep) evalDevinReview(sctx *pipeline.StepContext, host scm.Host, pr *
 		s.devinAnchorAt = now()
 	}
 
-	verdict, err := host.GetReviewVerdict(ctx, prNum, headSHA, botLogin)
+	// GetReviewVerdict returns the findings it already read to derive the verdict,
+	// so the loop consumes both from one host round-trip instead of re-fetching.
+	verdict, verdictFindings, err := host.GetReviewVerdict(ctx, prNum, headSHA, botLogin)
 	if err != nil {
 		// Treat a read error like "not yet posted": the grace window + fail
 		// policy decide whether to wait, fail open, or hold.
 		sctx.Log(fmt.Sprintf("warning: could not read Devin review verdict: %v", err))
 		verdict = scm.VerdictNone
+		verdictFindings = nil
 	}
 
+	// Only surface findings for the states that act on them (changes-requested or
+	// a re-review still pending on this head); an approved/none verdict carries no
+	// actionable findings, matching the prior two-call behavior.
 	var findings []scm.ReviewComment
 	if verdict == scm.VerdictChangesRequested || verdict == scm.VerdictPending {
-		findings, err = host.GetBotFindings(ctx, prNum, headSHA, botLogin)
-		if err != nil {
-			sctx.Log(fmt.Sprintf("warning: could not read Devin findings: %v", err))
-			findings = nil
-		}
+		findings = verdictFindings
 	}
 
 	elapsed := now().Sub(s.devinAnchorAt)
