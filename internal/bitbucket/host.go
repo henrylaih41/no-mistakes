@@ -109,8 +109,8 @@ func (h *Host) GetMergeableState(_ context.Context, _ *scm.PR) (scm.MergeableSta
 
 // GetReviewVerdict is unsupported on Bitbucket: the review read layer is
 // GitHub-only for now. Capabilities().Reviews is false.
-func (h *Host) GetReviewVerdict(_ context.Context, _ int, _, _ string) (scm.ReviewVerdict, error) {
-	return scm.VerdictNone, scm.ErrUnsupported
+func (h *Host) GetReviewVerdict(_ context.Context, _ int, _, _ string) (scm.ReviewVerdict, []scm.ReviewComment, error) {
+	return scm.VerdictNone, nil, scm.ErrUnsupported
 }
 
 // GetBotFindings is unsupported on Bitbucket; see GetReviewVerdict.

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -337,6 +338,16 @@ func (h *Host) apiArgs(suffix string) []string {
 	return []string{"api", "repos/" + repo + "/" + suffix}
 }
 
+// paginatedAPIArgs is apiArgs plus --paginate, so gh follows the Link headers
+// and returns every page merged into a single JSON array. Without it a list read
+// (PR review comments, issue comments, or reviews) silently stops at the first
+// page (~30 items): a severe finding or the head-SHA review object that lands
+// beyond page 1 would be dropped, and the review gate could then wrongly treat a
+// changes-requested PR as approved.
+func (h *Host) paginatedAPIArgs(suffix string) []string {
+	return append(h.apiArgs(suffix), "--paginate")
+}
+
 type ghUser struct {
 	Login string `json:"login"`
 }
@@ -381,7 +392,7 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 		botLogin = DefaultBotLogin
 	}
 
-	inlineOut, err := h.cmd(ctx, "gh", h.apiArgs(fmt.Sprintf("pulls/%d/comments", prNumber))...).Output()
+	inlineOut, err := h.cmd(ctx, "gh", h.paginatedAPIArgs(fmt.Sprintf("pulls/%d/comments", prNumber))...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("gh api pulls comments: %w", err)
 	}
@@ -408,7 +419,7 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 		})
 	}
 
-	issueOut, err := h.cmd(ctx, "gh", h.apiArgs(fmt.Sprintf("issues/%d/comments", prNumber))...).Output()
+	issueOut, err := h.cmd(ctx, "gh", h.paginatedAPIArgs(fmt.Sprintf("issues/%d/comments", prNumber))...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("gh api issues comments: %w", err)
 	}
@@ -433,7 +444,9 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 }
 
 // GetReviewVerdict derives botLogin's verdict for headSHA from the PR's review
-// objects + inline findings, never from a commit status check.
+// objects + inline findings, never from a commit status check. It also returns
+// the findings it read so callers do not need a second GetBotFindings round-trip
+// (the verdict already required them).
 //
 // Why derive: Devin posts PR reviews with state=COMMENTED (never
 // CHANGES_REQUESTED) and publishes no commit status check, so a status rollup is
@@ -443,30 +456,34 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 // Derivation:
 //   - NONE: the bot has never reviewed the PR.
 //   - PENDING: the bot has reviewed before but not yet headSHA.
-//   - CHANGES_REQUESTED: the bot reviewed headSHA and left at least one severe
-//     (high/medium) file-scoped finding tied to headSHA.
-//   - APPROVED: the bot reviewed headSHA with no severe file-scoped findings.
+//   - CHANGES_REQUESTED: the bot reviewed headSHA and EITHER posted a native
+//     CHANGES_REQUESTED review state on the matching head, OR left at least one
+//     severe (high/medium) file-scoped finding tied to headSHA.
+//   - APPROVED: the bot reviewed headSHA with no CHANGES_REQUESTED state and no
+//     severe file-scoped findings.
 //
-// Only file-scoped (inline) findings drive CHANGES_REQUESTED; a top-level review
-// summary is informational. REST does not expose thread resolution, so every
-// returned finding is treated as unresolved.
-func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botLogin string) (scm.ReviewVerdict, error) {
+// A native CHANGES_REQUESTED state is honored directly: a reviewer that uses
+// GitHub's request-changes flow must not be treated as approved just because no
+// inline body parsed as severe. Only file-scoped (inline) findings otherwise
+// drive CHANGES_REQUESTED; a top-level review summary is informational. REST
+// does not expose thread resolution, so every returned finding is unresolved.
+func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botLogin string) (scm.ReviewVerdict, []scm.ReviewComment, error) {
 	botLogin = strings.TrimSpace(botLogin)
 	if botLogin == "" {
 		botLogin = DefaultBotLogin
 	}
 
-	reviewsOut, err := h.cmd(ctx, "gh", h.apiArgs(fmt.Sprintf("pulls/%d/reviews", prNumber))...).Output()
+	reviewsOut, err := h.cmd(ctx, "gh", h.paginatedAPIArgs(fmt.Sprintf("pulls/%d/reviews", prNumber))...).Output()
 	if err != nil {
-		return "", fmt.Errorf("gh api pulls reviews: %w", err)
+		return "", nil, fmt.Errorf("gh api pulls reviews: %w", err)
 	}
 	var reviews []ghReview
 	if err := json.Unmarshal(reviewsOut, &reviews); err != nil {
-		return "", fmt.Errorf("parse PR reviews: %w", err)
+		return "", nil, fmt.Errorf("parse PR reviews: %w", err)
 	}
 
 	head := strings.TrimSpace(headSHA)
-	reviewedAny, reviewedHead := false, false
+	reviewedAny, reviewedHead, headChangesRequested := false, false, false
 	for _, r := range reviews {
 		if !strings.EqualFold(strings.TrimSpace(r.User.Login), botLogin) {
 			continue
@@ -474,28 +491,39 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 		reviewedAny = true
 		if head == "" || strings.EqualFold(strings.TrimSpace(r.CommitID), head) {
 			reviewedHead = true
+			if strings.EqualFold(strings.TrimSpace(r.State), "CHANGES_REQUESTED") {
+				headChangesRequested = true
+			}
 		}
 	}
 	if !reviewedAny {
-		return scm.VerdictNone, nil
-	}
-	if !reviewedHead {
-		return scm.VerdictPending, nil
+		return scm.VerdictNone, nil, nil
 	}
 
 	findings, err := h.GetBotFindings(ctx, prNumber, headSHA, botLogin)
 	if err != nil {
-		return "", err
+		// A native CHANGES_REQUESTED on the head is authoritative from the review
+		// state alone, so surface not-green even when the findings read fails.
+		if headChangesRequested {
+			return scm.VerdictChangesRequested, nil, nil
+		}
+		return "", nil, err
+	}
+	if !reviewedHead {
+		return scm.VerdictPending, findings, nil
+	}
+	if headChangesRequested {
+		return scm.VerdictChangesRequested, findings, nil
 	}
 	for _, f := range findings {
 		if f.Path == "" {
 			continue // top-level summary, not a file-scoped finding
 		}
 		if f.Severity == severityHigh || f.Severity == severityMedium {
-			return scm.VerdictChangesRequested, nil
+			return scm.VerdictChangesRequested, findings, nil
 		}
 	}
-	return scm.VerdictApproved, nil
+	return scm.VerdictApproved, findings, nil
 }
 
 const (
@@ -506,8 +534,12 @@ const (
 
 // severityFromBody parses a coarse severity bucket from a bot finding body.
 // Emoji markers win (Devin uses 🔴 for bug/high and 🚩 for analysis/medium),
-// then keyword heuristics. An unrecognized body defaults to medium so an
-// unmarked inline finding is treated conservatively as severe.
+// then a whole-word keyword heuristic. Keyword matching is word-boundary based
+// rather than substring based: a plain strings.Contains for "low" also fires on
+// "allow", "follow", "below", "flow", and "slow", which would silently downgrade
+// a severe unmarked finding to low and drop it from the verdict. An unrecognized
+// body defaults to medium so an unmarked inline finding is treated
+// conservatively as severe.
 func severityFromBody(body string) string {
 	switch {
 	case strings.Contains(body, "🔴"):
@@ -515,17 +547,30 @@ func severityFromBody(body string) string {
 	case strings.Contains(body, "🚩"):
 		return severityMedium
 	}
-	lower := strings.ToLower(body)
+	words := bodyWordSet(strings.ToLower(body))
 	switch {
-	case strings.Contains(lower, "bug"), strings.Contains(lower, "high"), strings.Contains(lower, "critical"):
+	case words["bug"] || words["high"] || words["critical"]:
 		return severityHigh
-	case strings.Contains(lower, "medium"):
+	case words["medium"]:
 		return severityMedium
-	case strings.Contains(lower, "low"), strings.Contains(lower, "nit"):
+	case words["low"] || words["nit"]:
 		return severityLow
 	default:
 		return severityMedium
 	}
+}
+
+// bodyWordSet splits text into whole words (maximal runs of letters and digits),
+// so keyword lookups are boundary-aware instead of matching arbitrary
+// substrings of longer words.
+func bodyWordSet(text string) map[string]bool {
+	set := map[string]bool{}
+	for _, w := range strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		set[w] = true
+	}
+	return set
 }
 
 // commentMatchesHead reports whether an inline comment is tied to headSHA via

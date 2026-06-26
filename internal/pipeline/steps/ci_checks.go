@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -198,6 +199,27 @@ func ciFailureOutcome(failing []string, mergeConflict bool, summary string) *pip
 	}
 }
 
+// devinSeverityToFinding maps the review bot's coarse severity bucket
+// (high/medium/low, as parsed from comment bodies in the github read layer) onto
+// the pipeline's finding severities (error/warning/info). The rest of the
+// codebase ranks and gates on error/warning/info (see types.SeverityRank and
+// hasBlockingFindings); an unmapped high/medium/low would rank 0 and not count
+// as blocking, so an escalated Devin finding would neither sort nor gate
+// correctly. Anything unrecognized (including empty) defaults to warning so it
+// still blocks.
+func devinSeverityToFinding(severity string) string {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "high":
+		return "error"
+	case "medium":
+		return "warning"
+	case "low":
+		return "info"
+	default:
+		return "warning"
+	}
+}
+
 // devinFailureOutcome escalates an unresolved post-PR review-loop state to the
 // human approval gate, surfacing the bot's outstanding findings as actionable
 // items. Used when the loop exhausts its bounded rounds with Devin still
@@ -208,17 +230,9 @@ func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline
 		if f.Path == "" {
 			continue // top-level summary, not an actionable file-scoped finding
 		}
-		desc := f.Body
-		if f.Path != "" {
-			desc = fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Body)
-		}
-		severity := f.Severity
-		if severity == "" {
-			severity = "warning"
-		}
 		out.Items = append(out.Items, Finding{
-			Severity:    severity,
-			Description: desc,
+			Severity:    devinSeverityToFinding(f.Severity),
+			Description: fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Body),
 			Action:      types.ActionAskUser,
 		})
 	}

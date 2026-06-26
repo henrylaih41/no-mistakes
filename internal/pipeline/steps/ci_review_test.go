@@ -53,12 +53,15 @@ func (h *fakeReviewHost) GetMergeableState(context.Context, *scm.PR) (scm.Mergea
 func (h *fakeReviewHost) FetchFailedCheckLogs(context.Context, *scm.PR, string, string, []string) (string, error) {
 	return "", scm.ErrUnsupported
 }
-func (h *fakeReviewHost) GetReviewVerdict(_ context.Context, prNumber int, headSHA, botLogin string) (scm.ReviewVerdict, error) {
+func (h *fakeReviewHost) GetReviewVerdict(_ context.Context, prNumber int, headSHA, botLogin string) (scm.ReviewVerdict, []scm.ReviewComment, error) {
 	h.verdictCalls++
 	h.gotPRNumber = prNumber
 	h.gotHeadSHA = headSHA
 	h.gotBotLogin = botLogin
-	return h.verdict, h.verdErr
+	if h.verdErr != nil {
+		return h.verdict, nil, h.verdErr
+	}
+	return h.verdict, h.findings, nil
 }
 func (h *fakeReviewHost) GetBotFindings(context.Context, int, string, string) ([]scm.ReviewComment, error) {
 	h.findingsCalls++
@@ -274,8 +277,10 @@ func TestEvalDevinReview_DefaultsBotLoginAndVerdictReadError(t *testing.T) {
 	if host.gotBotLogin != config.DefaultReviewLoopBotLogin {
 		t.Fatalf("expected default bot login, got %q", host.gotBotLogin)
 	}
+	// The loop now consumes findings from the verdict path, so it never makes a
+	// separate GetBotFindings round-trip (least of all after a verdict read error).
 	if host.findingsCalls != 0 {
-		t.Fatalf("findings should not be fetched after a verdict read error, got %d calls", host.findingsCalls)
+		t.Fatalf("findings should not be fetched separately from the verdict, got %d calls", host.findingsCalls)
 	}
 }
 

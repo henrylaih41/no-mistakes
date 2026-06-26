@@ -169,8 +169,10 @@ type Host interface {
 	// GetReviewVerdict is optional; implementations without Capabilities().Reviews
 	// must return ErrUnsupported. Callers should consult Capabilities first. It
 	// reads the reviewing bot's verdict for the current head SHA (see
-	// ReviewVerdict). botLogin selects which account's reviews count.
-	GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botLogin string) (ReviewVerdict, error)
+	// ReviewVerdict) and also returns the findings it read while deriving that
+	// verdict, so a caller needing both does not have to call GetBotFindings a
+	// second time. botLogin selects which account's reviews count.
+	GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botLogin string) (ReviewVerdict, []ReviewComment, error)
 
 	// GetBotFindings is optional; implementations without Capabilities().Reviews
 	// must return ErrUnsupported. It returns the reviewing bot's findings scoped

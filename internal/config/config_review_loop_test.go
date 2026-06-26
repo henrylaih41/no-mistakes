@@ -182,11 +182,42 @@ func TestLoadRepoFromBytes_ReviewLoopRejectsNegativeMaxRounds(t *testing.T) {
 	}
 }
 
-// TestEffectiveRepoConfig_ReviewLoopFlowsFromPushed proves review_loop is a
-// non-executing setting: unlike the review panel it is NOT stripped to the
-// trusted copy, because it only names a bot login to READ from plus booleans -
-// the fixer is always no-mistakes itself.
-func TestEffectiveRepoConfig_ReviewLoopFlowsFromPushed(t *testing.T) {
+// TestEffectiveRepoConfig_StripsPushedReviewLoop proves the trust gate: review_loop
+// is execution-affecting (it gates CI, names the bot login whose comments become
+// fix-prompt content, and bounds fix rounds), so a block pushed on a feature
+// branch must never win - the effective loop comes from the trusted
+// default-branch copy, exactly like the review panel.
+func TestEffectiveRepoConfig_StripsPushedReviewLoop(t *testing.T) {
+	pushedEnabled := true
+	pushedLogin := "attacker-bot[bot]"
+	pushedRounds := 99
+	pushed := &RepoConfig{
+		ReviewLoop: ReviewLoopRaw{Enabled: &pushedEnabled, BotLogin: &pushedLogin, MaxRounds: &pushedRounds},
+	}
+	trustedEnabled := true
+	trustedLogin := "devin-ai-integration[bot]"
+	trusted := &RepoConfig{
+		ReviewLoop: ReviewLoopRaw{Enabled: &trustedEnabled, BotLogin: &trustedLogin},
+	}
+
+	got := EffectiveRepoConfig(pushed, trusted, false)
+
+	if got.ReviewLoop.BotLogin == nil || *got.ReviewLoop.BotLogin != "devin-ai-integration[bot]" {
+		t.Errorf("ReviewLoop.BotLogin = %v, want trusted devin login, not pushed attacker-bot", got.ReviewLoop.BotLogin)
+	}
+	if got.ReviewLoop.MaxRounds != nil {
+		t.Errorf("ReviewLoop.MaxRounds = %v, want trusted (nil), not pushed 99", got.ReviewLoop.MaxRounds)
+	}
+	// The pushed config must not be mutated.
+	if pushed.ReviewLoop.BotLogin == nil || *pushed.ReviewLoop.BotLogin != "attacker-bot[bot]" {
+		t.Errorf("pushed config was mutated: bot_login = %v", pushed.ReviewLoop.BotLogin)
+	}
+}
+
+// TestEffectiveRepoConfig_NoTrustedZeroesReviewLoop proves that a pushed review_loop
+// with no trusted copy and no opt-in is forced off, blocking the supply-chain
+// vector for repos that ship .no-mistakes.yaml only on feature branches.
+func TestEffectiveRepoConfig_NoTrustedZeroesReviewLoop(t *testing.T) {
 	enabled := true
 	login := "pushed-bot[bot]"
 	pushed := &RepoConfig{
@@ -195,10 +226,27 @@ func TestEffectiveRepoConfig_ReviewLoopFlowsFromPushed(t *testing.T) {
 
 	got := EffectiveRepoConfig(pushed, nil, false)
 
-	if got.ReviewLoop.Enabled == nil || !*got.ReviewLoop.Enabled {
-		t.Errorf("ReviewLoop.Enabled = %v, want true (flows from pushed copy)", got.ReviewLoop.Enabled)
+	if got.ReviewLoop != (ReviewLoopRaw{}) {
+		t.Errorf("ReviewLoop = %+v, want zero value (stripped, no trusted copy)", got.ReviewLoop)
 	}
+}
+
+// TestEffectiveRepoConfig_OptInHonorsPushedReviewLoop proves the maintainer opt-in
+// (allow_repo_commands on the trusted copy) honors the pushed review_loop wholesale.
+func TestEffectiveRepoConfig_OptInHonorsPushedReviewLoop(t *testing.T) {
+	enabled := true
+	login := "pushed-bot[bot]"
+	pushed := &RepoConfig{
+		ReviewLoop: ReviewLoopRaw{Enabled: &enabled, BotLogin: &login},
+	}
+	trustedLogin := "devin-ai-integration[bot]"
+	trusted := &RepoConfig{
+		ReviewLoop: ReviewLoopRaw{BotLogin: &trustedLogin},
+	}
+
+	got := EffectiveRepoConfig(pushed, trusted, true)
+
 	if got.ReviewLoop.BotLogin == nil || *got.ReviewLoop.BotLogin != "pushed-bot[bot]" {
-		t.Errorf("ReviewLoop.BotLogin = %v, want pushed-bot[bot]", got.ReviewLoop.BotLogin)
+		t.Errorf("ReviewLoop.BotLogin = %v, want pushed-bot under opt-in", got.ReviewLoop.BotLogin)
 	}
 }
