@@ -14,6 +14,15 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 )
 
+// refExists reports whether a git ref resolves in dir, without failing the test
+// when it is absent (unlike gitCmd).
+func refExists(t *testing.T, dir, ref string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
+	cmd.Dir = dir
+	return cmd.Run() == nil
+}
+
 func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
@@ -253,6 +262,80 @@ func TestRebaseStep_ForkSyncsPushBranchBeforeDefaultBranch(t *testing.T) {
 	}
 	if mergeBase := gitCmd(t, dir, "merge-base", "HEAD", forkOnlySHA); mergeBase != forkOnlySHA {
 		t.Fatalf("merge-base = %s, want fork tip %s", mergeBase, forkOnlySHA)
+	}
+}
+
+func TestRebaseStep_NonForkRouteBaseUsesPerWorktreeRef(t *testing.T) {
+	t.Parallel()
+	// origin is the gate origin; routeBase is a DIFFERENT base repo selected by
+	// a non-fork route. The pushed branch must be fetched into a per-worktree
+	// ref, never the shared refs/remotes/origin/* namespace.
+	gateOrigin := t.TempDir()
+	routeBase := t.TempDir()
+	gitCmd(t, gateOrigin, "init", "--bare")
+	gitCmd(t, routeBase, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", gateOrigin)
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "base")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", routeBase, "main")
+
+	// A route-base-only commit on the pushed branch.
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "route.txt"), []byte("route\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "route update")
+	routeOnlySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", routeBase, "feature")
+
+	// Local diverges from the route base with its own commit.
+	gitCmd(t, dir, "reset", "--hard", baseSHA)
+	if err := os.WriteFile(filepath.Join(dir, "local.txt"), []byte("local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "local update")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	// Non-fork route whose base differs from the gate origin.
+	sctx.Repo.UpstreamURL = routeBase
+
+	step := &RebaseStep{}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected approval after clean route rebase: %s", outcome.Findings)
+	}
+
+	// The pushed branch landed in the per-worktree route ref...
+	routeRef := routeBranchTrackingRef("feature")
+	if !refExists(t, dir, routeRef) {
+		t.Fatalf("expected per-worktree ref %s to be created", routeRef)
+	}
+	// ...and NOT in the shared origin namespace.
+	if refExists(t, dir, "refs/remotes/origin/feature") {
+		t.Fatal("route base pushed branch must not be written to refs/remotes/origin/feature")
+	}
+	// The route-base-only commit was incorporated by the rebase.
+	if mergeBase := gitCmd(t, dir, "merge-base", "HEAD", routeOnlySHA); mergeBase != routeOnlySHA {
+		t.Fatalf("merge-base = %s, want route tip %s", mergeBase, routeOnlySHA)
 	}
 }
 
