@@ -204,13 +204,13 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	// effective base/fork BEFORE the run is created. An explicit but unknown
 	// route name fails fast here so the error surfaces to the pusher via the
 	// post-receive hook instead of silently falling back.
-	effectiveRepo, err := m.resolveRepoRoute(repo, params.Route)
+	effectiveRepo, effectiveRoute, err := m.resolveRepoRoute(repo, params.Route)
 	if err != nil {
 		return "", err
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.Route)
+	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, effectiveRoute)
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
@@ -267,14 +267,28 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 	// default/legacy target, preserving pre-routes behavior.
 	routeName := ""
 	if sourceRun.Route != nil {
-		routeName = *sourceRun.Route
+		routeName = strings.TrimSpace(*sourceRun.Route)
 	}
-	effectiveRepo, err := m.resolveRepoRoute(repo, routeName)
+	// The named route may have been removed since the original push. Fall back
+	// to the default/legacy target rather than hard-failing the rerun, mirroring
+	// the dangling-default-route fallback in resolveRoute. resolveRepoRoute would
+	// otherwise treat a stored-but-unknown name as a fail-fast push selector.
+	if routeName != "" {
+		r, lookupErr := m.db.GetRoute(repo.ID, routeName)
+		if lookupErr != nil {
+			return "", fmt.Errorf("look up route %q: %w", routeName, lookupErr)
+		}
+		if r == nil {
+			slog.Warn("route stored on previous run no longer exists; falling back to default/legacy target for rerun", "repo_id", repo.ID, "route", routeName)
+			routeName = ""
+		}
+	}
+	effectiveRepo, effectiveRoute, err := m.resolveRepoRoute(repo, routeName)
 	if err != nil {
 		return "", err
 	}
 
-	return m.startRun(ctx, effectiveRepo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, routeName)
+	return m.startRun(ctx, effectiveRepo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, effectiveRoute)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.

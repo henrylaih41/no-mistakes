@@ -28,7 +28,7 @@ func TestResolveRouteLegacyFallback(t *testing.T) {
 		t.Fatalf("insert repo: %v", err)
 	}
 
-	base, fork, err := resolveRoute(d, repo, "")
+	base, fork, _, err := resolveRoute(d, repo, "")
 	if err != nil {
 		t.Fatalf("resolveRoute: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestResolveRouteNamed(t *testing.T) {
 		t.Fatalf("add route: %v", err)
 	}
 
-	base, fork, err := resolveRoute(d, repo, "parent")
+	base, fork, _, err := resolveRoute(d, repo, "parent")
 	if err != nil {
 		t.Fatalf("resolveRoute: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestResolveRouteDefault(t *testing.T) {
 	}
 
 	// No explicit route → the default route is used, not the legacy record.
-	base, fork, err := resolveRoute(d, repo, "")
+	base, fork, _, err := resolveRoute(d, repo, "")
 	if err != nil {
 		t.Fatalf("resolveRoute: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestResolveRouteExplicitOverridesDefault(t *testing.T) {
 		t.Fatalf("set default route: %v", err)
 	}
 
-	base, fork, err := resolveRoute(d, repo, "parent")
+	base, fork, _, err := resolveRoute(d, repo, "parent")
 	if err != nil {
 		t.Fatalf("resolveRoute: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestResolveRouteUnknownFailsFast(t *testing.T) {
 	d := openRouteTestDB(t)
 	repo, _ := d.InsertRepo("/work/repo", "https://github.com/parent/repo.git", "main")
 
-	_, _, err := resolveRoute(d, repo, "nope")
+	_, _, _, err := resolveRoute(d, repo, "nope")
 	if err == nil {
 		t.Fatal("expected unknown route to fail fast")
 	}
@@ -139,11 +139,45 @@ func TestResolveRouteDanglingDefaultFallsBack(t *testing.T) {
 	}
 	repo.DefaultRoute = "parent"
 
-	base, fork, err := resolveRoute(d, repo, "")
+	base, fork, _, err := resolveRoute(d, repo, "")
 	if err != nil {
 		t.Fatalf("resolveRoute: %v", err)
 	}
 	if base != "https://github.com/legacy/repo.git" || fork != "" {
 		t.Fatalf("dangling default did not fall back to record: base=%q fork=%q", base, fork)
+	}
+}
+
+// TestResolveRouteEffectiveName proves the effective route name reported back
+// for persistence: the explicit selector, the resolved default route name, or
+// "" when resolution falls through to the repo record (legacy or dangling
+// default). Persisting the default route name is what keeps a default-route
+// push target-stable across a later default change.
+func TestResolveRouteEffectiveName(t *testing.T) {
+	d := openRouteTestDB(t)
+	repo, _ := d.InsertRepo("/work/repo", "https://github.com/legacy/repo.git", "main")
+	if _, err := d.AddRoute(repo.ID, "parent", "https://github.com/parent/repo.git", ""); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+
+	if _, _, name, err := resolveRoute(d, repo, "parent"); err != nil || name != "parent" {
+		t.Fatalf("explicit route effective name = %q, err=%v; want %q", name, err, "parent")
+	}
+
+	if _, _, name, err := resolveRoute(d, repo, ""); err != nil || name != "" {
+		t.Fatalf("legacy fallback effective name = %q, err=%v; want empty", name, err)
+	}
+
+	withDefault, err := d.UpdateRepoDefaultRoute(repo.ID, "parent")
+	if err != nil {
+		t.Fatalf("set default route: %v", err)
+	}
+	if _, _, name, err := resolveRoute(d, withDefault, ""); err != nil || name != "parent" {
+		t.Fatalf("default route effective name = %q, err=%v; want %q", name, err, "parent")
+	}
+
+	withDefault.DefaultRoute = "gone"
+	if _, _, name, err := resolveRoute(d, withDefault, ""); err != nil || name != "" {
+		t.Fatalf("dangling default effective name = %q, err=%v; want empty", name, err)
 	}
 }
