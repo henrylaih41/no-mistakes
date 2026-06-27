@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS runs (
     status     TEXT NOT NULL DEFAULT 'pending',
     pr_url     TEXT,
     error      TEXT,
+    route      TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -85,4 +86,5 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN intent_source TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_session_id TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_score REAL`,
+	`ALTER TABLE runs ADD COLUMN route TEXT`,
 }

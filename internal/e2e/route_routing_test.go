@@ -105,6 +105,33 @@ func TestPerPushRouteSelectsParentTarget(t *testing.T) {
 	// platform-independent proof of resolution.
 	assertRouteResolved(t, h, "parent", parentURL, forkURL)
 
+	// A rerun carries no route push-option, yet it must re-resolve the SAME
+	// route the push selected (persisted on the run), not the gate's implicit
+	// default (parent-only, no fork). Proof: the rerun again lands the branch on
+	// the fork and leaves the parent without it — which only holds if route
+	// "parent" was re-resolved. With the route dropped, the rerun would push the
+	// branch straight to the parent.
+	if out, err := h.RunInDir(h.WorkDir, "rerun"); err != nil {
+		t.Fatalf("rerun: %v\n%s", err, out)
+	}
+	rerunInfo := h.WaitForRun(branch, 90*time.Second)
+	if rerunInfo.ID == run.ID {
+		t.Fatalf("rerun returned the original run id %s", run.ID)
+	}
+	if rerunInfo.Status != types.RunCompleted {
+		t.Fatalf("rerun did not complete: status=%s error=%v", rerunInfo.Status, deref(rerunInfo.Error))
+	}
+	forkSHA2, err := h.runGit(ctx, forkDir, "rev-parse", "refs/heads/"+branch)
+	if err != nil {
+		t.Fatalf("fork branch missing after rerun (route not preserved): %v\n%s", err, forkSHA2)
+	}
+	if got := string(bytes.TrimSpace(forkSHA2)); got != rerunInfo.HeadSHA {
+		t.Fatalf("after rerun fork branch SHA = %s, want rerun head %s", got, rerunInfo.HeadSHA)
+	}
+	if out, err := h.runGit(ctx, h.UpstreamDir, "rev-parse", "--verify", "refs/heads/"+branch); err == nil {
+		t.Fatalf("parent unexpectedly received feature branch after rerun (route not preserved): %s", bytes.TrimSpace(out))
+	}
+
 	// When the stubbed gh CLI is authenticated in this environment, the PR step
 	// runs: assert it created a PR against the parent with the fork-owner head.
 	if _, statErr := os.Stat(ghLog); statErr != nil {

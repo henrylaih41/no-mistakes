@@ -210,7 +210,7 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
+	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.Route)
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
@@ -253,25 +253,34 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 		return "", fmt.Errorf("no previous run for branch %s", branch)
 	}
 
-	baseSHA := latestForBranch.BaseSHA
+	sourceRun := latestForBranch
 	if matchingHead != nil {
-		baseSHA = matchingHead.BaseSHA
+		sourceRun = matchingHead
 	}
+	baseSHA := sourceRun.BaseSHA
 
-	// A rerun carries no route push-option, so it resolves the default route
-	// (or the legacy record when none is set) for its effective base/fork.
-	effectiveRepo, err := m.resolveRepoRoute(repo, "")
+	// A rerun carries no route push-option, so it re-resolves the SAME route
+	// the original push selected (persisted on the run). Re-resolving by name
+	// (rather than reusing stored URLs) honors a later edit to the route
+	// definition, and keeps a rerun target-stable instead of silently
+	// retargeting the current default route. An empty stored route resolves the
+	// default/legacy target, preserving pre-routes behavior.
+	routeName := ""
+	if sourceRun.Route != nil {
+		routeName = *sourceRun.Route
+	}
+	effectiveRepo, err := m.resolveRepoRoute(repo, routeName)
 	if err != nil {
 		return "", err
 	}
 
-	return m.startRun(ctx, effectiveRepo, branch, headSHA, baseSHA, "rerun", skipSteps, intent)
+	return m.startRun(ctx, effectiveRepo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, routeName)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string) (string, error) {
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, route string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -298,8 +307,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
-	// Create run record.
-	run, err := m.db.InsertRun(repo.ID, branch, headSHA, baseSHA)
+	// Create run record. The selected route name is persisted so a later rerun
+	// re-resolves the same target instead of falling back to the default route.
+	run, err := m.db.InsertRunWithRoute(repo.ID, branch, headSHA, baseSHA, route)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
