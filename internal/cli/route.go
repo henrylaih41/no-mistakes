@@ -260,11 +260,7 @@ func printRouteDetail(cmd *cobra.Command, route *db.Route) {
 // default route used when no named route applies.
 func printDefaultTarget(cmd *cobra.Command, repo *db.Repo) {
 	w := cmd.OutOrStdout()
-	base := repo.UpstreamURL
-	if strings.TrimSpace(repo.ForkURL) != "" {
-		base = safeurl.Redact(base)
-	}
-	fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  base"), base)
+	fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  base"), safeurl.Redact(repo.UpstreamURL))
 	if strings.TrimSpace(repo.ForkURL) != "" {
 		fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  fork"), safeurl.Redact(repo.ForkURL))
 	}
