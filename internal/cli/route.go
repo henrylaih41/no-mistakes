@@ -244,16 +244,13 @@ func defaultMarker(isDefault bool) string {
 	return ""
 }
 
-// printRouteDetail renders a route's base and optional fork. Fork URLs are
-// redacted, and the base is redacted when a fork is present, mirroring how init
-// and eject treat fork-routed remotes.
+// printRouteDetail renders a route's base and optional fork. Both are always
+// redacted: a fork-less route's base doubles as its push target (e.g. a self
+// route), so it can embed HTTPS credentials. safeurl.Redact leaves
+// credential-free URLs unchanged.
 func printRouteDetail(cmd *cobra.Command, route *db.Route) {
 	w := cmd.OutOrStdout()
-	base := route.BaseURL
-	if strings.TrimSpace(route.ForkURL) != "" {
-		base = safeurl.Redact(base)
-	}
-	fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  base"), base)
+	fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  base"), safeurl.Redact(route.BaseURL))
 	if strings.TrimSpace(route.ForkURL) != "" {
 		fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  fork"), safeurl.Redact(route.ForkURL))
 	}

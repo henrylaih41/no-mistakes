@@ -80,11 +80,12 @@ func TestRebaseStep_ForcePushSkipsOriginBranch(t *testing.T) {
 		t.Fatalf("feature.txt = %q, want %q; force push was not respected", got, "user-change\n")
 	}
 
-	// Should be rebased onto origin/main
-	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", "origin/main")
-	originMain := gitCmd(t, dir, "rev-parse", "origin/main")
-	if mergeBase != originMain {
-		t.Fatalf("merge-base = %s, want origin/main %s", mergeBase, originMain)
+	// Should be rebased onto the base default branch
+	baseMain := baseTrackingRef("main")
+	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", baseMain)
+	baseMainSHA := gitCmd(t, dir, "rev-parse", baseMain)
+	if mergeBase != baseMainSHA {
+		t.Fatalf("merge-base = %s, want %s %s", mergeBase, baseMain, baseMainSHA)
 	}
 }
 

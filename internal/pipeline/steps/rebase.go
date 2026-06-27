@@ -56,9 +56,10 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// state on the remote.
 	forcePush := isForcePushAgainstRemote(ctx, sctx.WorkDir, pushRemote, branch, branchTarget, sctx.Run.BaseSHA)
 
+	baseDefaultRef := baseTrackingRef(defaultBranch)
 	sctx.Log("fetching latest upstream state...")
-	if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, baseRemote, defaultBranch, "refs/remotes/origin/"+defaultBranch); err != nil {
-		sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", defaultBranch, err))
+	if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, baseRemote, defaultBranch, baseDefaultRef); err != nil {
+		sctx.LogFile(fmt.Sprintf("warning: could not fetch %s: %v", baseDefaultRef, err))
 	}
 	if !forcePush && branch != "" && branch != defaultBranch {
 		if forkRouted {
@@ -143,7 +144,7 @@ func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string
 		targets = append(targets, branchTarget)
 	}
 	if branch != defaultBranch {
-		targets = append(targets, "origin/"+defaultBranch)
+		targets = append(targets, baseTrackingRef(defaultBranch))
 	}
 	return targets
 }
@@ -155,14 +156,14 @@ func forcePushRebaseTargets(branch, defaultBranch string) []string {
 	if branch == defaultBranch {
 		return nil
 	}
-	return []string{"origin/" + defaultBranch}
+	return []string{baseTrackingRef(defaultBranch)}
 }
 
 func remoteDefaultBranchAdvanced(ctx context.Context, workDir, defaultBranch, baseSHA string) bool {
 	if baseSHA == "" || git.IsZeroSHA(baseSHA) {
 		return false
 	}
-	remoteSHA, err := git.Run(ctx, workDir, "rev-parse", "--verify", "origin/"+defaultBranch)
+	remoteSHA, err := git.Run(ctx, workDir, "rev-parse", "--verify", baseTrackingRef(defaultBranch))
 	if err != nil {
 		return false
 	}
