@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 )
 
 // resolveRoute resolves the effective base (PR base / upstream) and fork URLs
@@ -65,7 +66,7 @@ func (m *RunManager) resolveRepoRoute(repo *db.Repo, routeName string) (*db.Repo
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("route resolved", "repo_id", repo.ID, "route", routeName, "base", baseURL, "fork", forkURL)
+	slog.Info("route resolved", "repo_id", repo.ID, "route", routeName, "base", safeurl.Redact(baseURL), "fork", safeurl.Redact(forkURL))
 	effective := *repo
 	effective.UpstreamURL = baseURL
 	effective.ForkURL = forkURL
