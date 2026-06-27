@@ -137,6 +137,24 @@ func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkUR
 	return repo, true, nil
 }
 
+// ValidateRoute validates a named local route's base and optional fork URL.
+// A route generalizes the single --fork-url setting into named targets: the
+// base is the PR base (upstream) URL and is required; the fork is the optional
+// branch push target and cross-repo PR head. When a fork is set, base+fork must
+// satisfy the same fork-routing rules as init's --fork-url (validateForkRouting).
+// A base with no fork carries no provider restriction, matching a plain init.
+func ValidateRoute(baseURL, forkURL string) error {
+	baseURL = strings.TrimSpace(baseURL)
+	forkURL = strings.TrimSpace(forkURL)
+	if baseURL == "" {
+		return fmt.Errorf("route base URL must not be empty")
+	}
+	if forkURL == "" {
+		return nil
+	}
+	return validateForkRouting(baseURL, forkURL)
+}
+
 func validateForkRouting(upstreamURL, forkURL string) error {
 	parentProvider := scm.DetectProvider(upstreamURL)
 	forkProvider := scm.DetectProvider(forkURL)

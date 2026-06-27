@@ -97,6 +97,26 @@ $ no-mistakes
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and initialize with `no-mistakes init --fork-url <your-fork-url>`.
 
+### Per-push routes: one clone, multiple PR targets
+
+Local **routes** generalize `--fork-url` so a single clone can raise PRs to different targets, chosen per push, without re-init or a second clone. A route is a PR base (upstream) URL plus an optional fork push URL:
+
+```sh
+# define named routes (stored locally in the gate, never committed)
+no-mistakes route add parent --base https://github.com/parent/app.git --fork-url https://github.com/you/app.git
+no-mistakes route add self   --base https://github.com/you/app.git
+no-mistakes route list
+no-mistakes route set-default parent   # optional: applied when no route is selected
+
+# pick a route for a single push
+git push no-mistakes my-branch -o no-mistakes.route=parent   # PR base = parent, branch pushed to your fork
+git push no-mistakes my-branch -o no-mistakes.route=self     # PR within your own fork
+```
+
+Resolution precedence is: an explicit `-o no-mistakes.route=<name>` &rarr; the configured default route &rarr; the gate's own recorded upstream/fork (today's behavior). An explicit but unknown route name fails the push fast with a clear error rather than silently falling back.
+
+**Trust:** routes are local-only. They live in the gate database and are never read from a pushed branch or any in-repo file, so a contributor's feature branch can neither define nor redirect a route. The push-option only *selects* a pre-defined local route by name — it can never supply a base or fork URL.
+
 From the TUI you act on each **finding**: **auto-fix** ones are applied for you (or approve to let them), **ask-user** ones are a judgement call you approve, fix, or skip.
 Once every check is green, the gate forwards your branch to the configured push target and opens the PR for you, so there is no manual `git push origin` and no hand-written PR body.
 Prefer to let your coding agent drive the same flow headlessly?

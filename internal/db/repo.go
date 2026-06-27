@@ -13,7 +13,12 @@ type Repo struct {
 	UpstreamURL   string
 	ForkURL       string
 	DefaultBranch string
-	CreatedAt     int64
+	// DefaultRoute names the local route applied to a push when no
+	// no-mistakes.route push-option selects one. Empty means fall back to the
+	// record's own UpstreamURL/ForkURL (the implicit default route), preserving
+	// pre-routes behavior.
+	DefaultRoute string
+	CreatedAt    int64
 }
 
 // PushURL returns the remote URL that should receive branch updates.
@@ -81,8 +86,8 @@ func (d *DB) InsertRepoWithFork(workingPath, upstreamURL, forkURL, defaultBranch
 func (d *DB) GetRepo(id string) (*Repo, error) {
 	r := &Repo{}
 	err := d.sql.QueryRow(
-		`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, created_at FROM repos WHERE id = ?`, id,
-	).Scan(&r.ID, &r.WorkingPath, &r.UpstreamURL, &r.ForkURL, &r.DefaultBranch, &r.CreatedAt)
+		`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, COALESCE(default_route, ''), created_at FROM repos WHERE id = ?`, id,
+	).Scan(&r.ID, &r.WorkingPath, &r.UpstreamURL, &r.ForkURL, &r.DefaultBranch, &r.DefaultRoute, &r.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -96,8 +101,8 @@ func (d *DB) GetRepo(id string) (*Repo, error) {
 func (d *DB) GetRepoByPath(workingPath string) (*Repo, error) {
 	r := &Repo{}
 	err := d.sql.QueryRow(
-		`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, created_at FROM repos WHERE working_path = ?`, workingPath,
-	).Scan(&r.ID, &r.WorkingPath, &r.UpstreamURL, &r.ForkURL, &r.DefaultBranch, &r.CreatedAt)
+		`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, COALESCE(default_route, ''), created_at FROM repos WHERE working_path = ?`, workingPath,
+	).Scan(&r.ID, &r.WorkingPath, &r.UpstreamURL, &r.ForkURL, &r.DefaultBranch, &r.DefaultRoute, &r.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -141,6 +146,20 @@ func (d *DB) UpdateRepoForkURL(id, forkURL string) (*Repo, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update repo fork URL: %w", err)
+	}
+	return d.GetRepo(id)
+}
+
+// UpdateRepoDefaultRoute sets (or clears, when name is empty) the repo's
+// default route name — the local route applied to a push that does not select
+// one with a no-mistakes.route push-option.
+func (d *DB) UpdateRepoDefaultRoute(id, name string) (*Repo, error) {
+	_, err := d.sql.Exec(
+		`UPDATE repos SET default_route = ? WHERE id = ?`,
+		nullableString(name), id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update repo default route: %w", err)
 	}
 	return d.GetRepo(id)
 }

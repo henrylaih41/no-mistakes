@@ -7,7 +7,17 @@ CREATE TABLE IF NOT EXISTS repos (
     upstream_url   TEXT NOT NULL,
     fork_url       TEXT,
     default_branch TEXT NOT NULL DEFAULT 'main',
+    default_route  TEXT,
     created_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS routes (
+    repo_id    TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    base_url   TEXT NOT NULL,
+    fork_url   TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -67,6 +77,7 @@ CREATE TABLE IF NOT EXISTS intent_cache (
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
+	`ALTER TABLE repos ADD COLUMN default_route TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,
