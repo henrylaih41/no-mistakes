@@ -38,11 +38,12 @@ func resolveDefaultBranchTipSHA(ctx context.Context, workDir, upstreamURL, fallb
 
 func resolveDefaultBranchTip(ctx context.Context, workDir, upstreamURL, fallbackBaseSHA, defaultBranch string) (string, bool) {
 	if strings.TrimSpace(defaultBranch) != "" {
-		remoteName := resolveUpstreamRemoteName(ctx, workDir, upstreamURL)
-		if err := git.FetchRemoteBranch(ctx, workDir, remoteName, defaultBranch); err != nil {
+		baseRemote := remoteOrURL(upstreamURL)
+		localRef := "refs/remotes/origin/" + defaultBranch
+		if err := git.FetchRemoteBranchToRef(ctx, workDir, baseRemote, defaultBranch, localRef); err != nil {
 			return unresolvedDefaultBranchTip(ctx, workDir, fallbackBaseSHA, defaultBranch), false
 		}
-		for _, ref := range []string{remoteName + "/" + defaultBranch, defaultBranch} {
+		for _, ref := range []string{"origin/" + defaultBranch, defaultBranch} {
 			sha, err := git.Run(ctx, workDir, "rev-parse", "--verify", ref)
 			if err == nil && strings.TrimSpace(sha) != "" {
 				return strings.TrimSpace(sha), true
@@ -61,23 +62,6 @@ func unresolvedDefaultBranchTip(ctx context.Context, workDir, fallbackBaseSHA, d
 		return strings.TrimSpace(sha)
 	}
 	return git.EmptyTreeSHA
-}
-
-func resolveUpstreamRemoteName(ctx context.Context, workDir, upstreamURL string) string {
-	if strings.TrimSpace(upstreamURL) == "" {
-		return "origin"
-	}
-	remotes, err := git.Run(ctx, workDir, "remote")
-	if err != nil {
-		return "origin"
-	}
-	for _, remote := range strings.Fields(remotes) {
-		url, urlErr := git.GetRemoteURL(ctx, workDir, remote)
-		if urlErr == nil && strings.TrimSpace(url) == strings.TrimSpace(upstreamURL) {
-			return remote
-		}
-	}
-	return "origin"
 }
 
 func mergeBaseWithDefaultBranch(ctx context.Context, workDir, defaultBranch string) string {
