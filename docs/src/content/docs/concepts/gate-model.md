@@ -163,7 +163,7 @@ not stored in this database. Legacy `user_fix` rounds are still read as
 `auto-fix` for backward
 compatibility.
 Run records also store the nullable `awaiting_agent_since` timestamp used only to render the AXI parked signal while a gate is waiting for the driving agent.
-Repo records store the parent `upstream_url` and an optional `fork_url`; branch pushes use `fork_url` when present, while PR and CI provider context stays anchored to the parent.
+Repo records store the parent `upstream_url` and an optional `fork_url`; branch pushes use `fork_url` when present, while PR and CI provider context stays anchored to the parent. Local push [routes](/no-mistakes/reference/cli/#no-mistakes-route) live in their own table keyed by repo, each a named base/fork pair, with an optional per-repo default route; the route a run resolved to is recorded on the run so reruns re-resolve the same target. Routes are read only from this local database, never from a pushed branch.
 
 ## Local state
 
