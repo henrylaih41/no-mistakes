@@ -209,7 +209,7 @@ git push no-mistakes <branch> -o no-mistakes.route=<name>
 
 Resolution precedence for a push is: an explicit `-o no-mistakes.route=<name>` &rarr; the configured default route &rarr; the gate's own recorded upstream/fork (the pre-routes behavior). An explicit but unknown route name fails the push fast with a clear error instead of silently falling back.
 
-**Trust:** routes are local-only — stored in the gate database, never read from a pushed branch or any in-repo file — so a contributor's feature branch can neither define nor redirect a route. The push-option only *selects* a pre-defined local route by name; it can never supply a base or fork URL. Route names and fork URLs are redacted in output the same way `init`/`eject` redact fork-routed remotes.
+**Trust:** routes are local-only — stored in the gate database, never read from a pushed branch or any in-repo file — so a contributor's feature branch can neither define nor redirect a route. The push-option only *selects* a pre-defined local route by name; it can never supply a base or fork URL. Base and fork URLs are always redacted in `route list` output — a fork-less route's base doubles as its push target, so it too can embed credentials — the same way `init`/`eject` redact fork-routed remotes.
 
 ## no-mistakes attach
 
