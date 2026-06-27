@@ -108,3 +108,38 @@ func (d *DB) RemoveRoute(repoID, name string) (bool, error) {
 	}
 	return n > 0, nil
 }
+
+// RemoveRouteAndClearDefault deletes a repo's route by name and, in the same
+// transaction, clears the repo's default_route when it still points at that
+// name. Doing both atomically closes the TOCTOU window a separate delete +
+// clear would leave open, where a concurrent reader could observe a default
+// referencing an already-removed route. It reports whether a route row was
+// removed so callers can distinguish a successful delete from "no such route".
+func (d *DB) RemoveRouteAndClearDefault(repoID, name string) (bool, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return false, fmt.Errorf("remove route: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`DELETE FROM routes WHERE repo_id = ? AND name = ?`, repoID, name)
+	if err != nil {
+		return false, fmt.Errorf("remove route: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("remove route: %w", err)
+	}
+	if n > 0 {
+		if _, err := tx.Exec(
+			`UPDATE repos SET default_route = NULL WHERE id = ? AND default_route = ?`,
+			repoID, name,
+		); err != nil {
+			return false, fmt.Errorf("clear default route: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("remove route: %w", err)
+	}
+	return n > 0, nil
+}

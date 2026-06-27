@@ -69,12 +69,13 @@ func (d *DB) InsertRunWithRoute(repoID, branch, headSHA, baseSHA, route string) 
 		CreatedAt: ts,
 		UpdatedAt: ts,
 	}
-	if trimmed := strings.TrimSpace(route); trimmed != "" {
+	trimmed := strings.TrimSpace(route)
+	if trimmed != "" {
 		r.Route = &trimmed
 	}
 	_, err := d.sql.Exec(
 		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, route, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, nullableString(route), r.CreatedAt, r.UpdatedAt,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, nullableString(trimmed), r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

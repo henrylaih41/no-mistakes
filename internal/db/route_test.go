@@ -87,6 +87,70 @@ func TestRouteAddGetListRemove(t *testing.T) {
 	}
 }
 
+func TestRemoveRouteAndClearDefault(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:parent/project.git", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	if _, err := d.AddRoute(repo.ID, "parent", "https://github.com/parent/project.git", ""); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	if _, err := d.AddRoute(repo.ID, "other", "https://github.com/other/project.git", ""); err != nil {
+		t.Fatalf("add other route: %v", err)
+	}
+	if _, err := d.UpdateRepoDefaultRoute(repo.ID, "parent"); err != nil {
+		t.Fatalf("set default route: %v", err)
+	}
+
+	// Removing the default route clears the dangling default atomically.
+	removed, err := d.RemoveRouteAndClearDefault(repo.ID, "parent")
+	if err != nil {
+		t.Fatalf("remove route and clear default: %v", err)
+	}
+	if !removed {
+		t.Fatal("expected removed=true for existing route")
+	}
+	got, err := d.GetRepo(repo.ID)
+	if err != nil {
+		t.Fatalf("get repo: %v", err)
+	}
+	if got.DefaultRoute != "" {
+		t.Fatalf("default route = %q, want cleared", got.DefaultRoute)
+	}
+
+	// Removing an absent route reports removed=false and is a no-op.
+	removed, err = d.RemoveRouteAndClearDefault(repo.ID, "parent")
+	if err != nil {
+		t.Fatalf("remove absent route: %v", err)
+	}
+	if removed {
+		t.Fatal("expected removed=false for absent route")
+	}
+
+	// Removing a non-default route leaves an unrelated default untouched.
+	if _, err := d.UpdateRepoDefaultRoute(repo.ID, "other"); err != nil {
+		t.Fatalf("set default route to other: %v", err)
+	}
+	if _, err := d.AddRoute(repo.ID, "extra", "https://github.com/extra/project.git", ""); err != nil {
+		t.Fatalf("add extra route: %v", err)
+	}
+	removed, err = d.RemoveRouteAndClearDefault(repo.ID, "extra")
+	if err != nil {
+		t.Fatalf("remove extra route: %v", err)
+	}
+	if !removed {
+		t.Fatal("expected removed=true for extra route")
+	}
+	got, err = d.GetRepo(repo.ID)
+	if err != nil {
+		t.Fatalf("get repo: %v", err)
+	}
+	if got.DefaultRoute != "other" {
+		t.Fatalf("default route = %q, want other preserved", got.DefaultRoute)
+	}
+}
+
 func TestRouteDuplicateNameRejected(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:parent/project.git", "main")

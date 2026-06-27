@@ -173,20 +173,14 @@ func newRouteRemoveCmd() *cobra.Command {
 					return err
 				}
 
-				removed, err := d.RemoveRoute(repo.ID, name)
+				// Delete the route and clear a dangling default atomically so
+				// resolution never points at a route that no longer exists.
+				removed, err := d.RemoveRouteAndClearDefault(repo.ID, name)
 				if err != nil {
 					return fmt.Errorf("remove route: %w", err)
 				}
 				if !removed {
 					return fmt.Errorf("no such route %q", name)
-				}
-
-				// Clear a dangling default so resolution never points at a route
-				// that no longer exists.
-				if repo.DefaultRoute == name {
-					if _, err := d.UpdateRepoDefaultRoute(repo.ID, ""); err != nil {
-						return fmt.Errorf("clear default route: %w", err)
-					}
 				}
 
 				w := cmd.OutOrStdout()
