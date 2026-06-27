@@ -183,6 +183,34 @@ no-mistakes eject
 Removes the `no-mistakes` remote, deletes the bare repo directory, cleans up worktrees, and deletes the database record (cascades to runs and steps).
 It does not remove repo-local agent skill files created by `init`.
 
+## no-mistakes route
+
+Manage local push **routes** so one clone can raise PRs to different targets, chosen per push, without re-init or a second clone. A route is a PR base (upstream) URL plus an optional fork push URL — generalizing `init --fork-url` into named targets.
+
+```sh
+no-mistakes route add <name> --base <url> [--fork-url <url>]
+no-mistakes route list
+no-mistakes route remove <name>
+no-mistakes route set-default <name>
+```
+
+Select a route on a push with the `no-mistakes.route` push-option:
+
+```sh
+git push no-mistakes <branch> -o no-mistakes.route=<name>
+```
+
+| Subcommand | Description |
+|---|---|
+| `add <name>` | Add a route. `--base` (required) is the PR base URL; `--fork-url` (optional) is the branch push target and cross-repo PR head. Base/fork are validated with the same rules as `init --fork-url`; duplicate and invalid names are rejected. |
+| `list` | List routes for the current repo, marking the default and showing the implicit default target (the gate's recorded upstream/fork) when no named route applies. |
+| `remove <name>` | Remove a route. Clears the default when the removed route was the default. |
+| `set-default <name>` | Set the route applied to a push that selects none. The route must already exist. |
+
+Resolution precedence for a push is: an explicit `-o no-mistakes.route=<name>` &rarr; the configured default route &rarr; the gate's own recorded upstream/fork (the pre-routes behavior). An explicit but unknown route name fails the push fast with a clear error instead of silently falling back.
+
+**Trust:** routes are local-only — stored in the gate database, never read from a pushed branch or any in-repo file — so a contributor's feature branch can neither define nor redirect a route. The push-option only *selects* a pre-defined local route by name; it can never supply a base or fork URL. Route names and fork URLs are redacted in output the same way `init`/`eject` redact fork-routed remotes.
+
 ## no-mistakes attach
 
 Attach to the active pipeline run.

@@ -402,11 +402,23 @@ func (h *Harness) CommitChange(branch, path, content, message string) string {
 // run. Returns the IPC client connected to the daemon's socket.
 func (h *Harness) PushToGate(branch string) {
 	h.t.Helper()
+	h.PushToGateWithOptions(branch)
+}
+
+// PushToGateWithOptions is PushToGate plus one or more git push options (each
+// forwarded as `-o <opt>`), e.g. "no-mistakes.route=parent". The post-receive
+// hook forwards every GIT_PUSH_OPTION_* to notify-push.
+func (h *Harness) PushToGateWithOptions(branch string, pushOptions ...string) {
+	h.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := h.runGit(ctx, h.WorkDir, "push", "no-mistakes", branch)
+	args := []string{"push", "no-mistakes", branch}
+	for _, opt := range pushOptions {
+		args = append(args, "-o", opt)
+	}
+	out, err := h.runGit(ctx, h.WorkDir, args...)
 	if err != nil {
-		h.t.Fatalf("git push no-mistakes %s: %v\n%s", branch, err, out)
+		h.t.Fatalf("git push no-mistakes %s %v: %v\n%s", branch, pushOptions, err, out)
 	}
 }
 

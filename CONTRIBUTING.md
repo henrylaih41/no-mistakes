@@ -24,6 +24,22 @@ A GitHub Actions check (`Require no-mistakes`) runs on every PR and fails if the
 
 See the [quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
+### One clone, fork *and* parent via routes
+
+If you sometimes raise PRs to your own fork and sometimes to the parent, you don't need a second clone or a re-init. Define local **routes** once and pick one per push:
+
+```sh
+no-mistakes route add parent --base git@github.com:kunchenguid/no-mistakes.git --fork-url git@github.com:<you>/no-mistakes.git
+no-mistakes route add self   --base git@github.com:<you>/no-mistakes.git
+
+git push no-mistakes <branch> -o no-mistakes.route=parent   # PR against the parent, branch pushed to your fork
+git push no-mistakes <branch> -o no-mistakes.route=self     # PR within your own fork
+```
+
+`no-mistakes route list`, `route remove <name>`, and `route set-default <name>` round out the group. Routes generalize `init --fork-url`: a route is a PR base URL plus an optional fork push URL.
+
+Routes are **local-only** — stored in the gate database, never read from a pushed branch or any in-repo file — so a contributor's branch can neither define nor redirect a route. The `no-mistakes.route=<name>` push-option only *selects* a pre-defined local route by name; it can never supply a base or fork URL. An unknown route name fails the push fast instead of silently falling back.
+
 ## Repo conventions
 
 - Go 1.25+, standard toolchain. See `AGENTS.md` for agent instructions.

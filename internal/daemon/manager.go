@@ -200,8 +200,17 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 		return "", fmt.Errorf("unknown repo for gate %s", params.Gate)
 	}
 
+	// Resolve the selected route (or the default/legacy target) into the run's
+	// effective base/fork BEFORE the run is created. An explicit but unknown
+	// route name fails fast here so the error surfaces to the pusher via the
+	// post-receive hook instead of silently falling back.
+	effectiveRepo, err := m.resolveRepoRoute(repo, params.Route)
+	if err != nil {
+		return "", err
+	}
+
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
+	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
@@ -249,7 +258,14 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 		baseSHA = matchingHead.BaseSHA
 	}
 
-	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent)
+	// A rerun carries no route push-option, so it resolves the default route
+	// (or the legacy record when none is set) for its effective base/fork.
+	effectiveRepo, err := m.resolveRepoRoute(repo, "")
+	if err != nil {
+		return "", err
+	}
+
+	return m.startRun(ctx, effectiveRepo, branch, headSHA, baseSHA, "rerun", skipSteps, intent)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.

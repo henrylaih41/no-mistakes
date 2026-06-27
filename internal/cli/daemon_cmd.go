@@ -57,6 +57,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			route, err := parseRoutePushOption(pushOptions)
+			if err != nil {
+				return err
+			}
 
 			p, err := paths.New()
 			if err != nil {
@@ -77,6 +81,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				New:       newSHA,
 				SkipSteps: skipSteps,
 				Intent:    intent,
+				Route:     route,
 			}, &result)
 		},
 	}
@@ -155,6 +160,36 @@ func parseIntentPushOptions(options []string) (string, error) {
 		intent = string(decoded)
 	}
 	return intent, nil
+}
+
+// routePushOptionPrefix carries the name of a LOCAL route to apply to the push.
+// The value only SELECTS a route already stored in the gate database by name;
+// it can never supply a base or fork URL, so a pushed branch cannot redirect a
+// run's target.
+const routePushOptionPrefix = "no-mistakes.route="
+
+// parseRoutePushOption extracts the selected route name from the forwarded push
+// options. The last occurrence wins (mirroring parseIntentPushOptions). An
+// empty or malformed value is rejected so a bad selector fails fast at the push
+// boundary rather than silently selecting the default route. The named route's
+// existence is resolved later, at run creation.
+func parseRoutePushOption(options []string) (string, error) {
+	route := ""
+	for _, option := range options {
+		value, ok := strings.CutPrefix(option, routePushOptionPrefix)
+		if !ok {
+			continue
+		}
+		name := strings.TrimSpace(value)
+		if name == "" {
+			return "", fmt.Errorf("empty route name in push option %q", option)
+		}
+		if !validRouteName(name) {
+			return "", fmt.Errorf("invalid route name %q: use letters, digits, '.', '_' or '-' (must start with a letter or digit)", name)
+		}
+		route = name
+	}
+	return route, nil
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {
