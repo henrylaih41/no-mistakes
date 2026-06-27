@@ -150,9 +150,71 @@ func TestResolveDefaultBranchTipSHA_FetchesRemoteTip(t *testing.T) {
 		t.Fatalf("resolveDefaultBranchTipSHA = %q, want remote tip %q", got, remoteTip)
 	}
 
-	fetchedOriginTip := gitCmd(t, workDir, "rev-parse", "origin/main")
-	if fetchedOriginTip != remoteTip {
-		t.Fatalf("origin/main after resolve = %q, want %q", fetchedOriginTip, remoteTip)
+	fetchedBaseTip := gitCmd(t, workDir, "rev-parse", baseTrackingRef("main"))
+	if fetchedBaseTip != remoteTip {
+		t.Fatalf("%s after resolve = %q, want %q", baseTrackingRef("main"), fetchedBaseTip, remoteTip)
+	}
+}
+
+// TestResolveDefaultBranchTip_ConcurrentWorktreesDoNotClobberBaseRef proves the
+// route fix: two linked worktrees of the same bare repo resolve different route
+// base tips for the same default branch name, and neither overwrites the other's
+// base ref. Before scoping base fetches to the per-worktree refs/worktree/*
+// namespace, both fetches landed in the shared refs/remotes/origin/main, so a
+// sibling run could make one worktree rebase/validate against another route's
+// base.
+func TestResolveDefaultBranchTip_ConcurrentWorktreesDoNotClobberBaseRef(t *testing.T) {
+	t.Parallel()
+
+	makeBase := func(content string) (string, string) {
+		bare := t.TempDir()
+		gitCmd(t, bare, "init", "--bare")
+		seed := t.TempDir()
+		gitCmd(t, seed, "init")
+		gitCmd(t, seed, "config", "user.name", "test")
+		gitCmd(t, seed, "config", "user.email", "test@test.com")
+		gitCmd(t, seed, "checkout", "-b", "main")
+		if err := os.WriteFile(filepath.Join(seed, "base.txt"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, seed, "add", "base.txt")
+		gitCmd(t, seed, "commit", "-m", content)
+		gitCmd(t, seed, "remote", "add", "origin", bare)
+		gitCmd(t, seed, "push", "origin", "main")
+		return bare, gitCmd(t, seed, "rev-parse", "HEAD")
+	}
+
+	baseA, tipA := makeBase("base A\n")
+	baseB, tipB := makeBase("base B\n")
+	if tipA == tipB {
+		t.Fatal("expected distinct base tips")
+	}
+
+	// One shared bare gate repo with two linked worktrees, mirroring how the
+	// daemon runs concurrent branches off a single clone.
+	gate := t.TempDir()
+	gitCmd(t, gate, "clone", "--bare", baseA, ".")
+	wtA := t.TempDir()
+	wtB := t.TempDir()
+	gitCmd(t, gate, "worktree", "add", "-b", "feat-a", wtA, "main")
+	gitCmd(t, gate, "worktree", "add", "-b", "feat-b", wtB, "main")
+
+	gotA := resolveDefaultBranchTipSHA(context.Background(), wtA, baseA, "", "main")
+	gotB := resolveDefaultBranchTipSHA(context.Background(), wtB, baseB, "", "main")
+	if gotA != tipA {
+		t.Fatalf("worktree A tip = %q, want base A tip %q", gotA, tipA)
+	}
+	if gotB != tipB {
+		t.Fatalf("worktree B tip = %q, want base B tip %q", gotB, tipB)
+	}
+
+	// The crux: each worktree's base ref still holds its OWN route base tip; the
+	// sibling worktree's fetch into the same branch name did not clobber it.
+	if base := gitCmd(t, wtA, "rev-parse", baseTrackingRef("main")); base != tipA {
+		t.Fatalf("worktree A %s = %q, want %q (clobbered by sibling)", baseTrackingRef("main"), base, tipA)
+	}
+	if base := gitCmd(t, wtB, "rev-parse", baseTrackingRef("main")); base != tipB {
+		t.Fatalf("worktree B %s = %q, want %q (clobbered by sibling)", baseTrackingRef("main"), base, tipB)
 	}
 }
 
@@ -194,16 +256,16 @@ func TestResolveDefaultBranchTipSHA_FetchesByBaseURLRegardlessOfRemoteName(t *te
 	gitCmd(t, updater, "push", "origin", "main")
 
 	// The base URL is fetched directly (not via the gate's remote name, which is
-	// "upstream" here), so the route base's tip lands in origin/main even though
-	// no remote is named origin.
+	// "upstream" here), so the route base's tip lands in the per-worktree base
+	// ref even though no remote is named origin.
 	got := resolveDefaultBranchTipSHA(context.Background(), workDir, upstream, "", "main")
 	if got != remoteTip {
 		t.Fatalf("resolveDefaultBranchTipSHA = %q, want remote tip %q", got, remoteTip)
 	}
 
-	fetchedTip := gitCmd(t, workDir, "rev-parse", "origin/main")
+	fetchedTip := gitCmd(t, workDir, "rev-parse", baseTrackingRef("main"))
 	if fetchedTip != remoteTip {
-		t.Fatalf("origin/main after resolve = %q, want %q", fetchedTip, remoteTip)
+		t.Fatalf("%s after resolve = %q, want %q", baseTrackingRef("main"), fetchedTip, remoteTip)
 	}
 }
 

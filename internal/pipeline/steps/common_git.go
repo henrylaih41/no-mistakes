@@ -39,11 +39,11 @@ func resolveDefaultBranchTipSHA(ctx context.Context, workDir, upstreamURL, fallb
 func resolveDefaultBranchTip(ctx context.Context, workDir, upstreamURL, fallbackBaseSHA, defaultBranch string) (string, bool) {
 	if strings.TrimSpace(defaultBranch) != "" {
 		baseRemote := remoteOrURL(upstreamURL)
-		localRef := "refs/remotes/origin/" + defaultBranch
+		localRef := baseTrackingRef(defaultBranch)
 		if err := git.FetchRemoteBranchToRef(ctx, workDir, baseRemote, defaultBranch, localRef); err != nil {
 			return unresolvedDefaultBranchTip(ctx, workDir, fallbackBaseSHA, defaultBranch), false
 		}
-		for _, ref := range []string{"origin/" + defaultBranch, defaultBranch} {
+		for _, ref := range defaultBranchRefCandidates(defaultBranch) {
 			sha, err := git.Run(ctx, workDir, "rev-parse", "--verify", ref)
 			if err == nil && strings.TrimSpace(sha) != "" {
 				return strings.TrimSpace(sha), true
@@ -68,7 +68,7 @@ func mergeBaseWithDefaultBranch(ctx context.Context, workDir, defaultBranch stri
 	if strings.TrimSpace(defaultBranch) == "" {
 		return ""
 	}
-	for _, ref := range []string{"origin/" + defaultBranch, defaultBranch} {
+	for _, ref := range defaultBranchRefCandidates(defaultBranch) {
 		mb, err := git.Run(ctx, workDir, "merge-base", "HEAD", ref)
 		if err == nil && strings.TrimSpace(mb) != "" {
 			return strings.TrimSpace(mb)
@@ -94,6 +94,27 @@ func lastFetchedBranchTip(ctx context.Context, workDir, branch string, fork bool
 		return ""
 	}
 	return strings.TrimSpace(sha)
+}
+
+// baseTrackingRefPrefix namespaces the local refs a run fetches its base
+// repository's branches into. refs/worktree/* refs are PER-WORKTREE: git keeps
+// them in the worktree's private ref store, invisible to other linked worktrees
+// that share the same bare repo. Runs are only serialized per repo+branch and a
+// route can resolve a base URL that differs from the gate origin, so fetching
+// base branches into the SHARED refs/remotes/origin/* namespace let concurrent
+// runs in sibling worktrees clobber one another's base view between fetch and
+// rebase/CI. Per-worktree refs keep each run's base isolated.
+const baseTrackingRefPrefix = "refs/worktree/no-mistakes-base/"
+
+func baseTrackingRef(branch string) string {
+	return baseTrackingRefPrefix + branch
+}
+
+// defaultBranchRefCandidates lists the refs to consult for the base default
+// branch, most-authoritative first: the per-worktree base ref the run fetched,
+// then the shared remote-tracking ref, then a local branch of the same name.
+func defaultBranchRefCandidates(defaultBranch string) []string {
+	return []string{baseTrackingRef(defaultBranch), "origin/" + defaultBranch, defaultBranch}
 }
 
 func normalizedBranchRef(ref string) string {

@@ -180,11 +180,12 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	if !strings.Contains(ag.calls[0].Prompt, "user wanted conflict resolution to preserve the extracted intent") {
 		t.Fatalf("expected agent prompt to include extracted user intent, got: %s", ag.calls[0].Prompt)
 	}
-	// Verify rebase completed - feature is now ahead of origin/main
-	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", "origin/main")
-	originMain := gitCmd(t, dir, "rev-parse", "origin/main")
-	if mergeBase != originMain {
-		t.Fatalf("merge-base = %s, want origin/main %s", mergeBase, originMain)
+	// Verify rebase completed - feature is now ahead of the base default branch
+	baseMain := baseTrackingRef("main")
+	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", baseMain)
+	baseMainSHA := gitCmd(t, dir, "rev-parse", baseMain)
+	if mergeBase != baseMainSHA {
+		t.Fatalf("merge-base = %s, want %s %s", mergeBase, baseMain, baseMainSHA)
 	}
 }
 
