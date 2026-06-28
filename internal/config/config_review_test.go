@@ -160,7 +160,7 @@ func TestMerge_ReviewRepoOverridesGlobal(t *testing.T) {
 		},
 	}
 	repo := &RepoConfig{
-		Review: ReviewRaw{
+		Review: &ReviewRaw{
 			Reviewers:   []ReviewerSpec{{Agent: types.AgentClaude}, {Agent: types.AgentPi}},
 			MaxParallel: 5,
 		},
@@ -179,18 +179,54 @@ func TestMerge_ReviewRepoOverridesGlobal(t *testing.T) {
 	}
 }
 
+func TestMerge_RepoEmptyReviewDisablesGlobalPanel(t *testing.T) {
+	global := &GlobalConfig{
+		Agent: types.AgentClaude,
+		Review: ReviewRaw{
+			Reviewers:   []ReviewerSpec{{Agent: types.AgentCodex}, {Agent: types.AgentPi}},
+			MaxParallel: 3,
+		},
+	}
+	// An explicit empty review block disables the inherited global panel and
+	// reverts to the single-agent default.
+	repo := &RepoConfig{Review: &ReviewRaw{Reviewers: []ReviewerSpec{}}}
+
+	cfg := Merge(global, repo)
+
+	if len(cfg.Review.Reviewers) != 0 {
+		t.Errorf("reviewers = %v, want empty (repo disabled the global panel)", cfg.Review.Reviewers)
+	}
+}
+
+func TestMerge_RepoAbsentReviewInheritsGlobalPanel(t *testing.T) {
+	global := &GlobalConfig{
+		Agent: types.AgentClaude,
+		Review: ReviewRaw{
+			Reviewers: []ReviewerSpec{{Agent: types.AgentCodex}},
+		},
+	}
+	// No repo review block (nil) inherits the global panel.
+	repo := &RepoConfig{}
+
+	cfg := Merge(global, repo)
+
+	if len(cfg.Review.Reviewers) != 1 || cfg.Review.Reviewers[0].Agent != types.AgentCodex {
+		t.Errorf("reviewers = %v, want [codex] inherited from global", cfg.Review.Reviewers)
+	}
+}
+
 // TestEffectiveRepoConfig_StripsPushedReview proves the security gate: a review
 // panel pushed on a feature branch must never win - the effective panel comes
 // from the trusted default-branch copy (or is empty when there is no trusted
 // copy), because reviewers select which binaries launch with maintainer creds.
 func TestEffectiveRepoConfig_StripsPushedReview(t *testing.T) {
 	pushed := &RepoConfig{
-		Review: ReviewRaw{
+		Review: &ReviewRaw{
 			Reviewers: []ReviewerSpec{{Agent: types.AgentCodex, Path: "/tmp/evil"}},
 		},
 	}
 	trusted := &RepoConfig{
-		Review: ReviewRaw{
+		Review: &ReviewRaw{
 			Reviewers: []ReviewerSpec{{Agent: types.AgentClaude}},
 		},
 	}
@@ -211,26 +247,26 @@ func TestEffectiveRepoConfig_StripsPushedReview(t *testing.T) {
 
 func TestEffectiveRepoConfig_NoTrustedDisablesReview(t *testing.T) {
 	pushed := &RepoConfig{
-		Review: ReviewRaw{
+		Review: &ReviewRaw{
 			Reviewers: []ReviewerSpec{{Agent: types.AgentCodex}},
 		},
 	}
 
 	got := EffectiveRepoConfig(pushed, nil, false)
 
-	if len(got.Review.Reviewers) != 0 {
-		t.Errorf("review = %v, want empty (no trusted config)", got.Review.Reviewers)
+	if got.Review != nil {
+		t.Errorf("review = %v, want nil (no trusted config, pushed review stripped)", got.Review)
 	}
 }
 
 func TestEffectiveRepoConfig_OptInHonorsPushedReview(t *testing.T) {
 	pushed := &RepoConfig{
-		Review: ReviewRaw{
+		Review: &ReviewRaw{
 			Reviewers: []ReviewerSpec{{Agent: types.AgentCodex}},
 		},
 	}
 	trusted := &RepoConfig{
-		Review: ReviewRaw{
+		Review: &ReviewRaw{
 			Reviewers: []ReviewerSpec{{Agent: types.AgentClaude}},
 		},
 	}
@@ -452,6 +488,28 @@ func TestResolveReviewers_Dedups(t *testing.T) {
 	}
 	if got[0].Agent != types.AgentCodex || got[1].Agent != types.AgentClaude {
 		t.Errorf("resolved = %v, want [codex claude] preserving first-occurrence order", got)
+	}
+}
+
+func TestResolveReviewers_DedupsOnEffectiveArgs(t *testing.T) {
+	// One reviewer carries explicit args; another inherits the same args from
+	// agent_args_override. They resolve to the same binary + args, so the panel
+	// must run the reviewer only once - dedup keys off the effective spec, not
+	// the raw spec.
+	cfg := &Config{
+		Agent:             types.AgentClaude,
+		AgentArgsOverride: map[string][]string{"codex": {"-m", "gpt-5"}},
+		Review: Review{Reviewers: []ReviewerSpec{
+			{Agent: types.AgentCodex, Args: []string{"-m", "gpt-5"}},
+			{Agent: types.AgentCodex}, // inherits -m gpt-5 from agent_args_override
+		}},
+	}
+	got, err := cfg.ResolveReviewers(context.Background(), okLookPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("resolved = %d reviewers, want 1 after effective-args dedup", len(got))
 	}
 }
 

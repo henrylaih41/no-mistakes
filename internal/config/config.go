@@ -83,7 +83,13 @@ type RepoConfig struct {
 	AutoFix           AutoFixRaw `yaml:"auto_fix"`
 	Intent            IntentRaw  `yaml:"intent"`
 	Test              TestRaw    `yaml:"test"`
-	Review            ReviewRaw  `yaml:"review"`
+	// Review is a pointer so an absent review block (nil) is distinguishable
+	// from an explicit empty one (&ReviewRaw{}). An explicit repo-level
+	// review block - including review.reviewers: [] - overrides the inherited
+	// global panel; an empty reviewer list disables the panel and reverts to
+	// the single-agent default. When the key is absent the repo inherits the
+	// global review config (see Merge).
+	Review *ReviewRaw `yaml:"review"`
 }
 
 // Commands holds optional per-repo command overrides.
@@ -147,7 +153,9 @@ type ReviewerSpec struct {
 
 // ReviewRaw is the YAML representation of the multi-reviewer panel. An empty
 // Reviewers list means the single-agent default (review runs once on the
-// configured agent), so behavior is unchanged when review is absent.
+// configured agent). On RepoConfig the block's presence is tracked via a
+// pointer, so an explicit empty list disables an inherited global panel while an
+// absent block inherits it (see RepoConfig.Review and Merge).
 type ReviewRaw struct {
 	Reviewers   []ReviewerSpec `yaml:"reviewers"`
 	MaxParallel int            `yaml:"max_parallel"`
@@ -440,21 +448,15 @@ func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (st
 			}
 			spec.Agent = c.Agent
 		}
-		if !isACPAgent(spec.Agent) && !isNativeAgent(spec.Agent) {
-			return nil, fmt.Errorf("review.reviewers[%d]: unknown agent %q; valid options: claude, codex, rovodev, opencode, pi, acp:<target>", i, spec.Agent)
-		}
-		// Re-check per-reviewer args against the concrete resolved family before
-		// they reach the real command. This runs for every spec (not just "auto")
-		// because the untrusted pushed-config path skips validateReviewers, so a
-		// concrete-family reviewer under allow_repo_commands reaches here with no
-		// prior empty-arg or reserved-arg check.
-		for j, arg := range spec.Args {
-			if strings.TrimSpace(arg) == "" {
-				return nil, fmt.Errorf("review.reviewers[%d].args[%d]: empty arg", i, j)
-			}
-		}
-		if arg, j, bad := reservedArgViolation(string(spec.Agent), spec.Args); bad {
-			return nil, fmt.Errorf("review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
+		// Validate against the concrete resolved family before the spec reaches
+		// the real reviewer command. ResolveReviewers is the authoritative
+		// post-trust, post-expansion anchor: the untrusted pushed-config path
+		// skips validateReviewers, so a concrete-family reviewer under
+		// allow_repo_commands reaches here with no prior empty-arg, unknown-agent,
+		// or reserved-arg check. validateReviewerSpec is the single shared check
+		// so this path and validateReviewers cannot drift.
+		if err := validateReviewerSpec(i, spec); err != nil {
+			return nil, err
 		}
 		if spec.Agent == types.AgentRovoDev {
 			bin := c.ReviewerPath(spec)
@@ -470,7 +472,15 @@ func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (st
 				return nil, fmt.Errorf("review.reviewers[%d]: %q does not support the rovodev subcommand", i, resolvedBin)
 			}
 		}
-		key := reviewerDedupKey(spec)
+		// Dedup on the EFFECTIVE reviewer (after auto expansion and the
+		// ReviewerPath / ReviewerArgs fallbacks), so a spec that inherits its
+		// path/args from agent_path_override / agent_args_override collides with
+		// an explicit spec that resolves to the same binary and args.
+		key := reviewerDedupKey(ReviewerSpec{
+			Agent: spec.Agent,
+			Path:  c.ReviewerPath(spec),
+			Args:  c.ReviewerArgs(spec),
+		})
 		if seen[key] {
 			continue
 		}
@@ -607,25 +617,38 @@ func isNativeAgent(name types.AgentName) bool {
 // - nor an empty arg.
 func validateReviewers(reviewers []ReviewerSpec) error {
 	for i, spec := range reviewers {
-		name := string(spec.Agent)
-		if name == "" {
-			return fmt.Errorf("invalid review.reviewers[%d]: missing agent", i)
+		if err := validateReviewerSpec(i, spec); err != nil {
+			return err
 		}
-		if spec.Agent != types.AgentAuto && !isACPAgent(spec.Agent) && !isNativeAgent(spec.Agent) {
-			return fmt.Errorf("invalid review.reviewers[%d]: unknown agent %q (valid: auto, claude, codex, rovodev, opencode, pi, acp:<target>)", i, name)
+	}
+	return nil
+}
+
+// validateReviewerSpec is the single shared check for one reviewer spec, called
+// from both validateReviewers (the trusted load-time check, which permits a bare
+// "auto") and ResolveReviewers (the authoritative post-trust, post-expansion
+// check). Keeping one helper means the two documented validation points cannot
+// drift. It rejects an empty agent, an unknown family, an empty/whitespace arg,
+// and any arg reserved by no-mistakes for the family. For a concrete family the
+// reserved set is known now; for a bare "auto" reviewer the family is only known
+// after ResolveReviewers expands it, so reservedArgViolation re-runs there
+// against the resolved family - never trust an "auto" arg validated against the
+// empty reserved set.
+func validateReviewerSpec(i int, spec ReviewerSpec) error {
+	name := string(spec.Agent)
+	if name == "" {
+		return fmt.Errorf("invalid review.reviewers[%d]: missing agent", i)
+	}
+	if spec.Agent != types.AgentAuto && !isACPAgent(spec.Agent) && !isNativeAgent(spec.Agent) {
+		return fmt.Errorf("invalid review.reviewers[%d]: unknown agent %q (valid: auto, claude, codex, rovodev, opencode, pi, acp:<target>)", i, name)
+	}
+	for j, arg := range spec.Args {
+		if strings.TrimSpace(arg) == "" {
+			return fmt.Errorf("invalid review.reviewers[%d].args[%d]: empty arg", i, j)
 		}
-		for j, arg := range spec.Args {
-			if strings.TrimSpace(arg) == "" {
-				return fmt.Errorf("invalid review.reviewers[%d].args[%d]: empty arg", i, j)
-			}
-		}
-		// For a concrete family the reserved set is known now. For a bare "auto"
-		// reviewer the family is only known after ResolveReviewers expands it, so
-		// reservedArgViolation re-runs there against the resolved family - never
-		// trust an "auto" arg validated against the empty reserved set.
-		if arg, j, bad := reservedArgViolation(name, spec.Args); bad {
-			return fmt.Errorf("invalid review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
-		}
+	}
+	if arg, j, bad := reservedArgViolation(name, spec.Args); bad {
+		return fmt.Errorf("invalid review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
 	}
 	return nil
 }
@@ -792,8 +815,10 @@ func LoadRepoFromBytes(data []byte) (*RepoConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateReviewers(cfg.Review.Reviewers); err != nil {
-		return nil, err
+	if cfg.Review != nil {
+		if err := validateReviewers(cfg.Review.Reviewers); err != nil {
+			return nil, err
+		}
 	}
 	return cfg, nil
 }
@@ -828,9 +853,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // TRUSTED default-branch copy) to honoring the pushed-branch copy wholesale.
 // When there is no trusted copy and the maintainer has not opted in, both
 // fields are forced empty (Agent "" inherits the global agent; Commands{}
-// yields built-in defaults) rather than falling back to the pushed branch —
-// this blocks the supply-chain vector for repos that ship .no-mistakes.yaml
-// only on feature branches.
+// yields built-in defaults; Review nil inherits the global panel) rather than
+// falling back to the pushed branch — this blocks the supply-chain vector for
+// repos that ship .no-mistakes.yaml only on feature branches.
 //
 // Non-executing fields (ignore patterns, auto-fix, intent, test) are always
 // taken from the pushed copy, matching prior behavior, since they cannot
@@ -853,7 +878,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 	} else {
 		effective.Commands = Commands{}
 		effective.Agent = ""
-		effective.Review = ReviewRaw{}
+		effective.Review = nil
 	}
 	return &effective
 }
@@ -1013,14 +1038,15 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyTestOverrides(&test, &global.Test)
 	applyTestOverrides(&test, &repo.Test)
 
-	// Default the review panel from global; a repo that configures its own
-	// reviewers overrides it wholesale. Both copies are trusted by the time
-	// they reach Merge (EffectiveRepoConfig strips a pushed-branch review
-	// block to the trusted default-branch copy). An empty Reviewers list keeps
-	// the single-agent default, so behavior is unchanged when review is absent.
+	// Default the review panel from global; an explicit repo review block
+	// overrides it wholesale, including an empty reviewer list (which disables
+	// the inherited global panel and reverts to the single-agent default). An
+	// absent repo review block (nil) inherits global. Both copies are trusted by
+	// the time they reach Merge (EffectiveRepoConfig strips a pushed-branch
+	// review block to the trusted default-branch copy).
 	review := resolveReview(global.Review)
-	if len(repo.Review.Reviewers) > 0 {
-		review = resolveReview(repo.Review)
+	if repo.Review != nil {
+		review = resolveReview(*repo.Review)
 	}
 
 	cfg := &Config{
