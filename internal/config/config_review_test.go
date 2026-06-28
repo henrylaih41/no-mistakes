@@ -412,6 +412,28 @@ func TestResolveReviewers_RejectsReservedArgsOnConcreteReviewer(t *testing.T) {
 	}
 }
 
+func TestResolveReviewers_RejectsEmptyArgsOnConcreteReviewer(t *testing.T) {
+	// The untrusted pushed-config path skips validateReviewers, so under
+	// allow_repo_commands an empty/whitespace-only per-reviewer arg reaches
+	// ResolveReviewers with no prior empty-arg check. The guard must run for
+	// every resolved spec before the args reach the real reviewer command.
+	for _, arg := range []string{"", "   "} {
+		cfg := &Config{
+			Agent: types.AgentClaude,
+			Review: Review{Reviewers: []ReviewerSpec{
+				{Agent: types.AgentCodex, Args: []string{arg}},
+			}},
+		}
+		_, err := cfg.ResolveReviewers(context.Background(), okLookPath)
+		if err == nil {
+			t.Fatalf("expected error for empty arg %q", arg)
+		}
+		if !strings.Contains(err.Error(), "empty arg") {
+			t.Errorf("expected 'empty arg' in error for %q, got %q", arg, err)
+		}
+	}
+}
+
 func TestResolveReviewers_Dedups(t *testing.T) {
 	cfg := &Config{
 		Agent: types.AgentClaude,
