@@ -171,11 +171,6 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	return updateHeadSHA(ctx, sctx)
 }
 
-// rebaseTargets returns the ordered list of refs to rebase onto.
-func rebaseTargets(branch, defaultBranch string) []string {
-	return rebaseTargetsForBranch(branch, defaultBranch, "origin/"+branch)
-}
-
 func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string {
 	var targets []string
 	if branch != "" && branch != defaultBranch {
@@ -293,17 +288,6 @@ func remoteDefaultBranchAdvanced(ctx context.Context, workDir, defaultBranch, ba
 		return false
 	}
 	return strings.TrimSpace(remoteSHA) != baseSHA
-}
-
-// isForcePush returns true when the current push is non-fast-forward relative
-// to the previous push (baseSHA). This indicates the user explicitly rewrote
-// history and the pipeline should treat the new HEAD as authoritative.
-func isForcePush(ctx context.Context, workDir, branch, baseSHA string) bool {
-	localRef := ""
-	if branch != "" {
-		localRef = "origin/" + branch
-	}
-	return isForcePushAgainstRemote(ctx, workDir, "origin", branch, localRef, baseSHA)
 }
 
 func isForcePushAgainstRemote(ctx context.Context, workDir, remote, branch, localRef, baseSHA string) bool {

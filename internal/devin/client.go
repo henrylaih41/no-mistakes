@@ -129,8 +129,9 @@ func snippet(b []byte) string {
 	const max = 200
 	s := strings.TrimSpace(string(b))
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) > max {
-		return s[:max] + "…"
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "…"
 	}
 	return s
 }
