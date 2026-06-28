@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -494,27 +495,33 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		// steering as the impl agent. Any failure here must close what has been
 		// built so far before returning, since the cleanup defer below only runs
 		// once the background goroutine owns the run.
-		reviewerSpecs, revErr := cfg.ResolveReviewers(ctx, exec.LookPath)
-		if revErr != nil {
-			ag.Close()
-			m.db.UpdateRunError(run.ID, revErr.Error())
-			trackStartFailure("resolve_reviewers")
-			return "", revErr
-		}
-		for _, spec := range reviewerSpecs {
-			rev, rErr := agent.NewWithOptions(spec.Agent, cfg.ReviewerPath(spec), cfg.ReviewerArgs(spec), agent.Options{
-				ACPRegistryOverrides: cfg.ACPRegistryOverrides,
-			})
-			if rErr != nil {
-				for _, built := range reviewerAgents {
-					built.Close()
-				}
+		//
+		// Skip reviewer resolution entirely when the review step itself is
+		// skipped for this run: otherwise a missing reviewer binary or an invalid
+		// reviewer spec would fail startRun for a run that never reviews.
+		if !slices.Contains(skipSteps, types.StepReview) {
+			reviewerSpecs, revErr := cfg.ResolveReviewers(ctx, exec.LookPath)
+			if revErr != nil {
 				ag.Close()
-				m.db.UpdateRunError(run.ID, fmt.Sprintf("create reviewer agent: %s", rErr))
-				trackStartFailure("create_reviewer_agent")
-				return "", fmt.Errorf("create reviewer agent: %w", rErr)
+				m.db.UpdateRunError(run.ID, revErr.Error())
+				trackStartFailure("resolve_reviewers")
+				return "", revErr
 			}
-			reviewerAgents = append(reviewerAgents, agent.WithSteering(rev))
+			for _, spec := range reviewerSpecs {
+				rev, rErr := agent.NewWithOptions(spec.Agent, cfg.ReviewerPath(spec), cfg.ReviewerArgs(spec), agent.Options{
+					ACPRegistryOverrides: cfg.ACPRegistryOverrides,
+				})
+				if rErr != nil {
+					for _, built := range reviewerAgents {
+						built.Close()
+					}
+					ag.Close()
+					m.db.UpdateRunError(run.ID, fmt.Sprintf("create reviewer agent: %s", rErr))
+					trackStartFailure("create_reviewer_agent")
+					return "", fmt.Errorf("create reviewer agent: %w", rErr)
+				}
+				reviewerAgents = append(reviewerAgents, agent.WithSteering(rev))
+			}
 		}
 	}
 

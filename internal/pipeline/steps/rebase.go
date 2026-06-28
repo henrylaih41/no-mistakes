@@ -259,9 +259,18 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		firstFile = files[0]
 	}
 
+	// Phrase the remediation in terms of the effective base the run rebases onto
+	// (the route base when a route is selected, otherwise the gate origin), not a
+	// hardcoded origin/<default>. For a routed run the bundling check compares
+	// against the route base tracking ref, so advising "rebase onto origin/<default>"
+	// would not clear the finding.
+	baseLabel := strings.TrimSpace(sctx.Repo.UpstreamURL)
+	if baseLabel == "" {
+		baseLabel = "origin"
+	}
 	description := fmt.Sprintf(
-		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to origin/%s; rebasing would bundle this unrelated work (%d file(s)) into the PR:\n- %s\n\nPush %s to origin, or rebase your branch onto origin/%s, before gating.",
-		len(commits), defaultBranch, defaultBranch, len(files), strings.Join(commits, "\n- "), defaultBranch, defaultBranch,
+		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to the base %s branch (%s); rebasing would bundle this unrelated work (%d file(s)) into the PR:\n- %s\n\nPush %s to the base, or rebase your branch onto the base %s branch (%s), before gating.",
+		len(commits), defaultBranch, defaultBranch, baseLabel, len(files), strings.Join(commits, "\n- "), defaultBranch, defaultBranch, baseLabel,
 	)
 	findingsJSON, _ := json.Marshal(Findings{
 		Items: []Finding{{
