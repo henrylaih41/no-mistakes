@@ -221,7 +221,16 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 	if localTip == "" {
 		return nil
 	}
-	remoteRef := "origin/" + defaultBranch
+	// Compare against the base default branch the run actually rebases onto
+	// (baseTrackingRef), not the gate's origin/<default>. A selected route can
+	// point the base at a repo other than the gate origin; using origin/<default>
+	// there would miss commits already on origin but absent from the routed base
+	// and silently bundle them into the routed PR. baseTrackingRef is fetched
+	// fresh from the effective base remote earlier in Execute and is exactly what
+	// rebaseTargetsForBranch rebases onto, so the bundling check stays aligned
+	// with the real rebase target. For the common non-route case it carries the
+	// same commits as origin/<default>.
+	remoteRef := baseTrackingRef(defaultBranch)
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", remoteRef+"^{commit}"); err != nil {
 		return nil
 	}

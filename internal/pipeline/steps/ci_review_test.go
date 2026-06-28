@@ -407,12 +407,50 @@ func TestHandleDevinFixRound_EscalatesAtMaxRounds(t *testing.T) {
 	step := &CIStep{devinFixRounds: 2} // already at the bound
 	findings := []scm.ReviewComment{severeFinding()}
 
-	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, findings, "freshkey", nil)
+	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, findings, "freshkey", nil, false)
 	if outcome == nil || !outcome.NeedsApproval {
 		t.Fatalf("expected escalation to human gate, got %+v", outcome)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "escalating for manual review") {
 		t.Fatalf("expected escalation log, got: %v", logs)
+	}
+}
+
+// TestHandleDevinFixRound_ForcedBypassesMaxRounds asserts that a user/agent
+// `fix` response (forced=true) after the loop parked at MaxRounds runs one more
+// fix round instead of immediately re-escalating on the same exhausted state.
+func TestHandleDevinFixRound_ForcedBypassesMaxRounds(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 2, FailOpen: true}
+	dir, baseSHA, headSHA, upstream := setupDevinFixRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(filepath.Join(opts.CWD, "devin-fix.txt"), []byte("fixed"), 0o644); err != nil {
+			return nil, err
+		}
+		return &agent.Result{}, nil
+	}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.ReviewLoop = cfg
+	sctx.Log = func(string) {}
+	sctx.LogChunk = func(string) {}
+
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
+	// Already at the bound and the key matches the last fixed round: an auto
+	// (forced=false) round would escalate. A forced round must run anyway.
+	step := &CIStep{devinFixRounds: 2, lastDevinFixKey: "freshkey"}
+	findings := []scm.ReviewComment{severeFinding()}
+
+	outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "42"}, findings, "freshkey", nil, true)
+	if outcome != nil {
+		t.Fatalf("forced fix must run, not escalate, got %+v", outcome)
+	}
+	if step.devinFixRounds != 3 {
+		t.Fatalf("forced fix should have run one more round (devinFixRounds=%d, want 3)", step.devinFixRounds)
+	}
+	if sctx.Run.HeadSHA == headSHA {
+		t.Fatalf("forced fix should have pushed a new head, still at %s", headSHA)
 	}
 }
 
@@ -425,7 +463,7 @@ func TestHandleDevinFixRound_WaitsWhenKeyAlreadyFixed(t *testing.T) {
 	// the shared lastFixedChecks (which the CI-check fix path uses).
 	step := &CIStep{lastDevinFixKey: "samekey"}
 
-	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, nil, "samekey", nil)
+	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, nil, "samekey", nil, false)
 	if outcome != nil {
 		t.Fatalf("expected nil outcome (keep polling) when key already fixed, got %+v", outcome)
 	}
@@ -461,7 +499,7 @@ func TestHandleDevinFixRound_TransientFixFailureDoesNotConsumeRound(t *testing.T
 
 	// Far more iterations than MaxRounds: none should be consumed, none escalate.
 	for i := 0; i < 5; i++ {
-		outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "9"}, findings, "freshkey", nil)
+		outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "9"}, findings, "freshkey", nil, false)
 		if outcome != nil {
 			t.Fatalf("iteration %d: transient fix failure must keep polling, got escalation %+v", i, outcome)
 		}
@@ -535,7 +573,7 @@ func runDevinFixRound(t *testing.T, cfg config.ReviewLoop, produceChanges bool, 
 
 	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}, replyErr: replyErr}
 	step := &CIStep{}
-	outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "42"}, findings, "freshkey", nil)
+	outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "42"}, findings, "freshkey", nil, false)
 	return devinFixRoundResult{step: step, host: host, sctx: sctx, outcome: outcome}
 }
 
@@ -877,7 +915,7 @@ func runRetriggerFixRound(t *testing.T, triggerErr error) (*CIStep, *pipeline.St
 	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
 	step := &CIStep{triggerReview: rt.fn}
 	pr := &scm.PR{Number: "42", URL: "https://github.com/o/r/pull/42"}
-	outcome := step.handleDevinFixRound(sctx, host, pr, []scm.ReviewComment{severeFinding()}, "freshkey", nil)
+	outcome := step.handleDevinFixRound(sctx, host, pr, []scm.ReviewComment{severeFinding()}, "freshkey", nil, false)
 	return step, sctx, rt, outcome, headSHA
 }
 

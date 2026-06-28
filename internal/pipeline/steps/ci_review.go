@@ -266,14 +266,20 @@ func (s *CIStep) evalDevinReview(sctx *pipeline.StepContext, host scm.Host, pr *
 // or nil to keep polling. Rounds are bounded by ReviewLoop.MaxRounds; the
 // anti-thrash key (fixKey) folds in the head SHA + finding fingerprints so a
 // pushed fix waits for the bot to re-review the new commit before re-evaluating.
-func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, findings []scm.ReviewComment, fixKey string, fixCompletedAt map[string]time.Time) *pipeline.StepOutcome {
-	if fixKey != "" && fixKey == s.devinFixKey() {
+//
+// forced marks a user/agent-triggered fix (the run was responded to with `fix`
+// after parking). Such an explicit request bypasses both the anti-thrash key and
+// the bounded-round guard so a human override actually runs one more round
+// instead of immediately re-parking on the same exhausted state. The caller
+// gates forced to once per step execution, so it cannot thrash the auto-loop.
+func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, findings []scm.ReviewComment, fixKey string, fixCompletedAt map[string]time.Time, forced bool) *pipeline.StepOutcome {
+	if !forced && fixKey != "" && fixKey == s.devinFixKey() {
 		sctx.Log(cimonitor.ReReviewingMsg)
 		return nil
 	}
 	maxRounds := sctx.Config.ReviewLoop.MaxRounds
 	rounds := s.devinRounds()
-	if rounds >= maxRounds {
+	if !forced && rounds >= maxRounds {
 		sctx.Log(fmt.Sprintf("Devin still requesting changes after %d/%d round(s) - escalating for manual review...", rounds, maxRounds))
 		return devinFailureOutcome(findings, "Devin review loop exhausted its bounded rounds with unresolved findings")
 	}
