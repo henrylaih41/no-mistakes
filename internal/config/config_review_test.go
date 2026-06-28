@@ -392,6 +392,26 @@ func TestResolveReviewers_RejectsReservedArgsAfterAutoExpansion(t *testing.T) {
 	}
 }
 
+func TestResolveReviewers_RejectsReservedArgsOnConcreteReviewer(t *testing.T) {
+	// The untrusted pushed-config path skips validateReviewers, so under
+	// allow_repo_commands a concrete-family reviewer reaches ResolveReviewers with
+	// no prior reserved-arg check. The reserved-flag guard must run for every
+	// resolved spec, not just the auto-expanded one.
+	cfg := &Config{
+		Agent: types.AgentClaude,
+		Review: Review{Reviewers: []ReviewerSpec{
+			{Agent: types.AgentCodex, Args: []string{"--json"}},
+		}},
+	}
+	_, err := cfg.ResolveReviewers(context.Background(), okLookPath)
+	if err == nil {
+		t.Fatal("expected error: --json is reserved for codex and must be rejected on a concrete reviewer")
+	}
+	if !strings.Contains(err.Error(), "--json") {
+		t.Errorf("error should name the reserved flag, got %q", err)
+	}
+}
+
 func TestResolveReviewers_Dedups(t *testing.T) {
 	cfg := &Config{
 		Agent: types.AgentClaude,

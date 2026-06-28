@@ -11,7 +11,7 @@ import (
 )
 
 // reviewerReport is one reviewer's parsed findings after its IDs have been
-// namespaced (review-<name>-<ordinal>-N) and every item's Source stamped with
+// namespaced (review-<name>-<slot>-N) and every item's Source stamped with
 // the reviewer name, so the merged union stays attributable to its origin.
 type reviewerReport struct {
 	Name     string
@@ -50,11 +50,12 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 // processReviewerResults turns FanOut results into attributed reviewer reports,
 // in reviewer (input) order. Each successful reviewer's findings are parsed with
 // the same parser the single-reviewer path uses, ID-namespaced to
-// review-<name>-<ordinal>-N (collision-free across reviewers, including two
-// same-family reviewers - the per-reviewer ordinal disambiguates them, and any
-// model-supplied id is discarded so a reviewer cannot smuggle in a colliding
-// id), Source-stamped with the reviewer name, and its raw report written to the
-// file-only audit log.
+// review-<name>-<slot>-N where slot is the reviewer's stable input position
+// (collision-free across reviewers, including two same-family reviewers - the
+// per-slot index disambiguates them and does not shift when review.fail_open
+// drops an earlier reviewer; any model-supplied id is discarded so a reviewer
+// cannot smuggle in a colliding id), Source-stamped with the reviewer name, and
+// its raw report written to the file-only audit log.
 //
 // Fail policy: when failOpen is false (the default) the first reviewer error
 // fails the step with an error naming that reviewer family. When failOpen is
@@ -65,7 +66,7 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, logFile func(string)) ([]reviewerReport, error) {
 	reports := make([]reviewerReport, 0, len(results))
 	var dropped []string
-	for _, res := range results {
+	for idx, res := range results {
 		name := res.Agent.Name()
 		if res.Err != nil {
 			if !failOpen {
@@ -79,7 +80,7 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 			continue
 		}
 		parsed := parseReviewFindings(res.Result, log)
-		prefix := fmt.Sprintf("review-%s-%d", name, len(reports)+1)
+		prefix := fmt.Sprintf("review-%s-%d", name, idx+1)
 		for i := range parsed.Items {
 			parsed.Items[i].ID = ""
 		}
@@ -102,18 +103,23 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 
 // combineReviewerFindings merges reviewer reports into a plain attributed union.
 // Items are concatenated in reviewer (input) order, each keeping the
-// review-<name>-<ordinal>-N id and Source set by processReviewerResults - there is NO
+// review-<name>-<slot>-N id and Source set by processReviewerResults - there is NO
 // fingerprint dedup, agreement-collapse, or severity-escalation. The scalar
 // fields are reconciled: RiskLevel is the maximum (low < medium < high) across
-// reports, while RiskRationale and Summary become per-reviewer labeled
-// concatenations ("[codex] ...; [claude] ...") so the fix agent and human can
-// see who said what.
+// reports, while RiskRationale, Summary, and TestingSummary become per-reviewer
+// labeled concatenations ("[codex] ...; [claude] ...") so the fix agent and
+// human can see who said what. Tested and Artifacts evidence is concatenated in
+// reviewer order so multi-reviewer mode preserves the same fields the
+// single-reviewer path round-trips.
 func combineReviewerFindings(reports []reviewerReport) types.Findings {
 	var merged types.Findings
 	rationales := make([]string, 0, len(reports))
 	summaries := make([]string, 0, len(reports))
+	testingSummaries := make([]string, 0, len(reports))
 	for _, r := range reports {
 		merged.Items = append(merged.Items, r.Findings.Items...)
+		merged.Tested = append(merged.Tested, r.Findings.Tested...)
+		merged.Artifacts = append(merged.Artifacts, r.Findings.Artifacts...)
 		if types.RiskRank(r.Findings.RiskLevel) > types.RiskRank(merged.RiskLevel) {
 			merged.RiskLevel = r.Findings.RiskLevel
 		}
@@ -123,8 +129,12 @@ func combineReviewerFindings(reports []reviewerReport) types.Findings {
 		if s := strings.TrimSpace(r.Findings.Summary); s != "" {
 			summaries = append(summaries, fmt.Sprintf("[%s] %s", r.Name, s))
 		}
+		if s := strings.TrimSpace(r.Findings.TestingSummary); s != "" {
+			testingSummaries = append(testingSummaries, fmt.Sprintf("[%s] %s", r.Name, s))
+		}
 	}
 	merged.RiskRationale = strings.Join(rationales, "; ")
 	merged.Summary = strings.Join(summaries, "; ")
+	merged.TestingSummary = strings.Join(testingSummaries, "; ")
 	return merged
 }

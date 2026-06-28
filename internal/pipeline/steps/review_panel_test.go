@@ -154,7 +154,7 @@ func TestProcessReviewerResults_NamespacesAndStampsSource(t *testing.T) {
 	if len(reports) != 2 {
 		t.Fatalf("expected 2 reports, got %d", len(reports))
 	}
-	// Every id is force-namespaced to review-<name>-<ordinal>-N; a
+	// Every id is force-namespaced to review-<name>-<slot>-N; a
 	// model-supplied id ("keep-me") is discarded so it cannot collide.
 	if got := reports[0].Findings.Items[0].ID; got != "review-codex-1-1" {
 		t.Errorf("codex id = %q, want review-codex-1-1", got)
@@ -212,6 +212,73 @@ func TestProcessReviewerResults_SameFamilyIDsCollisionFree(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Errorf("expected 3 distinct ids, got %d: %v", len(seen), seen)
+	}
+}
+
+func TestProcessReviewerResults_SlotIndexStableUnderFailOpen(t *testing.T) {
+	// When fail_open drops an earlier reviewer, the surviving reviewers must keep
+	// the namespace tied to their input slot, not the success count, so finding
+	// IDs stay stable for selection/instructions keyed by ID across rounds.
+	first, _ := json.Marshal(Findings{Items: []Finding{{Severity: "info", Description: "first"}}})
+	third, _ := json.Marshal(Findings{Items: []Finding{{Severity: "warning", Description: "third"}}})
+
+	// All three succeed: claude is slot 3.
+	all, err := processReviewerResults(
+		[]agent.FanOutResult{
+			fanResult("codex", first, nil),
+			fanResult("rovodev", first, nil),
+			fanResult("claude", third, nil),
+		},
+		true, func(string) {}, func(string) {},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := all[2].Findings.Items[0].ID; got != "review-claude-3-1" {
+		t.Fatalf("claude id with all reviewers = %q, want review-claude-3-1", got)
+	}
+
+	// The slot-2 reviewer fails: claude must STILL be slot 3, not renumbered to 2.
+	dropped, err := processReviewerResults(
+		[]agent.FanOutResult{
+			fanResult("codex", first, nil),
+			fanResult("rovodev", nil, errors.New("boom")),
+			fanResult("claude", third, nil),
+		},
+		true, func(string) {}, func(string) {},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dropped) != 2 {
+		t.Fatalf("expected 2 surviving reports, got %d", len(dropped))
+	}
+	if got := dropped[1].Findings.Items[0].ID; got != "review-claude-3-1" {
+		t.Errorf("claude id after dropping slot 2 = %q, want stable review-claude-3-1", got)
+	}
+}
+
+func TestCombineReviewerFindings_PreservesTestedTestingSummaryArtifacts(t *testing.T) {
+	merged := combineReviewerFindings([]reviewerReport{
+		report("codex", Findings{
+			Tested:         []string{"unit"},
+			TestingSummary: "ran units",
+			Artifacts:      []types.TestArtifact{{Label: "codex-log", Path: "a.log"}},
+		}),
+		report("claude", Findings{
+			Tested:         []string{"e2e"},
+			TestingSummary: "ran e2e",
+			Artifacts:      []types.TestArtifact{{Label: "claude-log", Path: "b.log"}},
+		}),
+	})
+	if got := strings.Join(merged.Tested, ","); got != "unit,e2e" {
+		t.Errorf("Tested = %q, want unit,e2e", got)
+	}
+	if merged.TestingSummary != "[codex] ran units; [claude] ran e2e" {
+		t.Errorf("TestingSummary = %q", merged.TestingSummary)
+	}
+	if len(merged.Artifacts) != 2 || merged.Artifacts[0].Label != "codex-log" || merged.Artifacts[1].Label != "claude-log" {
+		t.Errorf("Artifacts not concatenated in reviewer order: %+v", merged.Artifacts)
 	}
 }
 

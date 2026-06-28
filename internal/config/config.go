@@ -439,15 +439,17 @@ func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (st
 				return nil, fmt.Errorf("review.reviewers[%d]: agent %q cannot be auto-resolved; set 'agent' to a concrete value or name the reviewer family explicitly", i, types.AgentAuto)
 			}
 			spec.Agent = c.Agent
-			// "auto" was validated against the empty reserved set, so re-check
-			// per-reviewer args against the family it just resolved to before
-			// those args reach the real command.
-			if arg, j, bad := reservedArgViolation(string(spec.Agent), spec.Args); bad {
-				return nil, fmt.Errorf("review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
-			}
 		}
 		if !isACPAgent(spec.Agent) && !isNativeAgent(spec.Agent) {
 			return nil, fmt.Errorf("review.reviewers[%d]: unknown agent %q; valid options: claude, codex, rovodev, opencode, pi, acp:<target>", i, spec.Agent)
+		}
+		// Re-check per-reviewer args against the concrete resolved family before
+		// they reach the real command. This runs for every spec (not just "auto")
+		// because the untrusted pushed-config path skips validateReviewers, so a
+		// concrete-family reviewer under allow_repo_commands reaches here with no
+		// prior reserved-arg check.
+		if arg, j, bad := reservedArgViolation(string(spec.Agent), spec.Args); bad {
+			return nil, fmt.Errorf("review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
 		}
 		if spec.Agent == types.AgentRovoDev {
 			bin := c.ReviewerPath(spec)
