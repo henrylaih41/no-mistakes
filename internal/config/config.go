@@ -896,6 +896,14 @@ func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (st
 		if err := validateReviewerSpec(i, spec); err != nil {
 			return nil, err
 		}
+		// Re-check per-reviewer args against the concrete resolved family before
+		// they reach the real command. This runs for every spec (not just "auto")
+		// because the untrusted pushed-config path skips validateReviewers, so a
+		// concrete-family reviewer under allow_repo_commands reaches here with no
+		// prior reserved-arg check.
+		if arg, j, bad := reservedArgViolation(string(spec.Agent), spec.Args); bad {
+			return nil, fmt.Errorf("review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
+		}
 		if spec.Agent == types.AgentRovoDev {
 			bin := c.ReviewerPath(spec)
 			resolvedBin, err := lookPath(bin)
