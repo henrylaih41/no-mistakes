@@ -380,7 +380,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			} else if hasIssues {
 				lastMonitorLog = ""
 				// All checks done, issues present - fix or report
-				fixKey := encodeLastFixedChecks(failing, mergeConflict)
+				fixKey := combinedFixKey(failing, mergeConflict, devinNotGreen, sctx.Run.HeadSHA, devinPrints)
 				fixCompletedAt := failingCheckCompletionTimes(checks)
 				issueDesc := strings.Join(failing, ", ")
 				if mergeConflict {

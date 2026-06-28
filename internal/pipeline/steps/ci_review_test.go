@@ -215,6 +215,32 @@ func TestEncodeLastFixedChecksByteIdenticalWhenDevinAbsent(t *testing.T) {
 	}
 }
 
+func TestCombinedFixKey(t *testing.T) {
+	t.Parallel()
+
+	failing := []string{"build", "lint"}
+
+	// Review loop green/inactive: byte-identical to the legacy checks key, so the
+	// review-loop-disabled anti-thrash is unchanged.
+	if got, want := combinedFixKey(failing, true, false, "deadbeef", []string{"fp1"}), encodeLastFixedChecks(failing, true); got != want {
+		t.Fatalf("combinedFixKey(devinNotGreen=false) = %q, want legacy %q", got, want)
+	}
+
+	// Devin not-green: the key must DIFFER from the pure-checks key on the same
+	// failing checks, so newly-posted review findings are not mistaken for an
+	// already-attempted fix and skipped.
+	devinKey := combinedFixKey(failing, true, true, "deadbeef", []string{"fp1"})
+	if devinKey == encodeLastFixedChecks(failing, true) {
+		t.Fatal("combinedFixKey(devinNotGreen=true) must differ from the pure-checks key")
+	}
+
+	// A change in the review findings (same failing checks) yields a different
+	// key, so the new findings re-trigger a fix round.
+	if devinKey == combinedFixKey(failing, true, true, "deadbeef", []string{"fp1", "fp2"}) {
+		t.Fatal("combinedFixKey must change when the Devin fingerprints change")
+	}
+}
+
 func TestDevinFindingsPromptSection(t *testing.T) {
 	t.Parallel()
 	if got := devinFindingsPromptSection(nil); got != "" {

@@ -403,6 +403,72 @@ func TestGetReviewVerdictChangesRequested(t *testing.T) {
 	}
 }
 
+func TestDecodePaginatedArray(t *testing.T) {
+	t.Parallel()
+
+	// Empty / whitespace body decodes to nil without error.
+	for _, in := range []string{"", "  \n"} {
+		got, err := decodePaginatedArray[ghReview]([]byte(in))
+		if err != nil {
+			t.Fatalf("decodePaginatedArray(%q) error = %v", in, err)
+		}
+		if got != nil {
+			t.Fatalf("decodePaginatedArray(%q) = %v, want nil", in, got)
+		}
+	}
+
+	// A single page (one JSON array) decodes as one value.
+	single := `[{"state":"APPROVED","commit_id":"a"}]`
+	got, err := decodePaginatedArray[ghReview]([]byte(single))
+	if err != nil {
+		t.Fatalf("single-page decode error = %v", err)
+	}
+	if len(got) != 1 || got[0].State != "APPROVED" {
+		t.Fatalf("single-page decode = %+v, want one APPROVED", got)
+	}
+
+	// Multiple pages: `gh api --paginate` (no --slurp) emits each page as its own
+	// top-level array document concatenated back-to-back. They must all be read.
+	multi := `[{"state":"COMMENTED","commit_id":"a"}]` + "\n" +
+		`[{"state":"CHANGES_REQUESTED","commit_id":"b"},{"state":"APPROVED","commit_id":"c"}]` + "\n"
+	got, err = decodePaginatedArray[ghReview]([]byte(multi))
+	if err != nil {
+		t.Fatalf("multi-page decode error = %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("multi-page decode = %d reviews, want 3 (pages must be flattened)", len(got))
+	}
+	if got[1].State != "CHANGES_REQUESTED" || got[1].CommitID != "b" {
+		t.Fatalf("multi-page decode lost page-2 content: %+v", got)
+	}
+}
+
+// TestGetReviewVerdictReadsAllReviewPages guards the false-green path: when the
+// head's CHANGES_REQUESTED review lands on a second pagination page, the verdict
+// read must still surface it instead of failing to parse the multi-document
+// `gh api --paginate` output and degrading to VerdictNone.
+func TestGetReviewVerdictReadsAllReviewPages(t *testing.T) {
+	t.Parallel()
+
+	page1 := `[{"state":"COMMENTED","commit_id":"older","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n"
+	page2 := `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n"
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: page1 + page2,
+		},
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
+	}), nil, "test/repo")
+
+	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictChangesRequested {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (head review on page 2 must be read)", verdict, scm.VerdictChangesRequested)
+	}
+}
+
 func TestGetReviewVerdictHonorsChangesRequestedState(t *testing.T) {
 	t.Parallel()
 
