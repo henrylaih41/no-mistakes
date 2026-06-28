@@ -242,15 +242,33 @@ func TestEffectiveRepoConfig_OptInHonorsPushedReview(t *testing.T) {
 	}
 }
 
-func TestLoadRepo_ReviewValidatesReservedArgs(t *testing.T) {
+// TestLoadRepo_DoesNotValidateUntrustedReview proves the untrusted pushed-branch
+// path tolerates a semantically invalid review block. A contributor must not be
+// able to fail LoadRepo(wtDir) with a review panel that EffectiveRepoConfig
+// strips back to the trusted default-branch copy; validation lives on the
+// trusted entry point (LoadRepoFromBytes) and ResolveReviewers instead.
+func TestLoadRepo_DoesNotValidateUntrustedReview(t *testing.T) {
 	dir := t.TempDir()
 	repoYAML := "review:\n  reviewers:\n    - agent: codex\n      args:\n        - --json\n"
 	if err := os.WriteFile(filepath.Join(dir, ".no-mistakes.yaml"), []byte(repoYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := LoadRepo(dir)
+	cfg, err := LoadRepo(dir)
+	if err != nil {
+		t.Fatalf("LoadRepo must not validate the untrusted review panel, got: %v", err)
+	}
+	if len(cfg.Review.Reviewers) != 1 {
+		t.Fatalf("review reviewers = %v, want the raw pushed panel preserved", cfg.Review.Reviewers)
+	}
+}
+
+// TestLoadRepoFromBytes_ReviewValidatesReservedArgs proves the trusted entry
+// point still rejects a reviewer that overrides a no-mistakes-managed flag.
+func TestLoadRepoFromBytes_ReviewValidatesReservedArgs(t *testing.T) {
+	data := []byte("review:\n  reviewers:\n    - agent: codex\n      args:\n        - --json\n")
+	_, err := LoadRepoFromBytes(data)
 	if err == nil {
-		t.Fatal("expected error: repo-level reviewer with reserved arg --json must be rejected")
+		t.Fatal("expected error: trusted reviewer with reserved arg --json must be rejected")
 	}
 	if !strings.Contains(err.Error(), "managed by no-mistakes") {
 		t.Errorf("expected 'managed by no-mistakes' in error, got: %v", err)

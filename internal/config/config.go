@@ -776,11 +776,26 @@ func LoadRepo(dir string) (*RepoConfig, error) {
 // LoadRepoFromBytes parses per-repo config from raw YAML bytes. It is the
 // trusted-config entry point: callers that read .no-mistakes.yaml from a
 // specific git ref (e.g. the default branch) use this to avoid honoring a
-// contributor's checked-out copy.
+// contributor's checked-out copy. Because the bytes are trusted, the review
+// panel is semantically validated here; the untrusted pushed-branch path
+// (LoadRepo) deliberately skips that check so a contributor cannot fail a run
+// with a review block that EffectiveRepoConfig will strip anyway.
 func LoadRepoFromBytes(data []byte) (*RepoConfig, error) {
-	return parseRepoConfig(data)
+	cfg, err := parseRepoConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateReviewers(cfg.Review.Reviewers); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
+// parseRepoConfig unmarshals per-repo config without semantically validating the
+// review panel. The review block is code-executing config taken only from the
+// trusted default-branch copy (EffectiveRepoConfig), so validation belongs to
+// the trusted entry point (LoadRepoFromBytes) and to ResolveReviewers, not to
+// every parse of a possibly-untrusted pushed-branch file.
 func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	cfg := &RepoConfig{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
@@ -788,9 +803,6 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	}
 	if cfg.AutoFix.CI == nil {
 		cfg.AutoFix.CI = cfg.AutoFix.Babysit
-	}
-	if err := validateReviewers(cfg.Review.Reviewers); err != nil {
-		return nil, err
 	}
 
 	return cfg, nil
