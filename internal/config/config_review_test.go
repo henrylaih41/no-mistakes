@@ -355,6 +355,25 @@ func TestResolveReviewers_ExpandsBareAutoToAgent(t *testing.T) {
 	}
 }
 
+func TestResolveReviewers_RejectsReservedArgsAfterAutoExpansion(t *testing.T) {
+	// `agent: auto` args pass validateReviewers (empty reserved set), so the
+	// reserved-flag check must re-run once auto expands to the concrete family,
+	// or no-mistakes-managed flags leak into the real command.
+	cfg := &Config{
+		Agent: types.AgentCodex,
+		Review: Review{Reviewers: []ReviewerSpec{
+			{Agent: types.AgentAuto, Args: []string{"--json"}},
+		}},
+	}
+	_, err := cfg.ResolveReviewers(context.Background(), okLookPath)
+	if err == nil {
+		t.Fatal("expected error: --json is reserved for codex and must be rejected after auto expansion")
+	}
+	if !strings.Contains(err.Error(), "--json") {
+		t.Errorf("error should name the reserved flag, got %q", err)
+	}
+}
+
 func TestResolveReviewers_Dedups(t *testing.T) {
 	cfg := &Config{
 		Agent: types.AgentClaude,

@@ -439,6 +439,12 @@ func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (st
 				return nil, fmt.Errorf("review.reviewers[%d]: agent %q cannot be auto-resolved; set 'agent' to a concrete value or name the reviewer family explicitly", i, types.AgentAuto)
 			}
 			spec.Agent = c.Agent
+			// "auto" was validated against the empty reserved set, so re-check
+			// per-reviewer args against the family it just resolved to before
+			// those args reach the real command.
+			if arg, j, bad := reservedArgViolation(string(spec.Agent), spec.Args); bad {
+				return nil, fmt.Errorf("review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
+			}
 		}
 		if !isACPAgent(spec.Agent) && !isNativeAgent(spec.Agent) {
 			return nil, fmt.Errorf("review.reviewers[%d]: unknown agent %q; valid options: claude, codex, rovodev, opencode, pi, acp:<target>", i, spec.Agent)
@@ -601,21 +607,40 @@ func validateReviewers(reviewers []ReviewerSpec) error {
 		if spec.Agent != types.AgentAuto && !isACPAgent(spec.Agent) && !isNativeAgent(spec.Agent) {
 			return fmt.Errorf("invalid review.reviewers[%d]: unknown agent %q (valid: auto, claude, codex, rovodev, opencode, pi, acp:<target>)", i, name)
 		}
-		reserved := reservedAgentArgs[name]
 		for j, arg := range spec.Args {
 			if strings.TrimSpace(arg) == "" {
 				return fmt.Errorf("invalid review.reviewers[%d].args[%d]: empty arg", i, j)
 			}
-			base := arg
-			if idx := strings.Index(arg, "="); idx > 0 {
-				base = arg[:idx]
-			}
-			if reserved[base] {
-				return fmt.Errorf("invalid review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
-			}
+		}
+		// For a concrete family the reserved set is known now. For a bare "auto"
+		// reviewer the family is only known after ResolveReviewers expands it, so
+		// reservedArgViolation re-runs there against the resolved family - never
+		// trust an "auto" arg validated against the empty reserved set.
+		if arg, j, bad := reservedArgViolation(name, spec.Args); bad {
+			return fmt.Errorf("invalid review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
 		}
 	}
 	return nil
+}
+
+// reservedArgViolation reports whether any arg in args is a flag reserved by
+// no-mistakes for the named agent family. A flag matches by its bare form
+// (e.g. "--json") as well as the "--json=value" form. The returned index is the
+// position in args. When name is "auto" (or any family with no reserved set)
+// nothing matches, which is why ResolveReviewers must re-run this check after
+// expanding "auto" to a concrete family.
+func reservedArgViolation(name string, args []string) (string, int, bool) {
+	reserved := reservedAgentArgs[name]
+	for j, arg := range args {
+		base := arg
+		if idx := strings.Index(arg, "="); idx > 0 {
+			base = arg[:idx]
+		}
+		if reserved[base] {
+			return arg, j, true
+		}
+	}
+	return "", 0, false
 }
 
 // reviewerDedupKey produces a stable identity for a reviewer spec so a panel

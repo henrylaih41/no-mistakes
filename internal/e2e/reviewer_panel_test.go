@@ -17,9 +17,10 @@ import (
 // zero real API: the harness symlinks claude + codex to the fixture-replaying
 // fakeagent, and a global review.reviewers panel makes the review step fan out
 // across both families. The review action returns EMPTY-id findings so the
-// panel's NormalizeFindings stamps namespaced ids (review-codex-1 /
-// review-claude-1) and Source is the family name, which we assert on the
-// persisted, post-combine FindingsJSON.
+// panel's NormalizeFindings stamps namespaced ids (review-claude-1-1 /
+// review-codex-2-1, where the middle ordinal is the reviewer's position in the
+// panel) and Source is the family name, which we assert on the persisted,
+// post-combine FindingsJSON.
 func TestReviewerPanelJourney(t *testing.T) {
 	h := NewHarness(t, SetupOpts{
 		Agent:     "claude",
@@ -72,15 +73,15 @@ func TestReviewerPanelJourney(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a finding sourced from codex; got %s", *reviewStep.FindingsJSON)
 	}
-	if codexFinding.ID != "review-codex-1" {
-		t.Errorf("codex finding id = %q, want review-codex-1 (namespaced from an empty-id finding)", codexFinding.ID)
+	if codexFinding.ID != "review-codex-2-1" {
+		t.Errorf("codex finding id = %q, want review-codex-2-1 (namespaced from an empty-id finding)", codexFinding.ID)
 	}
 	claudeFinding, ok := findingFromSource(findings.Items, "claude")
 	if !ok {
 		t.Fatalf("expected a finding sourced from claude; got %s", *reviewStep.FindingsJSON)
 	}
-	if claudeFinding.ID != "review-claude-1" {
-		t.Errorf("claude finding id = %q, want review-claude-1 (namespaced from an empty-id finding)", claudeFinding.ID)
+	if claudeFinding.ID != "review-claude-1-1" {
+		t.Errorf("claude finding id = %q, want review-claude-1-1 (namespaced from an empty-id finding)", claudeFinding.ID)
 	}
 }
 
@@ -222,7 +223,7 @@ func findingFromSource(items []types.Finding, source string) (types.Finding, boo
 // reviewerPanelScenario returns a scenario whose review action emits a single
 // EMPTY-id, non-blocking finding (so the run completes without gating) while
 // every other step gets the standard clean catch-all. The empty id is what lets
-// the panel observe NormalizeFindings stamping review-<family>-1.
+// the panel observe NormalizeFindings stamping review-<family>-<ordinal>-N.
 func reviewerPanelScenario(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "panel-scenario.yaml")
@@ -230,7 +231,7 @@ func reviewerPanelScenario(t *testing.T) string {
 	// real agent rewrites the output schema so all properties are required
 	// (codexOutputSchema), so every field must be present; an empty id still
 	// passes (string type) yet is what NormalizeFindings stamps into
-	// review-<family>-1, which is exactly the namespacing we assert on.
+	// review-<family>-<ordinal>-N, which is exactly the namespacing we assert on.
 	content := `actions:
   - match: "Review the code changes and return structured findings with a risk assessment."
     text: "panel reviewer note"

@@ -154,12 +154,13 @@ func TestProcessReviewerResults_NamespacesAndStampsSource(t *testing.T) {
 	if len(reports) != 2 {
 		t.Fatalf("expected 2 reports, got %d", len(reports))
 	}
-	// Empty id is namespaced review-<name>-N; an existing id is preserved.
-	if got := reports[0].Findings.Items[0].ID; got != "review-codex-1" {
-		t.Errorf("codex id = %q, want review-codex-1", got)
+	// Every id is force-namespaced to review-<name>-<ordinal>-N; a
+	// model-supplied id ("keep-me") is discarded so it cannot collide.
+	if got := reports[0].Findings.Items[0].ID; got != "review-codex-1-1" {
+		t.Errorf("codex id = %q, want review-codex-1-1", got)
 	}
-	if got := reports[1].Findings.Items[0].ID; got != "keep-me" {
-		t.Errorf("claude id = %q, want preserved keep-me", got)
+	if got := reports[1].Findings.Items[0].ID; got != "review-claude-2-1" {
+		t.Errorf("claude id = %q, want review-claude-2-1 (model id discarded)", got)
 	}
 	// Source is stamped with the reviewer name on every item.
 	if reports[0].Findings.Items[0].Source != "codex" {
@@ -174,6 +175,43 @@ func TestProcessReviewerResults_NamespacesAndStampsSource(t *testing.T) {
 	}
 	if !strings.Contains(fileLogs[0], "[reviewer codex] report:") {
 		t.Errorf("first audit line = %q", fileLogs[0])
+	}
+}
+
+func TestProcessReviewerResults_SameFamilyIDsCollisionFree(t *testing.T) {
+	// Two reviewers of the same family, each emitting its own colliding ids,
+	// must end up with disjoint namespaced ids so gate selection/instructions
+	// target the right finding.
+	a, _ := json.Marshal(Findings{Items: []Finding{
+		{ID: "review-1", Severity: "warning", Description: "a1"},
+		{ID: "review-1", Severity: "info", Description: "a2"},
+	}})
+	b, _ := json.Marshal(Findings{Items: []Finding{
+		{ID: "review-1", Severity: "error", Description: "b1"},
+	}})
+	reports, err := processReviewerResults(
+		[]agent.FanOutResult{fanResult("codex", a, nil), fanResult("codex", b, nil)},
+		false,
+		func(string) {},
+		func(string) {},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range reports {
+		for _, item := range r.Findings.Items {
+			if item.ID == "" {
+				t.Errorf("finding has empty id: %+v", item)
+			}
+			if seen[item.ID] {
+				t.Errorf("duplicate finding id across same-family reviewers: %q", item.ID)
+			}
+			seen[item.ID] = true
+		}
+	}
+	if len(seen) != 3 {
+		t.Errorf("expected 3 distinct ids, got %d: %v", len(seen), seen)
 	}
 }
 

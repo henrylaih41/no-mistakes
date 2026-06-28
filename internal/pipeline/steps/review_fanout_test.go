@@ -75,15 +75,15 @@ func TestReviewStep_FanOut_InitialReviewMergesBothReviewers(t *testing.T) {
 	if !ok {
 		t.Fatal("expected a finding sourced from codex")
 	}
-	if codexFinding.ID != "review-codex-1" {
-		t.Errorf("codex finding id = %q, want review-codex-1", codexFinding.ID)
+	if codexFinding.ID != "review-codex-1-1" {
+		t.Errorf("codex finding id = %q, want review-codex-1-1", codexFinding.ID)
 	}
 	claudeFinding, ok := findingBySource(merged.Items, "claude")
 	if !ok {
 		t.Fatal("expected a finding sourced from claude")
 	}
-	if claudeFinding.ID != "review-claude-1" {
-		t.Errorf("claude finding id = %q, want review-claude-1", claudeFinding.ID)
+	if claudeFinding.ID != "review-claude-2-1" {
+		t.Errorf("claude finding id = %q, want review-claude-2-1", claudeFinding.ID)
 	}
 
 	// RiskLevel is the max across reviewers; an error finding needs approval.

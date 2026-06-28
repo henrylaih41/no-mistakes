@@ -11,8 +11,8 @@ import (
 )
 
 // reviewerReport is one reviewer's parsed findings after its IDs have been
-// namespaced (review-<name>-N) and every item's Source stamped with the
-// reviewer name, so the merged union stays attributable to its origin.
+// namespaced (review-<name>-<ordinal>-N) and every item's Source stamped with
+// the reviewer name, so the merged union stays attributable to its origin.
 type reviewerReport struct {
 	Name     string
 	Findings types.Findings
@@ -50,8 +50,11 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 // processReviewerResults turns FanOut results into attributed reviewer reports,
 // in reviewer (input) order. Each successful reviewer's findings are parsed with
 // the same parser the single-reviewer path uses, ID-namespaced to
-// review-<name>-N (collision-free across reviewers), Source-stamped with the
-// reviewer name, and its raw report written to the file-only audit log.
+// review-<name>-<ordinal>-N (collision-free across reviewers, including two
+// same-family reviewers - the per-reviewer ordinal disambiguates them, and any
+// model-supplied id is discarded so a reviewer cannot smuggle in a colliding
+// id), Source-stamped with the reviewer name, and its raw report written to the
+// file-only audit log.
 //
 // Fail policy: when failOpen is false (the default) the first reviewer error
 // fails the step with an error naming that reviewer family. When failOpen is
@@ -76,7 +79,11 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 			continue
 		}
 		parsed := parseReviewFindings(res.Result, log)
-		parsed = types.NormalizeFindings(parsed, "review-"+name)
+		prefix := fmt.Sprintf("review-%s-%d", name, len(reports)+1)
+		for i := range parsed.Items {
+			parsed.Items[i].ID = ""
+		}
+		parsed = types.NormalizeFindings(parsed, prefix)
 		for i := range parsed.Items {
 			parsed.Items[i].Source = name
 		}
@@ -95,7 +102,7 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 
 // combineReviewerFindings merges reviewer reports into a plain attributed union.
 // Items are concatenated in reviewer (input) order, each keeping the
-// review-<name>-N id and Source set by processReviewerResults - there is NO
+// review-<name>-<ordinal>-N id and Source set by processReviewerResults - there is NO
 // fingerprint dedup, agreement-collapse, or severity-escalation. The scalar
 // fields are reconciled: RiskLevel is the maximum (low < medium < high) across
 // reports, while RiskRationale and Summary become per-reviewer labeled
