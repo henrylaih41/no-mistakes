@@ -215,29 +215,41 @@ func TestEncodeLastFixedChecksByteIdenticalWhenDevinAbsent(t *testing.T) {
 	}
 }
 
-func TestCombinedFixKey(t *testing.T) {
+func TestCIFixAlreadyAttempted_SeparatesCIAndReviewDimensions(t *testing.T) {
 	t.Parallel()
 
 	failing := []string{"build", "lint"}
+	ciKey := encodeLastFixedChecks(failing, true)
 
-	// Review loop green/inactive: byte-identical to the legacy checks key, so the
-	// review-loop-disabled anti-thrash is unchanged.
-	if got, want := combinedFixKey(failing, true, false, "deadbeef", []string{"fp1"}), encodeLastFixedChecks(failing, true); got != want {
-		t.Fatalf("combinedFixKey(devinNotGreen=false) = %q, want legacy %q", got, want)
+	// Mixed CI+review fix just pushed against head1 with finding fp1.
+	s := &CIStep{}
+	s.recordCIFix(ciKey, encodeDevinFixKey(nil, false, "head1", []string{"fp1"}), true, nil)
+	if s.lastFixedChecks != ciKey {
+		t.Fatalf("recordCIFix stored CI key %q, want %q", s.lastFixedChecks, ciKey)
 	}
 
-	// Devin not-green: the key must DIFFER from the pure-checks key on the same
-	// failing checks, so newly-posted review findings are not mistaken for an
-	// already-attempted fix and skipped.
-	devinKey := combinedFixKey(failing, true, true, "deadbeef", []string{"fp1"})
-	if devinKey == encodeLastFixedChecks(failing, true) {
-		t.Fatal("combinedFixKey(devinNotGreen=true) must differ from the pure-checks key")
+	// Same CI failures + same review finding on the same head: already attempted.
+	if !s.ciFixAlreadyAttempted(ciKey, encodeDevinFixKey(nil, false, "head1", []string{"fp1"}), true) {
+		t.Fatal("same CI failures + same review finding must read as already attempted")
 	}
 
-	// A change in the review findings (same failing checks) yields a different
-	// key, so the new findings re-trigger a fix round.
-	if devinKey == combinedFixKey(failing, true, true, "deadbeef", []string{"fp1", "fp2"}) {
-		t.Fatal("combinedFixKey must change when the Devin fingerprints change")
+	// The regression: the freshly pushed head usually makes the review verdict go
+	// pending (devinNotGreen=false) while GitHub still reports the SAME stale
+	// failing checks. The CI anti-thrash must stay stable across that transition
+	// so a second fix does not run before CI re-runs.
+	if !s.ciFixAlreadyAttempted(ciKey, "", false) {
+		t.Fatal("CI anti-thrash must survive the review not-green -> pending transition")
+	}
+
+	// A genuinely new review finding on the same failing checks must re-trigger.
+	if s.ciFixAlreadyAttempted(ciKey, encodeDevinFixKey(nil, false, "head1", []string{"fp1", "fp2"}), true) {
+		t.Fatal("a new review fingerprint set must not read as already attempted")
+	}
+
+	// A different failing-check set must re-trigger regardless of review state.
+	otherCI := encodeLastFixedChecks([]string{"deploy"}, false)
+	if s.ciFixAlreadyAttempted(otherCI, "", false) {
+		t.Fatal("a different CI-check identity must not read as already attempted")
 	}
 }
 
