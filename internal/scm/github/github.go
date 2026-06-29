@@ -455,7 +455,7 @@ type ghUser struct {
 // first:100 window. On a busy PR a newest live severe finding could land past
 // the first page, get truncated, and wrongly read as APPROVED, so GetBotFindings
 // walks every page (after:$cursor) before filtering.
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login __typename} databaseId path line originalLine body url originalCommit{oid}}}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login __typename} databaseId path line originalLine body url originalCommit{oid}}}}}}}}`
 
 // ghReviewThreadsResponse is the `gh api graphql` payload for reviewThreadsQuery.
 type ghReviewThreadsResponse struct {
