@@ -639,6 +639,15 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 		// empty originalCommit.oid (a host or API version that doesn't expose the
 		// field) is treated as current-head (fail-safe: don't suppress findings
 		// when the metadata is absent).
+		//
+		// Tradeoff: this assumes Devin re-posts still-applicable findings as NEW
+		// threads on each head it reviews. If Devin instead reviews only the
+		// inter-head diff and does NOT re-surface a still-valid finding whose
+		// anchored lines were untouched, this filter silently drops a genuinely-
+		// unaddressed finding and the loop could converge to APPROVED with a real
+		// bug unfixed. The CI idle timeout / human escalation provide a backstop.
+		// Empirically (observed across multiple repos), Devin posts fresh review
+		// threads on each head it reviews, so this assumption holds in practice.
 		if oid := strings.TrimSpace(first.OriginalCommit.OID); oid != "" && !strings.EqualFold(oid, headSHA) {
 			continue
 		}
