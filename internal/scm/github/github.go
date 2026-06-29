@@ -586,8 +586,11 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 	// Fail-safe: without a head SHA we cannot confirm we are reading the current
 	// commit's review state, so report no findings rather than risk surfacing a
 	// stale thread. Mirrors GetReviewVerdict's empty-head short-circuit and keeps
-	// the two consistent (and short-circuits before any gh round-trip).
-	if strings.TrimSpace(headSHA) == "" {
+	// the two consistent (and short-circuits before any gh round-trip). Trim once
+	// here so the originalCommit.oid comparison below is symmetric with the
+	// (also-trimmed) oid (a callers-can't-be-trusted defensive normalization).
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" {
 		return nil, nil
 	}
 
