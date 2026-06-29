@@ -487,25 +487,6 @@ func gateOriginURL(ctx context.Context, wtDir string) string {
 	return strings.TrimSpace(url)
 }
 
-// trustedRouteRefPrefix namespaces the per-worktree ref the trusted
-// default-branch commit is fetched into when a selected route's base URL
-// differs from the gate "origin" remote. Like the rebase step's route refs it
-// lives under refs/worktree/* so a route base that is a different repo than the
-// gate origin can never clobber the shared refs/remotes/origin/* view.
-const trustedRouteRefPrefix = "refs/worktree/no-mistakes-trusted/"
-
-// gateOriginURL returns the configured URL of the worktree's "origin" remote,
-// or "" when it cannot be resolved. It lets startRun tell a route base that
-// merely equals the gate origin (use origin directly) from one that points at a
-// different repo (fetch the trusted config from that base instead).
-func gateOriginURL(ctx context.Context, wtDir string) string {
-	url, err := git.GetRemoteURL(ctx, wtDir, "origin")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(url)
-}
-
 // HandlePushReceived processes a push notification from the post-receive hook.
 // It creates a run, sets up a worktree, and launches pipeline execution in the background.
 func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {
