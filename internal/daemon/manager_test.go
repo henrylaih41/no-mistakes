@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
@@ -265,6 +266,74 @@ func TestRerunSkipStepsConfiguresExecutor(t *testing.T) {
 		if step.StepName == types.StepReview && step.Status != types.StepStatusSkipped {
 			t.Fatalf("review status = %s, want %s", step.Status, types.StepStatusSkipped)
 		}
+	}
+}
+
+func TestRerunBootstrapsFirstRunWithExpectedHead(t *testing.T) {
+	review := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{review}
+	})
+
+	// The gate has the branch ref at headSHA, but NO run has ever been recorded -
+	// the exact "ref mirrored, no run" precondition of issue #12.
+	_, headSHA := setupTestGitRepo(t, p, d, "bootstrap-repo")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	// Without ExpectedHeadSHA, rerun stays replay-only: no prior run -> error.
+	var noBoot ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
+		RepoID: "bootstrap-repo", Branch: "main",
+	}, &noBoot); err == nil || !strings.Contains(err.Error(), "no previous run") {
+		t.Fatalf("rerun without expected head: err = %v, want 'no previous run'", err)
+	}
+
+	// A mismatched ExpectedHeadSHA must NOT bootstrap (never validate a stale head).
+	var mismatch ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
+		RepoID: "bootstrap-repo", Branch: "main", ExpectedHeadSHA: "deadbeef",
+	}, &mismatch); err == nil || !strings.Contains(err.Error(), "no previous run") {
+		t.Fatalf("rerun with mismatched expected head: err = %v, want 'no previous run'", err)
+	}
+
+	// With the matching gate head, bootstrap the FIRST run and stamp the intent.
+	var boot ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
+		RepoID:          "bootstrap-repo",
+		Branch:          "main",
+		ExpectedHeadSHA: headSHA,
+		Intent:          "ship the thing",
+	}, &boot); err != nil {
+		t.Fatalf("bootstrap rerun: %v", err)
+	}
+	if boot.RunID == "" {
+		t.Fatal("bootstrap produced no run")
+	}
+	waitForRunTerminalState(t, d, boot.RunID)
+
+	run, err := d.GetRun(boot.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != types.RunCompleted {
+		t.Fatalf("bootstrap run status = %s, want completed", run.Status)
+	}
+	if !git.IsZeroSHA(run.BaseSHA) {
+		t.Fatalf("bootstrap base = %q, want zero SHA", run.BaseSHA)
+	}
+	if run.HeadSHA != headSHA {
+		t.Fatalf("bootstrap head = %q, want %q", run.HeadSHA, headSHA)
+	}
+	if run.Intent == nil || *run.Intent != "ship the thing" {
+		t.Fatalf("bootstrap intent = %v, want %q", run.Intent, "ship the thing")
+	}
+	if got := review.execCnt.Load(); got != 1 {
+		t.Fatalf("review executed %d times, want 1", got)
 	}
 }
 

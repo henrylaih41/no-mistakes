@@ -233,9 +233,12 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, effectiveRoute)
 }
 
-// HandleRerun creates a new run for the latest gate head on a branch. An
-// optional intent is stamped onto the new run.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent string) (string, error) {
+// HandleRerun creates a new run for the latest gate head on a branch by
+// replaying a prior run's base and route. When there is no prior run it returns
+// an error, UNLESS expectedHead is set and matches the current gate head (the
+// `axi run` bootstrap path), in which case it starts the FIRST run from the gate
+// head with a zero-SHA base. An optional intent is stamped onto the new run.
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, expectedHead string, skipSteps []types.StepName, intent string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -270,7 +273,22 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 		}
 	}
 	if latestForBranch == nil {
-		return "", fmt.Errorf("no previous run for branch %s", branch)
+		// No prior run to replay. Bootstrap the FIRST run for this branch when the
+		// caller supplied the head it just pushed (axi run) and it matches the
+		// current gate head — this covers the "ref already mirrored but no run
+		// recorded" case (e.g. a push whose hook notification was dropped while the
+		// daemon was down or restarting). The plain `rerun` command sends no
+		// expected head, so it keeps the replay-only error. Base is the zero SHA,
+		// identical to a brand-new branch's first push; the true base (merge-base
+		// with the default branch) is resolved lazily at step time.
+		if expectedHead == "" || expectedHead != headSHA {
+			return "", fmt.Errorf("no previous run for branch %s", branch)
+		}
+		effectiveRepo, effectiveRoute, err := m.resolveRepoRoute(repo, "")
+		if err != nil {
+			return "", err
+		}
+		return m.startRun(ctx, effectiveRepo, branch, headSHA, git.ZeroSHA, "bootstrap", skipSteps, intent, effectiveRoute)
 	}
 
 	sourceRun := latestForBranch
