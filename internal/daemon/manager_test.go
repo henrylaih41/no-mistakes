@@ -320,6 +320,9 @@ func TestRerunBootstrapsFirstRunWithExpectedHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if run.Status != types.RunCompleted {
+		t.Fatalf("bootstrap run status = %s, want completed", run.Status)
+	}
 	if !git.IsZeroSHA(run.BaseSHA) {
 		t.Fatalf("bootstrap base = %q, want zero SHA", run.BaseSHA)
 	}
