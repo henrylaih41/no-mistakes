@@ -56,6 +56,17 @@ Override the Bitbucket Cloud API base URL.
 
 Useful for mocking in tests or pointing at a proxy.
 
+## `DEVIN_API_KEY`
+
+Devin API token used by the post-PR [review loop](/no-mistakes/reference/global-config/#review_loop) to explicitly (re-)trigger a Devin review.
+
+| | |
+|---|---|
+| Type | `string` |
+| Default | (none) |
+
+Takes precedence over `review_loop.devin_api_key_file`. When this variable is empty, no-mistakes reads the key from the configured key file (default `~/.config/devin/api_key`). When neither yields a key, the explicit re-trigger is skipped (best-effort) and the loop falls back to Devin's auto-review. The key is sent only in the Devin API `Authorization` header and is never logged. Only consulted when `review_loop.enabled` and `review_loop.retrigger` are true.
+
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 
 Disable background update checks.
