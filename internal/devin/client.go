@@ -133,13 +133,12 @@ type prReviewResponse struct {
 // It requires a `cog_`-prefixed service-user token with the review permission
 // (distinct from the /v1/sessions key) plus the Devin org id, and returns the
 // review status (pending|running|completed|errored|cancelled) together with the
-// commit SHA Devin accepted for review. The Review API reviews the PR's CURRENT
-// head, so the returned commit_sha may differ from a stale run head if the PR
-// branch advanced out of band — callers compare it to know which commit was
-// actually reviewed.
+// commit SHA Devin accepted for review (the PR's current head, surfaced for
+// observability).
 //
-// A non-2xx status is treated as an error. The token is sent only in the
-// Authorization header and is never logged or included in any returned error.
+// A non-2xx status, or a 2xx response missing commit_sha, is treated as an
+// error. The token is sent only in the Authorization header and is never logged
+// or included in any returned error.
 func (c *Client) TriggerPRReview(ctx context.Context, token, orgID, prURL string) (status, commitSHA string, err error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -190,10 +189,14 @@ func (c *Client) TriggerPRReview(ctx context.Context, token, orgID, prURL string
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return "", "", fmt.Errorf("devin: decode response: %w", err)
 	}
+	commitSHA = strings.TrimSpace(parsed.CommitSHA)
+	if commitSHA == "" {
+		return "", "", fmt.Errorf("devin: response missing commit_sha")
+	}
 
 	// Log only non-secret identifiers on success. NEVER log the token.
-	slog.Info("devin: triggered PR review", "pr_number", parsed.PRNumber, "status", parsed.Status, "commit_sha", parsed.CommitSHA)
-	return strings.TrimSpace(parsed.Status), strings.TrimSpace(parsed.CommitSHA), nil
+	slog.Info("devin: triggered PR review", "pr_number", parsed.PRNumber, "status", parsed.Status, "commit_sha", commitSHA)
+	return strings.TrimSpace(parsed.Status), commitSHA, nil
 }
 
 // reviewPrompt builds the session prompt. It references the PR URL and head SHA

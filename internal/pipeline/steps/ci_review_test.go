@@ -921,12 +921,11 @@ func TestMaybeRetriggerDevin_PrefersReviewAPIWhenConfigured(t *testing.T) {
 	}
 }
 
-// TestMaybeRetriggerDevin_WarnsWhenReviewedHeadDiffers asserts that when the
-// Review API reports it reviewed a commit other than the run head (the PR head
-// advanced out of band), the loop surfaces the mismatch instead of logging a
-// plain "triggered" line, so the never-arriving head-scoped verdict is not
-// silently waited out.
-func TestMaybeRetriggerDevin_WarnsWhenReviewedHeadDiffers(t *testing.T) {
+// TestMaybeRetriggerDevin_LogsReviewedCommit asserts that the success log line
+// surfaces the commit SHA the Review API reported it accepted (the PR's current
+// head) for observability. This is a best-effort nudge: a reviewed commit that
+// differs from the run head must NOT hard-gate, abort, or warn-spam the run.
+func TestMaybeRetriggerDevin_LogsReviewedCommit(t *testing.T) {
 	t.Setenv("DEVIN_REVIEW_API_KEY", "cog-review-key")
 	cfg := config.ReviewLoop{Enabled: true, Retrigger: true, DevinOrgID: "org-42"}
 
@@ -941,17 +940,19 @@ func TestMaybeRetriggerDevin_WarnsWhenReviewedHeadDiffers(t *testing.T) {
 
 	step.maybeRetriggerDevin(sctx, pr, "headA")
 
-	if got := strings.Join(logs, "\n"); !strings.Contains(got, "advanced out of band") {
-		t.Fatalf("expected a mismatch warning, got logs: %q", got)
+	got := strings.Join(logs, "\n")
+	if !strings.Contains(got, "triggered Devin Review of") {
+		t.Fatalf("expected a triggered line, got logs: %q", got)
 	}
-	for _, l := range logs {
-		if strings.HasPrefix(l, "triggered Devin Review of") {
-			t.Fatalf("did not expect a plain triggered line on head mismatch, got: %q", l)
-		}
+	if !strings.Contains(got, shortSHA("headOutOfBand")) {
+		t.Fatalf("expected the reviewed commit %q in the log, got: %q", shortSHA("headOutOfBand"), got)
+	}
+	if strings.Contains(got, "advanced out of band") {
+		t.Fatalf("did not expect a mismatch warning (best-effort nudge), got: %q", got)
 	}
 	// The head is still claimed so the cost guard is not defeated.
 	if step.retriggeredSHA() != "headA" {
-		t.Fatalf("guard = %q, want headA (claim consumed despite mismatch)", step.retriggeredSHA())
+		t.Fatalf("guard = %q, want headA (claim consumed)", step.retriggeredSHA())
 	}
 }
 

@@ -145,6 +145,23 @@ func TestTriggerPRReview_Non2xxIsError(t *testing.T) {
 	}
 }
 
+func TestTriggerPRReview_MissingCommitSHAIsError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"pending","pr_number":42}`)
+	}))
+	defer srv.Close()
+	c := &Client{HTTPClient: srv.Client(), BaseURL: srv.URL}
+	_, _, err := c.TriggerPRReview(context.Background(), testAPIKey, "org", "https://github.com/o/r/pull/1")
+	if err == nil {
+		t.Fatal("expected error on 2xx response missing commit_sha")
+	}
+	if !strings.Contains(err.Error(), "commit_sha") {
+		t.Errorf("error should mention commit_sha, got: %v", err)
+	}
+}
+
 func TestTriggerPRReview_RequiresTokenAndOrg(t *testing.T) {
 	t.Parallel()
 	c := &Client{}
