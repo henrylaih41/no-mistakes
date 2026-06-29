@@ -392,6 +392,36 @@ func (s *CIStep) maybeRetriggerDevin(sctx *pipeline.StepContext, pr *scm.PR, hea
 	if headSHA == s.retriggeredSHA() {
 		return
 	}
+	// Prefer the dedicated Devin Review API (POST /v3/.../pr-reviews) when a review
+	// service-user token AND org id are configured: it is the vendor-recommended
+	// path and is NOT per-org ACU-limited, so it keeps working when /v1/sessions
+	// hits out_of_quota — the failure mode that otherwise leaves the loop waiting
+	// forever, since the head is claimed once. Otherwise fall back to the legacy
+	// /v1/sessions agent-session trigger.
+	orgID := strings.TrimSpace(cfg.DevinOrgID)
+	if reviewKey := devin.ResolveReviewAPIKey(cfg.DevinReviewAPIKeyFile); reviewKey != "" && orgID != "" {
+		// Claim the head BEFORE the call so a transient failure is not retried every
+		// poll (the Review API is not per-org-limited, so out_of_quota no longer
+		// makes this claim a permanent dead end).
+		if !s.claimRetrigger(headSHA) {
+			return
+		}
+		trigger := s.triggerPRReview
+		if trigger == nil {
+			trigger = (&devin.Client{}).TriggerPRReview
+		}
+		ctx, cancel := context.WithTimeout(sctx.Ctx, devinRetriggerTimeout)
+		defer cancel()
+		status, err := trigger(ctx, reviewKey, orgID, pr.URL)
+		if err != nil {
+			// Best-effort: log without the token and keep waiting for the review.
+			slog.Warn("review loop: Devin Review trigger failed", "pr", pr.Number, "head", shortSHA(headSHA), "err", err)
+			return
+		}
+		sctx.Log(fmt.Sprintf("triggered Devin Review of %s (status %s)", shortSHA(headSHA), status))
+		return
+	}
+
 	apiKey := devin.ResolveAPIKey(cfg.DevinAPIKeyFile)
 	if apiKey == "" {
 		// No key -> SKIP the trigger (best-effort). Do NOT consume the once-per-head
