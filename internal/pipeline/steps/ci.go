@@ -92,6 +92,32 @@ func (s *CIStep) gracePeriod() time.Duration {
 	return defaultChecksGracePeriod
 }
 
+func ciPRClosedAutoResolver(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) func(context.Context) bool {
+	return func(ctx context.Context) bool {
+		state, err := host.GetPRState(ctx, pr)
+		if err != nil {
+			if ctx.Err() == nil && sctx.Log != nil {
+				sctx.Log(fmt.Sprintf("warning: could not re-check PR state while CI gate is parked: %v", err))
+			}
+			return false
+		}
+		switch state {
+		case scm.PRStateMerged:
+			if sctx.Log != nil {
+				sctx.Log("PR has been merged after CI timeout; clearing parked CI gate")
+			}
+			return true
+		case scm.PRStateClosed:
+			if sctx.Log != nil {
+				sctx.Log("PR has been closed after CI timeout; clearing parked CI gate")
+			}
+			return true
+		default:
+			return false
+		}
+	}
+}
+
 // devinRounds returns the number of completed post-PR review-loop fix rounds,
 // read under devinMu. See CIStep for the single-writer note.
 func (s *CIStep) devinRounds() int {
@@ -278,16 +304,23 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	mergeabilityBlockedReason := ""
 	timeoutFailingChecks := []string{}
 	timeoutMergeConflict := false
+	timeoutAutoResolve := ciPRClosedAutoResolver(sctx, host, pr)
 	lastMonitorLog := ""
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
-			return ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present"), nil
+			outcome := ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present")
+			outcome.ApprovalAutoResolve = timeoutAutoResolve
+			return outcome, nil
 		}
 		if mergeabilityBlockedReason != "" {
-			return ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason), nil
+			outcome := ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason)
+			outcome.ApprovalAutoResolve = timeoutAutoResolve
+			return outcome, nil
 		}
-		return ciMonitoringTimeoutOutcome(), nil
+		outcome := ciMonitoringTimeoutOutcome()
+		outcome.ApprovalAutoResolve = timeoutAutoResolve
+		return outcome, nil
 	}
 
 	for {

@@ -23,6 +23,7 @@ import (
 // behavior; the rest satisfy the interface and are unused by the review loop.
 type fakeReviewHost struct {
 	caps     scm.Capabilities
+	state    scm.PRState
 	verdict  scm.ReviewVerdict
 	verdErr  error
 	findings []scm.ReviewComment
@@ -60,6 +61,9 @@ func (h *fakeReviewHost) UpdatePR(context.Context, *scm.PR, scm.PRContent) (*scm
 	return nil, nil
 }
 func (h *fakeReviewHost) GetPRState(context.Context, *scm.PR) (scm.PRState, error) {
+	if h.state != "" {
+		return h.state, nil
+	}
 	return scm.PRStateOpen, nil
 }
 func (h *fakeReviewHost) GetChecks(context.Context, *scm.PR) ([]scm.Check, error) {
