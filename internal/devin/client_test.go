@@ -179,7 +179,7 @@ func TestTriggerPRReview_MissingStatusIsError(t *testing.T) {
 	}
 }
 
-func TestTriggerPRReview_RequiresTokenAndOrg(t *testing.T) {
+func TestTriggerPRReview_RequiresAllInputs(t *testing.T) {
 	t.Parallel()
 	c := &Client{}
 	if _, _, err := c.TriggerPRReview(context.Background(), "", "org", "u"); err == nil {
@@ -187,6 +187,9 @@ func TestTriggerPRReview_RequiresTokenAndOrg(t *testing.T) {
 	}
 	if _, _, err := c.TriggerPRReview(context.Background(), "tok", "", "u"); err == nil {
 		t.Error("expected error on empty org id")
+	}
+	if _, _, err := c.TriggerPRReview(context.Background(), "tok", "org", ""); err == nil {
+		t.Error("expected error on empty PR URL")
 	}
 }
 

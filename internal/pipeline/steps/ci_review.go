@@ -464,7 +464,10 @@ func (s *CIStep) maybeRetriggerDevin(sctx *pipeline.StepContext, pr *scm.PR, hea
 	sessionID, err := trigger(ctx, apiKey, pr.URL, headSHA)
 	if err != nil {
 		// Best-effort: log without the key and keep waiting for the auto-review.
-		slog.Warn("review loop: Devin re-trigger failed", "pr", pr.Number, "head", shortSHA(headSHA), "err", err)
+		// Use the same "pr_number" int field as the Review API log lines so
+		// structured-log queries stay consistent across both trigger paths.
+		prNum, _ := strconv.Atoi(pr.Number)
+		slog.Warn("review loop: Devin re-trigger failed", "pr_number", prNum, "head", shortSHA(headSHA), "err", err)
 		return
 	}
 	sctx.Log(fmt.Sprintf("triggered Devin review of %s (session %s)", shortSHA(headSHA), sessionID))

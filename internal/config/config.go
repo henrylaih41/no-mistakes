@@ -1126,8 +1126,10 @@ func reviewLoopDefaults() ReviewLoop {
 }
 
 // DefaultDevinAPIKeyFile is the default path the review loop reads the Devin API
-// key from when DEVIN_API_KEY is unset (a leading ~ is expanded at use time).
-const DefaultDevinAPIKeyFile = "~/.config/devin/api_key"
+// key from when DEVIN_API_KEY is unset (a leading ~ is expanded at use time). It
+// aliases devin.DefaultAPIKeyFile so the path has a single source of truth and can
+// never drift from the fallback ResolveAPIKey actually uses.
+const DefaultDevinAPIKeyFile = devin.DefaultAPIKeyFile
 
 // DefaultDevinReviewAPIKeyFile is the default path the review loop reads the Devin
 // Review API token from when DEVIN_REVIEW_API_KEY is empty. It aliases
