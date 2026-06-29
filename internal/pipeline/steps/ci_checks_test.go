@@ -1,9 +1,11 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -58,6 +60,28 @@ func TestDevinFailureOutcomeMapsSeveritiesAndBlocks(t *testing.T) {
 	// high/medium/low severities it would not.
 	if !hasBlockingFindings(parsed.Items) {
 		t.Error("expected mapped findings to be blocking")
+	}
+}
+
+func TestCITimeoutAutoResolverClearsMergedOrClosedPR(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range []scm.PRState{scm.PRStateMerged, scm.PRStateClosed} {
+		state := state
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+			host := &fakeReviewHost{state: state}
+			resolver := ciPRClosedAutoResolver(&pipeline.StepContext{Log: func(string) {}}, host, &scm.PR{Number: "42"})
+			if !resolver(context.Background()) {
+				t.Fatalf("resolver returned false for PR state %s", state)
+			}
+		})
+	}
+
+	host := &fakeReviewHost{state: scm.PRStateOpen}
+	resolver := ciPRClosedAutoResolver(&pipeline.StepContext{Log: func(string) {}}, host, &scm.PR{Number: "42"})
+	if resolver(context.Background()) {
+		t.Fatal("resolver returned true for an open PR")
 	}
 }
 

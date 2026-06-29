@@ -147,12 +147,13 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			return nil, err
 		}
 		if len(conflictFiles) > 0 {
-			conflictTargets = append(conflictTargets, target)
+			label := rebaseTargetLabel(target, defaultBranch)
+			conflictTargets = append(conflictTargets, label)
 			for _, file := range conflictFiles {
 				conflictFindings = append(conflictFindings, Finding{
 					Severity:    "warning",
 					File:        file,
-					Description: fmt.Sprintf("merge conflict rebasing onto %s", target),
+					Description: fmt.Sprintf("merge conflict rebasing onto %s", label),
 				})
 			}
 		}
@@ -180,6 +181,13 @@ func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string
 		targets = append(targets, baseTrackingRef(defaultBranch))
 	}
 	return targets
+}
+
+func rebaseTargetLabel(target, defaultBranch string) string {
+	if target == baseTrackingRef(defaultBranch) {
+		return "origin/" + defaultBranch
+	}
+	return target
 }
 
 // forcePushRebaseTargets returns rebase targets for a force push. The pushed

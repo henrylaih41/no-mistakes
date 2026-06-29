@@ -23,6 +23,17 @@ func refExists(t *testing.T, dir, ref string) bool {
 	return cmd.Run() == nil
 }
 
+func TestRebaseTargetLabelHidesPrivateBaseRef(t *testing.T) {
+	t.Parallel()
+
+	if got := rebaseTargetLabel(baseTrackingRef("main"), "main"); got != "origin/main" {
+		t.Fatalf("base target label = %q, want origin/main", got)
+	}
+	if got := rebaseTargetLabel("origin/feature", "main"); got != "origin/feature" {
+		t.Fatalf("branch target label = %q, want origin/feature", got)
+	}
+}
+
 func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()

@@ -48,6 +48,12 @@ func TestCIStep_TimeoutWithOpenPRNeedsApprovalAndDoesNotSleepPastDeadline(t *tes
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval when CI monitoring times out before PR is merged or closed")
 	}
+	if outcome.ApprovalAutoResolve == nil {
+		t.Fatal("expected timeout approval gate to re-check PR state while parked")
+	}
+	if outcome.ApprovalAutoResolve(context.Background()) {
+		t.Fatal("open PR should not auto-resolve the timeout approval gate")
+	}
 	var findings Findings
 	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
 		t.Fatalf("unmarshal findings: %v", err)

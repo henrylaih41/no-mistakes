@@ -30,6 +30,8 @@ type approvalResponse struct {
 	addedFindings []types.Finding
 }
 
+const defaultApprovalAutoResolveInterval = 30 * time.Second
+
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
 	db        *db.DB
@@ -404,7 +406,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, diffText, "", &executionMS)
 
-		response, err := e.waitForApproval(ctx, stepName)
+		response, err := e.waitForApproval(ctx, stepName, outcome.ApprovalAutoResolve, outcome.ApprovalAutoResolveInterval)
 		// The wait has ended (the agent responded, or it was cancelled): the run
 		// is no longer parked awaiting the agent. Clear the pollable marker
 		// before resuming so awaiting_agent_since is non-nil only while parked.
@@ -510,9 +512,10 @@ func roundInsertID(_ string, inserted *db.StepRound, err error) string {
 	return inserted.ID
 }
 
-// waitForApproval blocks until a user action arrives or context is cancelled.
+// waitForApproval blocks until a user action arrives, an external resolver clears
+// the parked gate, or context is cancelled.
 // The caller must set e.waiting and e.waitingStep before calling this method.
-func (e *Executor) waitForApproval(ctx context.Context, stepName types.StepName) (approvalResponse, error) {
+func (e *Executor) waitForApproval(ctx context.Context, stepName types.StepName, autoResolve func(context.Context) bool, autoResolveInterval time.Duration) (approvalResponse, error) {
 	defer func() {
 		e.mu.Lock()
 		e.waiting = false
@@ -525,11 +528,32 @@ func (e *Executor) waitForApproval(ctx context.Context, stepName types.StepName)
 		}
 	}()
 
-	select {
-	case response := <-e.approvalCh:
-		return response, nil
-	case <-ctx.Done():
-		return approvalResponse{}, context.Cause(ctx)
+	if autoResolve != nil && autoResolve(ctx) {
+		return approvalResponse{action: types.ActionApprove}, nil
+	}
+
+	var ticker *time.Ticker
+	var tick <-chan time.Time
+	if autoResolve != nil {
+		if autoResolveInterval <= 0 {
+			autoResolveInterval = defaultApprovalAutoResolveInterval
+		}
+		ticker = time.NewTicker(autoResolveInterval)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
+
+	for {
+		select {
+		case response := <-e.approvalCh:
+			return response, nil
+		case <-tick:
+			if autoResolve(ctx) {
+				return approvalResponse{action: types.ActionApprove}, nil
+			}
+		case <-ctx.Done():
+			return approvalResponse{}, context.Cause(ctx)
+		}
 	}
 }
 
