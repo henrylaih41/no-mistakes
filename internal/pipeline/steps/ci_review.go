@@ -392,48 +392,57 @@ func (s *CIStep) maybeRetriggerDevin(sctx *pipeline.StepContext, pr *scm.PR, hea
 	if headSHA == s.retriggeredSHA() {
 		return
 	}
+	// Resolve both paths up front so we can decide whether to claim the head AND so
+	// a failed Review API attempt can fall back to the legacy path in the SAME poll.
 	// Prefer the dedicated Devin Review API (POST /v3/.../pr-reviews) when a review
 	// service-user token AND org id are configured: it is the vendor-recommended
 	// path and is NOT per-org ACU-limited, so it keeps working when /v1/sessions
-	// hits out_of_quota — the failure mode that otherwise leaves the loop waiting
-	// forever, since the head is claimed once. Otherwise fall back to the legacy
-	// /v1/sessions agent-session trigger.
+	// hits out_of_quota. Otherwise (or if the Review API call fails) fall back to the
+	// legacy /v1/sessions agent-session trigger.
 	orgID := strings.TrimSpace(cfg.DevinOrgID)
-	if reviewKey := devin.ResolveReviewAPIKey(cfg.DevinReviewAPIKeyFile); reviewKey != "" && orgID != "" {
-		// Claim the head BEFORE the call so a transient failure is not retried every
-		// poll (the Review API is not per-org-limited, so out_of_quota no longer
-		// makes this claim a permanent dead end).
-		if !s.claimRetrigger(headSHA) {
-			return
-		}
+	reviewKey := devin.ResolveReviewAPIKey(cfg.DevinReviewAPIKeyFile)
+	useReviewAPI := reviewKey != "" && orgID != ""
+	apiKey := devin.ResolveAPIKey(cfg.DevinAPIKeyFile)
+
+	if !useReviewAPI && apiKey == "" {
+		// Nothing to trigger with -> SKIP (best-effort). Do NOT consume the
+		// once-per-head guard, so a key that appears later can still trigger this head.
+		return
+	}
+
+	// Claim the head BEFORE any network call so a failed/rate-limited trigger is not
+	// retried every poll. The claim is SHARED across both paths: we attempt at most
+	// one trigger per head, trying the preferred Review API first and falling back to
+	// /v1/sessions within the same poll when it fails — so a misconfigured review
+	// token does not permanently block a working legacy DEVIN_API_KEY for this head.
+	if !s.claimRetrigger(headSHA) {
+		return
+	}
+
+	if useReviewAPI {
 		trigger := s.triggerPRReview
 		if trigger == nil {
 			trigger = (&devin.Client{}).TriggerPRReview
 		}
 		ctx, cancel := context.WithTimeout(sctx.Ctx, devinRetriggerTimeout)
-		defer cancel()
 		status, reviewedSHA, err := trigger(ctx, reviewKey, orgID, pr.URL)
-		if err != nil {
-			// Best-effort: log without the token and keep waiting for the review.
-			slog.Warn("review loop: Devin Review trigger failed", "pr", pr.Number, "head", shortSHA(headSHA), "err", err)
+		cancel()
+		if err == nil {
+			// This is a best-effort nudge: the Review API reviews the PR's CURRENT
+			// head, so the accepted commit is surfaced for observability only — it
+			// never hard-gates the run.
+			sctx.Log(fmt.Sprintf("triggered Devin Review of %s (status %s)", shortSHA(reviewedSHA), status))
 			return
 		}
-		// This is a best-effort nudge: the Review API reviews the PR's CURRENT head,
-		// so the accepted commit is surfaced for observability only — it never
-		// hard-gates the run.
-		sctx.Log(fmt.Sprintf("triggered Devin Review of %s (status %s)", shortSHA(reviewedSHA), status))
-		return
+		// Best-effort: log without the token and fall through to the legacy
+		// /v1/sessions path, which may work via a separate DEVIN_API_KEY even when
+		// the review token is expired/misconfigured.
+		slog.Warn("review loop: Devin Review trigger failed", "pr", pr.Number, "head", shortSHA(headSHA), "err", err)
 	}
 
-	apiKey := devin.ResolveAPIKey(cfg.DevinAPIKeyFile)
 	if apiKey == "" {
-		// No key -> SKIP the trigger (best-effort). Do NOT consume the once-per-head
-		// guard, so a key that appears later can still trigger this head.
-		return
-	}
-	// Claim the head BEFORE the call so a failed/rate-limited POST is not retried
-	// every poll. Caps the spend at one paid Devin session per head SHA.
-	if !s.claimRetrigger(headSHA) {
+		// Review API was attempted and failed, and there is no legacy key to fall
+		// back to. The head stays claimed (we already attempted once this head).
 		return
 	}
 

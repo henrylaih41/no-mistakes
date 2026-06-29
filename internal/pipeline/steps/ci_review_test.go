@@ -990,6 +990,42 @@ func TestMaybeRetriggerDevin_FallsBackToSessionsWithoutReviewToken(t *testing.T)
 	}
 }
 
+// TestMaybeRetriggerDevin_ReviewAPIFailureFallsBackToSessions asserts that when
+// the Review API is configured but its call fails (e.g. an expired/misconfigured
+// review token), the loop falls back to the legacy /v1/sessions trigger within the
+// SAME poll, so a working DEVIN_API_KEY is not permanently blocked for the head.
+func TestMaybeRetriggerDevin_ReviewAPIFailureFallsBackToSessions(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)          // legacy key present
+	t.Setenv("DEVIN_REVIEW_API_KEY", "cog-review-key") // review token present but bad
+	cfg := config.ReviewLoop{Enabled: true, Retrigger: true, DevinOrgID: "org-42"}
+
+	var prCalls int
+	rt := &recordingTrigger{}
+	step := &CIStep{
+		triggerReview: rt.fn,
+		triggerPRReview: func(context.Context, string, string, string) (string, string, error) {
+			prCalls++
+			return "", "", errors.New("401 unauthorized")
+		},
+	}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+	pr := &scm.PR{Number: "1", URL: "https://github.com/o/r/pull/1"}
+
+	step.maybeRetriggerDevin(sctx, pr, "headA")
+
+	if prCalls != 1 {
+		t.Fatalf("Review-API trigger count = %d, want 1", prCalls)
+	}
+	if rt.count() != 1 {
+		t.Fatalf("legacy /v1/sessions trigger count = %d, want 1 (fallback after Review API failure)", rt.count())
+	}
+	// A second poll for the same head is a no-op: both paths were attempted once.
+	step.maybeRetriggerDevin(sctx, pr, "headA")
+	if prCalls != 1 || rt.count() != 1 {
+		t.Fatalf("second poll retried (pr=%d, sessions=%d), want both still 1", prCalls, rt.count())
+	}
+}
+
 func TestMaybeRetriggerDevin_NoopWhenRetriggerFalse(t *testing.T) {
 	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)
 	cfg := config.ReviewLoop{Enabled: true, Retrigger: false}

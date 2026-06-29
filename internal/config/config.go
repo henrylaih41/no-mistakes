@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/devin"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"gopkg.in/yaml.v3"
 )
@@ -1129,8 +1130,11 @@ func reviewLoopDefaults() ReviewLoop {
 const DefaultDevinAPIKeyFile = "~/.config/devin/api_key"
 
 // DefaultDevinReviewAPIKeyFile is the default path the review loop reads the Devin
-// Review API token from when DEVIN_REVIEW_API_KEY is empty.
-const DefaultDevinReviewAPIKeyFile = "~/.config/devin/review_api_key"
+// Review API token from when DEVIN_REVIEW_API_KEY is empty. It aliases
+// devin.DefaultReviewAPIKeyFile so the path has a single source of truth: the
+// default advertised here can never drift from the fallback ResolveReviewAPIKey
+// actually uses.
+const DefaultDevinReviewAPIKeyFile = devin.DefaultReviewAPIKeyFile
 
 // applyReviewLoopOverrides applies non-nil raw values onto resolved defaults.
 func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
@@ -1158,7 +1162,12 @@ func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
 	if src.DevinReviewAPIKeyFile != nil && strings.TrimSpace(*src.DevinReviewAPIKeyFile) != "" {
 		dst.DevinReviewAPIKeyFile = strings.TrimSpace(*src.DevinReviewAPIKeyFile)
 	}
-	if src.DevinOrgID != nil && strings.TrimSpace(*src.DevinOrgID) != "" {
+	if src.DevinOrgID != nil {
+		// DevinOrgID has explicit empty-means-disabled semantics (it is the switch
+		// that selects the Review API), unlike the key-file/login paths where empty
+		// is never a valid override. So apply the override whenever it is set,
+		// allowing a repo-level `devin_org_id: ""` to clear a global value and opt
+		// the repo back onto the legacy /v1/sessions path.
 		dst.DevinOrgID = strings.TrimSpace(*src.DevinOrgID)
 	}
 }

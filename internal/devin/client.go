@@ -193,10 +193,14 @@ func (c *Client) TriggerPRReview(ctx context.Context, token, orgID, prURL string
 	if commitSHA == "" {
 		return "", "", fmt.Errorf("devin: response missing commit_sha")
 	}
+	status = strings.TrimSpace(parsed.Status)
+	if status == "" {
+		return "", "", fmt.Errorf("devin: response missing status")
+	}
 
 	// Log only non-secret identifiers on success. NEVER log the token.
-	slog.Info("devin: triggered PR review", "pr_number", parsed.PRNumber, "status", parsed.Status, "commit_sha", commitSHA)
-	return strings.TrimSpace(parsed.Status), commitSHA, nil
+	slog.Info("devin: triggered PR review", "pr_number", parsed.PRNumber, "status", status, "commit_sha", commitSHA)
+	return status, commitSHA, nil
 }
 
 // reviewPrompt builds the session prompt. It references the PR URL and head SHA
