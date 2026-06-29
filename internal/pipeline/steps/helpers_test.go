@@ -424,6 +424,23 @@ func fakeCIGH(t *testing.T, state, checksJSON string) []string {
 	})
 }
 
+// fakeCIGHWithReviews is fakeCIGH plus canned review-loop responses: REST
+// pulls/{n}/reviews (FAKE_CLI_REVIEWS) and GraphQL reviewThreads
+// (FAKE_CLI_REVIEW_THREADS). Use this for CI step tests that exercise the
+// post-PR Devin review loop end-to-end through the real github.Host read layer.
+func fakeCIGHWithReviews(t *testing.T, state, checksJSON, reviewsJSON, reviewThreadsJSON string) []string {
+	t.Helper()
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "gh")
+	return fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":           "ci-gh",
+		"FAKE_CLI_STATE":          state,
+		"FAKE_CLI_CHECKS":         checksJSON,
+		"FAKE_CLI_REVIEWS":        reviewsJSON,
+		"FAKE_CLI_REVIEW_THREADS": reviewThreadsJSON,
+	})
+}
+
 func fakeCIGHMergeable(t *testing.T, state, checksJSON, mergeable string) []string {
 	t.Helper()
 	binDir := fakeCLIBinDir(t)

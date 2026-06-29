@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -990,5 +992,252 @@ func TestCIStep_UnlimitedTimeoutNeverExpires(t *testing.T) {
 	}
 	if !noTimeoutLog {
 		t.Fatalf("expected the no-timeout monitoring log, got: %v", logs)
+	}
+}
+
+// reviewThreadsEnvelope wraps thread nodes in the GraphQL envelope the production
+// parser expects (single page, hasNextPage:false).
+func reviewThreadsEnvelope(nodes ...string) string {
+	return `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[` +
+		strings.Join(nodes, ",") + `]}}}}}`
+}
+
+// reviewThreadNode renders one live, unresolved, non-outdated bot thread with the
+// REAL GraphQL login (bare slug, no "[bot]") and __typename "Bot" — the actual
+// API shape that exposed the login-normalization bug.
+func reviewThreadNode(databaseID int64, path string, line int, body string) string {
+	return fmt.Sprintf(
+		`{"isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"devin-ai-integration","__typename":"Bot"},"databaseId":%d,"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/42#discussion"}]}}`,
+		databaseID, path, line, line, body,
+	)
+}
+
+// devinReviewsJSON renders the REST pulls/{n}/reviews response: a COMMENTED
+// review by the bot (REST-form login with "[bot]" + type "Bot") on the head SHA.
+func devinReviewsJSON(headSHA string) string {
+	return fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, headSHA)
+}
+
+// TestCIStep_DevinGreenProceedsToReady is the Bug 2 acceptance test: with no
+// GitHub checks and a green Devin verdict (APPROVED, no live severe findings),
+// the CI step must proceed to "ready" (ciNoChecksPassedMsg → cimonitor ready)
+// after the checks grace period — NOT park on "waiting on Devin review".
+//
+// On the buggy code (before the login fix), Devin's COMMENTED review with inline
+// findings read as APPROVED with 0 findings (false green), but the loop still
+// parked because the verdict was PENDING/NONE while waiting for Devin to post.
+// With the login fix, a real green (genuinely no findings) must proceed.
+func TestCIStep_DevinGreenProceedsToReady(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	// No GitHub checks; Devin reviewed the head (COMMENTED) with NO live
+	// findings → VerdictApproved → devinDecisionGreen.
+	env := fakeCIGHWithReviews(t, "OPEN", "[]",
+		devinReviewsJSON(headSHA),
+		reviewThreadsEnvelope(), // no threads → 0 findings
+	)
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 10 * time.Second
+	sctx.Config.ReviewLoop = config.ReviewLoop{Enabled: true, MaxRounds: 3}
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{
+		checksGracePeriod:    200 * time.Millisecond,
+		pollIntervalOverride: 75 * time.Millisecond,
+		now:                  func() time.Time { return current },
+		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			if current.Sub(started) >= 400*time.Millisecond {
+				cancel()
+				return ctx.Err()
+			}
+			current = current.Add(interval)
+			return nil
+		},
+	}
+	_, err := step.Execute(sctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation after proceeding to ready, got %v", err)
+	}
+
+	// The CI step must have logged the no-checks passed message (ready), NOT
+	// parked on "waiting on Devin review".
+	foundReady := false
+	foundWaiting := false
+	for _, l := range logs {
+		if strings.Contains(l, cimonitor.NoChecksPassedMsg) {
+			foundReady = true
+		}
+		if strings.Contains(l, cimonitor.WaitingOnReviewMsg) {
+			foundWaiting = true
+		}
+	}
+	if !foundReady {
+		t.Fatalf("expected %q in logs (Devin green + no checks → ready), got: %v", cimonitor.NoChecksPassedMsg, logs)
+	}
+	if foundWaiting {
+		t.Fatalf("unexpected %q in logs (Devin green must NOT park on waiting), got: %v", cimonitor.WaitingOnReviewMsg, logs)
+	}
+	// cimonitor must agree the PR is ready.
+	if !cimonitor.ChecksPassed(logs) {
+		t.Fatalf("cimonitor.ChecksPassed(logs) = false, want true (Devin green + no checks → ready): %v", logs)
+	}
+}
+
+// TestCIStep_DevinSevereFindingsDriveFix is the Bug 1+2 integration test: with
+// no GitHub checks and Devin's COMMENTED review carrying a live severe finding
+// (read via the real graphql read layer with the real login), the CI step must
+// drive a fix round (log ReviewChangesRequestedMsg + auto-fixing) — NOT read 0
+// findings (Bug 1) and NOT park on a false green (Bug 2).
+func TestCIStep_DevinSevereFindingsDriveFix(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	// No GitHub checks; Devin reviewed the head (COMMENTED) with ONE live 🔴
+	// high-severity finding → VerdictChangesRequested → devinDecisionNotGreen.
+	threads := reviewThreadsEnvelope(
+		reviewThreadNode(123, "internal/batch/download.go", 42, "🔴 **Batch download crashes on empty manifest**"),
+	)
+	env := fakeCIGHWithReviews(t, "OPEN", "[]",
+		devinReviewsJSON(headSHA),
+		threads,
+	)
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 10 * time.Second
+	sctx.Config.ReviewLoop = config.ReviewLoop{Enabled: true, MaxRounds: 3, ReplyOnFix: true}
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{
+		checksGracePeriod:    50 * time.Millisecond,
+		pollIntervalOverride: 50 * time.Millisecond,
+		now:                  func() time.Time { return current },
+		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			// Let the loop run long enough to drive at least one fix round.
+			// The mock agent produces no changes, so the loop will exhaust its
+			// rounds and escalate; we cancel shortly after to bound runtime.
+			if current.Sub(started) >= 250*time.Millisecond {
+				cancel()
+				return ctx.Err()
+			}
+			current = current.Add(interval)
+			return nil
+		},
+	}
+	step.Execute(sctx) // outcome/err varies (escalation or cancel); we assert on logs.
+
+	// The CI step must have logged that Devin requested changes AND started
+	// auto-fixing — proving the loop read the finding (Bug 1 fixed) and drove
+	// a fix (not parked on a false green, Bug 2 fixed).
+	foundChangesRequested := false
+	foundAutoFixing := false
+	for _, l := range logs {
+		if strings.Contains(l, cimonitor.ReviewChangesRequestedMsg) {
+			foundChangesRequested = true
+		}
+		if strings.Contains(l, "auto-fixing") {
+			foundAutoFixing = true
+		}
+	}
+	if !foundChangesRequested {
+		t.Fatalf("expected %q in logs (Devin severe finding → changes requested), got: %v", cimonitor.ReviewChangesRequestedMsg, logs)
+	}
+	if !foundAutoFixing {
+		t.Fatalf("expected auto-fixing in logs (Devin severe finding → fix round), got: %v", logs)
+	}
+	// Must NOT have declared ready while severe findings are live.
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("cimonitor.ChecksPassed = true, want false (severe findings live → not ready): %v", logs)
+	}
+}
+
+// TestCIStep_DevinNeverReviewedStillWaits verifies the fix didn't break the
+// legitimate wait-for-review case: when Devin has never reviewed the PR at all
+// (no REST reviews), the loop must park on "waiting on Devin review" (not
+// declare ready). This guards against the fix over-proceeding.
+func TestCIStep_DevinNeverReviewedStillWaits(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	// No GitHub checks; Devin has NOT reviewed (empty REST reviews, empty
+	// threads) → VerdictNone → devinDecisionPending → park.
+	env := fakeCIGHWithReviews(t, "OPEN", "[]", "[]", reviewThreadsEnvelope())
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 10 * time.Second
+	sctx.Config.ReviewLoop = config.ReviewLoop{Enabled: true, MaxRounds: 3}
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{
+		checksGracePeriod:    50 * time.Millisecond,
+		pollIntervalOverride: 50 * time.Millisecond,
+		now:                  func() time.Time { return current },
+		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			if current.Sub(started) >= 200*time.Millisecond {
+				cancel()
+				return ctx.Err()
+			}
+			current = current.Add(interval)
+			return nil
+		},
+	}
+	_, err := step.Execute(sctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation while waiting, got %v", err)
+	}
+
+	// Must have logged waiting-on-review (Devin never reviewed → legitimately
+	// pending) and NOT declared ready.
+	foundWaiting := false
+	for _, l := range logs {
+		if strings.Contains(l, cimonitor.WaitingOnReviewMsg) {
+			foundWaiting = true
+		}
+	}
+	if !foundWaiting {
+		t.Fatalf("expected %q in logs (Devin never reviewed → wait), got: %v", cimonitor.WaitingOnReviewMsg, logs)
+	}
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("cimonitor.ChecksPassed = true, want false (Devin never reviewed → not ready): %v", logs)
 	}
 }

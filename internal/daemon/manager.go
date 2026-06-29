@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -176,6 +177,25 @@ func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string)
 		return nil
 	}
 	return trusted
+}
+
+// trustedRouteRefPrefix namespaces the per-worktree ref the trusted
+// default-branch commit is fetched into when a selected route's base URL
+// differs from the gate "origin" remote. Like the rebase step's route refs it
+// lives under refs/worktree/* so a route base that is a different repo than the
+// gate origin can never clobber the shared refs/remotes/origin/* view.
+const trustedRouteRefPrefix = "refs/worktree/no-mistakes-trusted/"
+
+// gateOriginURL returns the configured URL of the worktree's "origin" remote,
+// or "" when it cannot be resolved. It lets startRun tell a route base that
+// merely equals the gate origin (use origin directly) from one that points at a
+// different repo (fetch the trusted config from that base instead).
+func gateOriginURL(ctx context.Context, wtDir string) string {
+	url, err := git.GetRemoteURL(ctx, wtDir, "origin")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(url)
 }
 
 // HandlePushReceived processes a push notification from the post-receive hook.
@@ -367,11 +387,28 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// the resolve, a stale origin/<defaultBranch> left in the shared bare
 	// repo by a previous run could serve a trusted copy that the live default
 	// branch has already removed — silently running stale shell.
+	//
+	// SECURITY: the trusted config must come from the repo the run actually
+	// targets. A selected route can repoint the run's base (repo.UpstreamURL
+	// here is the route-resolved value) at a repository other than the gate
+	// "origin" remote; reading commands/agent/allow_repo_commands from origin
+	// would trust the code-executing config of the WRONG repo. When the base
+	// differs from origin we fetch the default branch from that base URL into
+	// an isolated per-worktree ref (never the shared refs/remotes/origin/*
+	// namespace, which would clobber the gate origin's view) and pin the
+	// trusted SHA from it. An unset base, or a base equal to origin, keeps the
+	// pre-routes behavior of fetching origin into refs/remotes/origin/<default>.
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
-		if err := git.FetchRemoteBranch(ctx, wtDir, "origin", repo.DefaultBranch); err != nil {
+		trustedRemote := "origin"
+		trustedRef := "refs/remotes/origin/" + repo.DefaultBranch
+		if base := strings.TrimSpace(repo.UpstreamURL); base != "" && base != gateOriginURL(ctx, wtDir) {
+			trustedRemote = base
+			trustedRef = trustedRouteRefPrefix + repo.DefaultBranch
+		}
+		if err := git.FetchRemoteBranchToRef(ctx, wtDir, trustedRemote, repo.DefaultBranch, trustedRef); err != nil {
 			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
-		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
+		} else if sha, err := git.ResolveRef(ctx, wtDir, trustedRef); err != nil {
 			slog.Warn("failed to resolve fetched default-branch ref; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else {
 			trustedSHA = sha
@@ -458,27 +495,33 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		// steering as the impl agent. Any failure here must close what has been
 		// built so far before returning, since the cleanup defer below only runs
 		// once the background goroutine owns the run.
-		reviewerSpecs, revErr := cfg.ResolveReviewers(ctx, exec.LookPath)
-		if revErr != nil {
-			ag.Close()
-			m.db.UpdateRunError(run.ID, revErr.Error())
-			trackStartFailure("resolve_reviewers")
-			return "", revErr
-		}
-		for _, spec := range reviewerSpecs {
-			rev, rErr := agent.NewWithOptions(spec.Agent, cfg.ReviewerPath(spec), cfg.ReviewerArgs(spec), agent.Options{
-				ACPRegistryOverrides: cfg.ACPRegistryOverrides,
-			})
-			if rErr != nil {
-				for _, built := range reviewerAgents {
-					built.Close()
-				}
+		//
+		// Skip reviewer resolution entirely when the review step itself is
+		// skipped for this run: otherwise a missing reviewer binary or an invalid
+		// reviewer spec would fail startRun for a run that never reviews.
+		if !slices.Contains(skipSteps, types.StepReview) {
+			reviewerSpecs, revErr := cfg.ResolveReviewers(ctx, exec.LookPath)
+			if revErr != nil {
 				ag.Close()
-				m.db.UpdateRunError(run.ID, fmt.Sprintf("create reviewer agent: %s", rErr))
-				trackStartFailure("create_reviewer_agent")
-				return "", fmt.Errorf("create reviewer agent: %w", rErr)
+				m.db.UpdateRunError(run.ID, revErr.Error())
+				trackStartFailure("resolve_reviewers")
+				return "", revErr
 			}
-			reviewerAgents = append(reviewerAgents, agent.WithSteering(rev))
+			for _, spec := range reviewerSpecs {
+				rev, rErr := agent.NewWithOptions(spec.Agent, cfg.ReviewerPath(spec), cfg.ReviewerArgs(spec), agent.Options{
+					ACPRegistryOverrides: cfg.ACPRegistryOverrides,
+				})
+				if rErr != nil {
+					for _, built := range reviewerAgents {
+						built.Close()
+					}
+					ag.Close()
+					m.db.UpdateRunError(run.ID, fmt.Sprintf("create reviewer agent: %s", rErr))
+					trackStartFailure("create_reviewer_agent")
+					return "", fmt.Errorf("create reviewer agent: %w", rErr)
+				}
+				reviewerAgents = append(reviewerAgents, agent.WithSteering(rev))
+			}
 		}
 	}
 

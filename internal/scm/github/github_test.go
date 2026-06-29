@@ -241,7 +241,15 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 // findings.
 const (
 	headSHA = "abc123def"
+	// botUser is the REST-form bot login (with "[bot]" suffix), used for REST
+	// review mocks and as the configured botLogin in tests that exercise the
+	// default config form.
 	botUser = "devin-ai-integration[bot]"
+	// botSlug is the REAL GraphQL-form bot login (bare app slug, no "[bot]"
+	// suffix). GraphQL's reviewThreads API returns this for a Bot actor. Tests
+	// that mock GraphQL thread authors use this so they exercise the actual
+	// API shape rather than the REST form the buggy code assumed.
+	botSlug = "devin-ai-integration"
 )
 
 // graphqlThreadsKey is the cmd-factory key for the `gh api graphql` reviewThreads
@@ -277,11 +285,19 @@ func reviewThreadsPage(hasNextPage bool, endCursor string, nodes ...string) gith
 }
 
 // threadID renders one reviewThreads node: its resolution/outdated flags plus a
-// single anchoring comment (author/databaseId/path/line/body).
+// single anchoring comment (author/databaseId/path/line/body). The author's
+// __typename is inferred from the login: a "[bot]"-suffixed login OR the known
+// bot slug (real GraphQL returns the slug without the suffix) is a Bot; anything
+// else is a User. This mirrors what real GraphQL returns — a Bot actor's
+// __typename is "Bot" and its login is the bare app slug.
 func threadID(databaseID int64, resolved, outdated bool, author, path string, line int, body string) string {
+	typename := "User"
+	if strings.HasSuffix(strings.ToLower(author), "[bot]") || strings.EqualFold(author, botSlug) {
+		typename = "Bot"
+	}
 	return fmt.Sprintf(
-		`{"isResolved":%t,"isOutdated":%t,"comments":{"nodes":[{"author":{"login":%q},"databaseId":%d,"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/7#discussion"}]}}`,
-		resolved, outdated, author, databaseID, path, line, line, body,
+		`{"isResolved":%t,"isOutdated":%t,"comments":{"nodes":[{"author":{"login":%q,"__typename":%q},"databaseId":%d,"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/7#discussion"}]}}`,
+		resolved, outdated, author, typename, databaseID, path, line, line, body,
 	)
 }
 
@@ -295,12 +311,18 @@ func thread(resolved, outdated bool, author, path string, line int, body string)
 // addressed), one RESOLVED bot finding (someone closed it), and one LIVE
 // human-authored thread (fails the bot-login filter). Only the two live bot
 // threads are findings.
+//
+// The bot threads use the REAL GraphQL login (botSlug, no "[bot]" suffix) so
+// the fixtures exercise the actual API shape: prior to the login-normalization
+// fix the mock used the REST form ("devin-ai-integration[bot]"), which real
+// GraphQL never returns, so the mock agreed with the buggy comparison and hid
+// the false-green bug.
 func liveThreads() []string {
 	return []string{
-		thread(false, false, botUser, "internal/batch/download.go", 42, "🔴 **Batch download crashes on empty manifest**"),
-		thread(false, false, botUser, "internal/batch/path.go", 17, "🚩 **Batch path swallows the second error**"),
-		thread(false, true, botUser, "internal/old/outdated.go", 3, "🔴 **Outdated: the code this anchored to changed**"),
-		thread(true, false, botUser, "internal/old/resolved.go", 5, "🔴 **Resolved: someone marked this done**"),
+		thread(false, false, botSlug, "internal/batch/download.go", 42, "🔴 **Batch download crashes on empty manifest**"),
+		thread(false, false, botSlug, "internal/batch/path.go", 17, "🚩 **Batch path swallows the second error**"),
+		thread(false, true, botSlug, "internal/old/outdated.go", 3, "🔴 **Outdated: the code this anchored to changed**"),
+		thread(true, false, botSlug, "internal/old/resolved.go", 5, "🔴 **Resolved: someone marked this done**"),
 		thread(false, false, "some-human", "internal/human/note.go", 9, "🔴 high severity concern from a human"),
 	}
 }
@@ -362,7 +384,7 @@ func TestGetReviewVerdictChangesRequested(t *testing.T) {
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...)}), nil, "test/repo")
 
@@ -381,6 +403,72 @@ func TestGetReviewVerdictChangesRequested(t *testing.T) {
 	}
 }
 
+func TestDecodePaginatedArray(t *testing.T) {
+	t.Parallel()
+
+	// Empty / whitespace body decodes to nil without error.
+	for _, in := range []string{"", "  \n"} {
+		got, err := decodePaginatedArray[ghReview]([]byte(in))
+		if err != nil {
+			t.Fatalf("decodePaginatedArray(%q) error = %v", in, err)
+		}
+		if got != nil {
+			t.Fatalf("decodePaginatedArray(%q) = %v, want nil", in, got)
+		}
+	}
+
+	// A single page (one JSON array) decodes as one value.
+	single := `[{"state":"APPROVED","commit_id":"a"}]`
+	got, err := decodePaginatedArray[ghReview]([]byte(single))
+	if err != nil {
+		t.Fatalf("single-page decode error = %v", err)
+	}
+	if len(got) != 1 || got[0].State != "APPROVED" {
+		t.Fatalf("single-page decode = %+v, want one APPROVED", got)
+	}
+
+	// Multiple pages: `gh api --paginate` (no --slurp) emits each page as its own
+	// top-level array document concatenated back-to-back. They must all be read.
+	multi := `[{"state":"COMMENTED","commit_id":"a"}]` + "\n" +
+		`[{"state":"CHANGES_REQUESTED","commit_id":"b"},{"state":"APPROVED","commit_id":"c"}]` + "\n"
+	got, err = decodePaginatedArray[ghReview]([]byte(multi))
+	if err != nil {
+		t.Fatalf("multi-page decode error = %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("multi-page decode = %d reviews, want 3 (pages must be flattened)", len(got))
+	}
+	if got[1].State != "CHANGES_REQUESTED" || got[1].CommitID != "b" {
+		t.Fatalf("multi-page decode lost page-2 content: %+v", got)
+	}
+}
+
+// TestGetReviewVerdictReadsAllReviewPages guards the false-green path: when the
+// head's CHANGES_REQUESTED review lands on a second pagination page, the verdict
+// read must still surface it instead of failing to parse the multi-document
+// `gh api --paginate` output and degrading to VerdictNone.
+func TestGetReviewVerdictReadsAllReviewPages(t *testing.T) {
+	t.Parallel()
+
+	page1 := `[{"state":"COMMENTED","commit_id":"older","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n"
+	page2 := `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n"
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: page1 + page2,
+		},
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
+	}), nil, "test/repo")
+
+	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v", err)
+	}
+	if verdict != scm.VerdictChangesRequested {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (head review on page 2 must be read)", verdict, scm.VerdictChangesRequested)
+	}
+}
+
 func TestGetReviewVerdictHonorsChangesRequestedState(t *testing.T) {
 	t.Parallel()
 
@@ -389,7 +477,7 @@ func TestGetReviewVerdictHonorsChangesRequestedState(t *testing.T) {
 	// is authoritative on its own.
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		// One LIVE thread whose body parses as a non-severe nit, so only the native
 		// CHANGES_REQUESTED state can be driving the verdict.
@@ -417,7 +505,7 @@ func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
 	// findings: the most recent review approves, so the verdict clears.
 	approvedLast := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"devin-ai-integration[bot]"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
 	}), nil, "test/repo")
@@ -434,7 +522,7 @@ func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
 	// CHANGES_REQUESTED after an earlier APPROVED stays not-green.
 	changesLast := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T02:00:00Z","user":{"login":"devin-ai-integration[bot]"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T02:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
 	}), nil, "test/repo")
@@ -459,7 +547,7 @@ func TestGetReviewVerdictConvergesWhenSevereThreadsAddressed(t *testing.T) {
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		// Two severe bot threads, but both are addressed: one outdated, one resolved.
 		// No live severe finding remains.
@@ -486,7 +574,7 @@ func TestGetReviewVerdictPendingWhenHeadNotYetReviewed(t *testing.T) {
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		// Bot has reviewed before, but only an older commit - not headSHA.
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"0000oldsha","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+			stdout: `[{"state":"COMMENTED","commit_id":"0000oldsha","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		// No live review threads remain on the head.
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse()}), nil, "test/repo")
@@ -584,7 +672,7 @@ func TestGetBotFindingsCollectsAllLiveThreadsAndSevereFlipsVerdict(t *testing.T)
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(nodes...)}), nil, "test/repo")
 
@@ -644,7 +732,7 @@ func TestGetReviewVerdictPaginatesReviewThreads(t *testing.T) {
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]"}}]` + "\n",
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		graphqlThreadsKey("test/repo", 7):            reviewThreadsPage(true, "CURSOR1", page1...),
 		graphqlThreadsKey("test/repo", 7, "CURSOR1"): reviewThreadsPage(false, "", page2...),
@@ -749,6 +837,140 @@ func TestSeverityFromBody(t *testing.T) {
 	for _, tc := range cases {
 		if got := severityFromBody(tc.body); got != tc.want {
 			t.Errorf("severityFromBody(%q) = %q, want %q", tc.body, got, tc.want)
+		}
+	}
+}
+
+// TestGetBotFindingsRealGraphQLLogin is the Bug 1 regression test: with the
+// REAL GraphQL login (bare slug "devin-ai-integration", no "[bot]" suffix) and
+// __typename "Bot", GetBotFindings must return the bot's live findings. Before
+// the login-normalization fix, the bare-slug login never matched the configured
+// "devin-ai-integration[bot]", so every thread was skipped and 0 findings were
+// returned — the false-green root cause.
+func TestGetBotFindingsRealGraphQLLogin(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
+			thread(false, false, botSlug, "internal/batch/download.go", 42, "🔴 **crash on empty manifest**"),
+		),
+	}), nil, "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetBotFindings: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("len(findings) = %d, want 1 (real GraphQL slug login must match [bot]-form config): %v", len(findings), findings)
+	}
+}
+
+// TestGetReviewVerdictSlugFormConfig asserts a slug-form config login
+// ("devin-ai-integration", no "[bot]") still matches a REST "[bot]"-form review
+// author — the symmetric direction of the normalization. A maintainer who
+// configures the bare slug must not get a false "never reviewed" verdict.
+func TestGetReviewVerdictSlugFormConfig(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
+		},
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
+			thread(false, false, botSlug, "internal/batch/download.go", 42, "🔴 **crash**"),
+		),
+	}), nil, "test/repo")
+
+	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botSlug)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict: %v", err)
+	}
+	if verdict != scm.VerdictChangesRequested {
+		t.Fatalf("verdict = %q, want %q (slug-form config must match REST [bot]-form review)", verdict, scm.VerdictChangesRequested)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("len(findings) = %d, want 1", len(findings))
+	}
+}
+
+// TestGetBotFindingsRejectsHuman asserts a human-authored thread (even one whose
+// body parses as severe) is never counted as a bot finding. The actorKind
+// positive-bot check (not just login matching) enforces this: a human's
+// __typename is "User", so the thread is skipped regardless of login.
+func TestGetBotFindingsRejectsHuman(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
+			thread(false, false, "some-human", "internal/human/note.go", 9, "🔴 **human high severity**"),
+		),
+	}), nil, "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetBotFindings: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("len(findings) = %d, want 0 (human thread must be rejected by actorKind)", len(findings))
+	}
+}
+
+// TestNormalizeBotLogin covers the login normalization helper directly: both
+// REST and GraphQL forms normalize to the same bare slug, and humans pass
+// through unchanged.
+func TestNormalizeBotLogin(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{"devin-ai-integration[bot]", "devin-ai-integration"},
+		{"devin-ai-integration", "devin-ai-integration"},
+		{"Devin-AI-Integration[bot]", "devin-ai-integration"},
+		{"  devin-ai-integration[bot]  ", "devin-ai-integration"},
+		{"some-human", "some-human"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := normalizeBotLogin(c.in); got != c.want {
+			t.Errorf("normalizeBotLogin(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestBotLoginMatch covers the cross-form matching that the false-green bug
+// broke: a GraphQL bare-slug author must match a REST "[bot]"-form config, and
+// vice versa, while a human never matches the bot config.
+func TestBotLoginMatch(t *testing.T) {
+	t.Parallel()
+	if !botLoginMatch("devin-ai-integration", "devin-ai-integration[bot]") {
+		t.Error(`botLoginMatch("devin-ai-integration", "devin-ai-integration[bot]") = false, want true (GraphQL slug vs REST config)`)
+	}
+	if !botLoginMatch("devin-ai-integration[bot]", "devin-ai-integration") {
+		t.Error(`botLoginMatch("devin-ai-integration[bot]", "devin-ai-integration") = false, want true (REST author vs slug config)`)
+	}
+	if !botLoginMatch("devin-ai-integration[bot]", "devin-ai-integration[bot]") {
+		t.Error(`botLoginMatch("devin-ai-integration[bot]", "devin-ai-integration[bot]") = false, want true (REST vs REST)`)
+	}
+	if botLoginMatch("some-human", "devin-ai-integration[bot]") {
+		t.Error(`botLoginMatch("some-human", "devin-ai-integration[bot]") = true, want false`)
+	}
+}
+
+// TestActorKind covers the bot-vs-human discriminator across both API shapes:
+// GraphQL __typename and REST user.type.
+func TestActorKind(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		typename, restType, want string
+	}{
+		{"Bot", "", "bot"},
+		{"", "Bot", "bot"},
+		{"User", "", "human"},
+		{"", "User", "human"},
+		{"", "", ""},
+		{"bot", "", "bot"}, // case-insensitive
+		{"", "user", "human"},
+	}
+	for _, c := range cases {
+		if got := actorKind(c.typename, c.restType); got != c.want {
+			t.Errorf("actorKind(%q, %q) = %q, want %q", c.typename, c.restType, got, c.want)
 		}
 	}
 }

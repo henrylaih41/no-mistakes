@@ -322,6 +322,18 @@ func TestRebaseStep_NormalPushSyncsOriginBranch(t *testing.T) {
 	}
 }
 
+// isForcePush exercises the legacy non-route force-push detection (remote
+// "origin", localRef "origin/<branch>") that these tests assert. Production
+// code calls isForcePushAgainstRemote directly with the route-aware remote and
+// ref, so this thin wrapper lives in the test file rather than the package.
+func isForcePush(ctx context.Context, workDir, branch, baseSHA string) bool {
+	localRef := ""
+	if branch != "" {
+		localRef = "origin/" + branch
+	}
+	return isForcePushAgainstRemote(ctx, workDir, "origin", branch, localRef, baseSHA)
+}
+
 func TestIsForcePush_IgnoresMergeBaseLookupErrors(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -171,11 +171,6 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	return updateHeadSHA(ctx, sctx)
 }
 
-// rebaseTargets returns the ordered list of refs to rebase onto.
-func rebaseTargets(branch, defaultBranch string) []string {
-	return rebaseTargetsForBranch(branch, defaultBranch, "origin/"+branch)
-}
-
 func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string {
 	var targets []string
 	if branch != "" && branch != defaultBranch {
@@ -226,7 +221,16 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 	if localTip == "" {
 		return nil
 	}
-	remoteRef := "origin/" + defaultBranch
+	// Compare against the base default branch the run actually rebases onto
+	// (baseTrackingRef), not the gate's origin/<default>. A selected route can
+	// point the base at a repo other than the gate origin; using origin/<default>
+	// there would miss commits already on origin but absent from the routed base
+	// and silently bundle them into the routed PR. baseTrackingRef is fetched
+	// fresh from the effective base remote earlier in Execute and is exactly what
+	// rebaseTargetsForBranch rebases onto, so the bundling check stays aligned
+	// with the real rebase target. For the common non-route case it carries the
+	// same commits as origin/<default>.
+	remoteRef := baseTrackingRef(defaultBranch)
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", remoteRef+"^{commit}"); err != nil {
 		return nil
 	}
@@ -255,9 +259,18 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		firstFile = files[0]
 	}
 
+	// Phrase the remediation in terms of the effective base the run rebases onto
+	// (the route base when a route is selected, otherwise the gate origin), not a
+	// hardcoded origin/<default>. For a routed run the bundling check compares
+	// against the route base tracking ref, so advising "rebase onto origin/<default>"
+	// would not clear the finding.
+	baseLabel := strings.TrimSpace(sctx.Repo.UpstreamURL)
+	if baseLabel == "" {
+		baseLabel = "origin"
+	}
 	description := fmt.Sprintf(
-		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to origin/%s; rebasing would bundle this unrelated work (%d file(s)) into the PR:\n- %s\n\nPush %s to origin, or rebase your branch onto origin/%s, before gating.",
-		len(commits), defaultBranch, defaultBranch, len(files), strings.Join(commits, "\n- "), defaultBranch, defaultBranch,
+		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to the base %s branch (%s); rebasing would bundle this unrelated work (%d file(s)) into the PR:\n- %s\n\nPush %s to the base, or rebase your branch onto the base %s branch (%s), before gating.",
+		len(commits), defaultBranch, defaultBranch, baseLabel, len(files), strings.Join(commits, "\n- "), defaultBranch, defaultBranch, baseLabel,
 	)
 	findingsJSON, _ := json.Marshal(Findings{
 		Items: []Finding{{
@@ -293,17 +306,6 @@ func remoteDefaultBranchAdvanced(ctx context.Context, workDir, defaultBranch, ba
 		return false
 	}
 	return strings.TrimSpace(remoteSHA) != baseSHA
-}
-
-// isForcePush returns true when the current push is non-fast-forward relative
-// to the previous push (baseSHA). This indicates the user explicitly rewrote
-// history and the pipeline should treat the new HEAD as authoritative.
-func isForcePush(ctx context.Context, workDir, branch, baseSHA string) bool {
-	localRef := ""
-	if branch != "" {
-		localRef = "origin/" + branch
-	}
-	return isForcePushAgainstRemote(ctx, workDir, "origin", branch, localRef, baseSHA)
 }
 
 func isForcePushAgainstRemote(ctx context.Context, workDir, remote, branch, localRef, baseSHA string) bool {

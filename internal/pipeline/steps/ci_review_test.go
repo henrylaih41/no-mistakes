@@ -111,7 +111,18 @@ func TestEvalDevinGate(t *testing.T) {
 		{"disabled is inert", scm.VerdictChangesRequested, []scm.ReviewComment{severeFinding()}, disabled, time.Hour, devinDecisionDisabled},
 		{"approved is green", scm.VerdictApproved, nil, enabled, time.Hour, devinDecisionGreen},
 		{"changes requested is not green", scm.VerdictChangesRequested, nil, enabled, time.Minute, devinDecisionNotGreen},
-		{"severe finding overrides pending verdict", scm.VerdictPending, []scm.ReviewComment{severeFinding()}, enabled, time.Minute, devinDecisionNotGreen},
+		// PR #5 regression: a PENDING verdict means Devin has NOT reviewed the
+		// current head. The findings returned alongside a PENDING verdict are from
+		// GetBotFindings, which does NOT filter by head SHA — so they are STALE
+		// threads left over from an older head (the one the loop just fixed). The
+		// verdict is the authoritative signal: CHANGES_REQUESTED already encodes
+		// "Devin reviewed THIS head and found severe issues" (GetReviewVerdict
+		// rolls severe findings on the head up to CHANGES_REQUESTED). Treating
+		// stale severe findings on an unreviewed head as NotGreen drove a redundant
+		// fix round on every poll until MaxRounds, posting a new "Addressed in
+		// <sha>" reply on the same thread for each push. The loop must WAIT for
+		// Devin to re-review the new head instead of re-fixing stale findings.
+		{"stale severe finding on unreviewed head waits for re-review", scm.VerdictPending, []scm.ReviewComment{severeFinding()}, enabled, time.Minute, devinDecisionPending},
 		{"pending within grace waits", scm.VerdictPending, nil, enabled, devinGraceWindow - time.Minute, devinDecisionPending},
 		{"none within grace waits", scm.VerdictNone, nil, enabled, time.Minute, devinDecisionPending},
 		{"silent past grace fails open", scm.VerdictNone, nil, enabled, devinGraceWindow + time.Minute, devinDecisionFailOpen},
@@ -212,6 +223,44 @@ func TestEncodeLastFixedChecksByteIdenticalWhenDevinAbsent(t *testing.T) {
 	withDevin := encodeDevinFixKey([]string{"build", "lint"}, true, "", nil)
 	if legacy != withDevin {
 		t.Fatalf("key drift: legacy=%q devin=%q", legacy, withDevin)
+	}
+}
+
+func TestCIFixAlreadyAttempted_SeparatesCIAndReviewDimensions(t *testing.T) {
+	t.Parallel()
+
+	failing := []string{"build", "lint"}
+	ciKey := encodeLastFixedChecks(failing, true)
+
+	// Mixed CI+review fix just pushed against head1 with finding fp1.
+	s := &CIStep{}
+	s.recordCIFix(ciKey, encodeDevinFixKey(nil, false, "head1", []string{"fp1"}), true, nil)
+	if s.lastFixedChecks != ciKey {
+		t.Fatalf("recordCIFix stored CI key %q, want %q", s.lastFixedChecks, ciKey)
+	}
+
+	// Same CI failures + same review finding on the same head: already attempted.
+	if !s.ciFixAlreadyAttempted(ciKey, encodeDevinFixKey(nil, false, "head1", []string{"fp1"}), true) {
+		t.Fatal("same CI failures + same review finding must read as already attempted")
+	}
+
+	// The regression: the freshly pushed head usually makes the review verdict go
+	// pending (devinNotGreen=false) while GitHub still reports the SAME stale
+	// failing checks. The CI anti-thrash must stay stable across that transition
+	// so a second fix does not run before CI re-runs.
+	if !s.ciFixAlreadyAttempted(ciKey, "", false) {
+		t.Fatal("CI anti-thrash must survive the review not-green -> pending transition")
+	}
+
+	// A genuinely new review finding on the same failing checks must re-trigger.
+	if s.ciFixAlreadyAttempted(ciKey, encodeDevinFixKey(nil, false, "head1", []string{"fp1", "fp2"}), true) {
+		t.Fatal("a new review fingerprint set must not read as already attempted")
+	}
+
+	// A different failing-check set must re-trigger regardless of review state.
+	otherCI := encodeLastFixedChecks([]string{"deploy"}, false)
+	if s.ciFixAlreadyAttempted(otherCI, "", false) {
+		t.Fatal("a different CI-check identity must not read as already attempted")
 	}
 }
 
@@ -361,6 +410,54 @@ func TestEvalDevinReview_GraceAnchorResetsOnHeadAdvance(t *testing.T) {
 	}
 }
 
+// TestEvalDevinReview_StaleSevereFindingsOnUnreviewedHeadWaitsForReReview is the
+// PR #5 multi-reply regression test. The scenario it locks down:
+//
+//  1. Devin reviewed headA and posted a severe finding → CHANGES_REQUESTED → the
+//     loop fixed, pushed headB, posted "Addressed in <headB>" on the thread, and
+//     re-triggered Devin for headB.
+//  2. Next poll: head=headB. Devin has NOT reviewed headB yet, so GetReviewVerdict
+//     returns PENDING. But GetBotFindings does NOT filter by head SHA, so the old
+//     severe thread from headA is still returned (it is not resolved/outdated
+//     because the fix touched different lines than the comment's anchor).
+//
+// On the buggy code, evalDevinGate treated PENDING + severe findings as NotGreen,
+// so handleDevinFixRound ran again, pushed headC, and posted a SECOND
+// "Addressed in <headC>" reply on the same thread — repeating up to MaxRounds
+// (observed 7 replies across 7 commits on PR #5). The fix: a PENDING verdict
+// means Devin has not weighed in on this head, so the loop must WAIT for the
+// re-review (within the grace window) rather than re-fixing stale findings.
+// CHANGES_REQUESTED is the only authoritative NotGreen signal and already
+// encodes severe findings on the current head.
+func TestEvalDevinReview_StaleSevereFindingsOnUnreviewedHeadWaitsForReReview(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+	// PENDING verdict (Devin reviewed an older head, not headB) with the stale
+	// severe finding still live (not resolved/outdated) — exactly poll 2 above.
+	host := &fakeReviewHost{
+		caps:     scm.Capabilities{Reviews: true},
+		verdict:  scm.VerdictPending,
+		findings: []scm.ReviewComment{severeFinding()},
+	}
+
+	step := &CIStep{now: func() time.Time { return time.Unix(0, 0) }}
+	sctx := newReviewTestContext(cfg, "headB", func(string) {})
+	pr := &scm.PR{Number: "42"}
+
+	decision, returnedFindings := step.evalDevinReview(sctx, host, pr)
+	if decision != devinDecisionPending {
+		t.Fatalf("decision = %v, want pending (wait for Devin to re-review headB; stale findings must not re-fix), findings=%v", decision, returnedFindings)
+	}
+	// The loop must not have recorded any fix round or reply for stale findings
+	// on an unreviewed head — handleDevinFixRound is only called on NotGreen.
+	if step.devinFixRounds != 0 {
+		t.Fatalf("devinFixRounds = %d, want 0 (no fix round should run on PENDING)", step.devinFixRounds)
+	}
+	if len(host.replies) != 0 {
+		t.Fatalf("replies = %v, want none (no re-fix → no acknowledgement on PENDING)", host.replies)
+	}
+}
+
 func TestHandleDevinFixRound_EscalatesAtMaxRounds(t *testing.T) {
 	t.Parallel()
 	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 2, FailOpen: true}
@@ -369,12 +466,50 @@ func TestHandleDevinFixRound_EscalatesAtMaxRounds(t *testing.T) {
 	step := &CIStep{devinFixRounds: 2} // already at the bound
 	findings := []scm.ReviewComment{severeFinding()}
 
-	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, findings, "freshkey", nil)
+	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, findings, "freshkey", nil, false)
 	if outcome == nil || !outcome.NeedsApproval {
 		t.Fatalf("expected escalation to human gate, got %+v", outcome)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "escalating for manual review") {
 		t.Fatalf("expected escalation log, got: %v", logs)
+	}
+}
+
+// TestHandleDevinFixRound_ForcedBypassesMaxRounds asserts that a user/agent
+// `fix` response (forced=true) after the loop parked at MaxRounds runs one more
+// fix round instead of immediately re-escalating on the same exhausted state.
+func TestHandleDevinFixRound_ForcedBypassesMaxRounds(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 2, FailOpen: true}
+	dir, baseSHA, headSHA, upstream := setupDevinFixRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(filepath.Join(opts.CWD, "devin-fix.txt"), []byte("fixed"), 0o644); err != nil {
+			return nil, err
+		}
+		return &agent.Result{}, nil
+	}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.ReviewLoop = cfg
+	sctx.Log = func(string) {}
+	sctx.LogChunk = func(string) {}
+
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
+	// Already at the bound and the key matches the last fixed round: an auto
+	// (forced=false) round would escalate. A forced round must run anyway.
+	step := &CIStep{devinFixRounds: 2, lastDevinFixKey: "freshkey"}
+	findings := []scm.ReviewComment{severeFinding()}
+
+	outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "42"}, findings, "freshkey", nil, true)
+	if outcome != nil {
+		t.Fatalf("forced fix must run, not escalate, got %+v", outcome)
+	}
+	if step.devinFixRounds != 3 {
+		t.Fatalf("forced fix should have run one more round (devinFixRounds=%d, want 3)", step.devinFixRounds)
+	}
+	if sctx.Run.HeadSHA == headSHA {
+		t.Fatalf("forced fix should have pushed a new head, still at %s", headSHA)
 	}
 }
 
@@ -387,7 +522,7 @@ func TestHandleDevinFixRound_WaitsWhenKeyAlreadyFixed(t *testing.T) {
 	// the shared lastFixedChecks (which the CI-check fix path uses).
 	step := &CIStep{lastDevinFixKey: "samekey"}
 
-	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, nil, "samekey", nil)
+	outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, nil, "samekey", nil, false)
 	if outcome != nil {
 		t.Fatalf("expected nil outcome (keep polling) when key already fixed, got %+v", outcome)
 	}
@@ -423,7 +558,7 @@ func TestHandleDevinFixRound_TransientFixFailureDoesNotConsumeRound(t *testing.T
 
 	// Far more iterations than MaxRounds: none should be consumed, none escalate.
 	for i := 0; i < 5; i++ {
-		outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "9"}, findings, "freshkey", nil)
+		outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "9"}, findings, "freshkey", nil, false)
 		if outcome != nil {
 			t.Fatalf("iteration %d: transient fix failure must keep polling, got escalation %+v", i, outcome)
 		}
@@ -497,7 +632,7 @@ func runDevinFixRound(t *testing.T, cfg config.ReviewLoop, produceChanges bool, 
 
 	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}, replyErr: replyErr}
 	step := &CIStep{}
-	outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "42"}, findings, "freshkey", nil)
+	outcome := step.handleDevinFixRound(sctx, host, &scm.PR{Number: "42"}, findings, "freshkey", nil, false)
 	return devinFixRoundResult{step: step, host: host, sctx: sctx, outcome: outcome}
 }
 
@@ -839,7 +974,7 @@ func runRetriggerFixRound(t *testing.T, triggerErr error) (*CIStep, *pipeline.St
 	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
 	step := &CIStep{triggerReview: rt.fn}
 	pr := &scm.PR{Number: "42", URL: "https://github.com/o/r/pull/42"}
-	outcome := step.handleDevinFixRound(sctx, host, pr, []scm.ReviewComment{severeFinding()}, "freshkey", nil)
+	outcome := step.handleDevinFixRound(sctx, host, pr, []scm.ReviewComment{severeFinding()}, "freshkey", nil, false)
 	return step, sctx, rt, outcome, headSHA
 }
 

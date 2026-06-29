@@ -12,6 +12,7 @@ work. Config exists for the parts that genuinely vary by machine or repo:
 
 - which agent you prefer
 - whether the review step should use a cross-family reviewer panel
+- whether to run a post-PR review loop that reads an external bot's findings and fixes them
 - which test or lint commands are the canonical ones for this repo
 - where test evidence artifacts should be stored
 - how aggressive the auto-fix loop should be
@@ -103,6 +104,16 @@ review:
   max_parallel: 2
   fail_open: false
 
+# Optional post-PR review loop (off by default). When enabled, the CI step reads
+# an external review bot's PR verdict + findings and feeds them to no-mistakes'
+# own fixer until the bot goes green.
+review_loop:
+  enabled: false
+  bot_login: "devin-ai-integration[bot]"
+  max_rounds: 3
+  fail_open: true   # a silent reviewer does not block the PR
+  retrigger: true   # explicitly (re-)trigger a Devin review via the Devin HTTP API
+
 # Infer the author's intent from recent local agent transcripts when not supplied directly.
 intent:
   enabled: true
@@ -126,6 +137,8 @@ Bitbucket Cloud PR creation and CI monitoring use environment variables instead 
 - `NO_MISTAKES_BITBUCKET_EMAIL`
 - `NO_MISTAKES_BITBUCKET_API_TOKEN`
 - `NO_MISTAKES_BITBUCKET_API_BASE_URL` - optional API base URL override
+
+The post-PR review loop reads a Devin API token from `DEVIN_API_KEY` (falling back to `review_loop.devin_api_key_file`) when it re-triggers a Devin review.
 
 ## Repo config
 
@@ -180,11 +193,12 @@ See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full fi
 - `agent_path_override`, `agent_args_override`, `acpx_path`, and `acp_registry_overrides` are global-only fields.
 - `auto_fix` from the repo config overlays global auto_fix. Fields not set in the repo config fall through to the global default.
 - `review` from the repo config overrides the global review panel wholesale when present. If it is absent, the repo inherits the global panel; if it is present with `reviewers: []`, the repo disables the inherited panel and uses the single configured agent.
+- `review_loop` from the repo config overlays the global review loop field by field. Fields not set in the repo config fall through to the global default.
 - `intent` from the repo config overlays global intent settings. Fields not set in the repo config fall through to the global default, except `intent.disabled_readers`, which adds to globally disabled readers.
 - `test.evidence` from the repo config overlays global test evidence settings. Fields not set in the repo config fall through to the global default.
 - `commands` and `ignore_patterns` are repo-only fields.
 - `ci_timeout` and `auto_fix.ci` are the canonical keys; `babysit_timeout` and `auto_fix.babysit` are still accepted as legacy aliases.
-- `commands`, `agent`, and repo-level `review` are code-executing selection fields. By default they are read from the trusted default-branch copy of `.no-mistakes.yaml`, not from the pushed SHA; `allow_repo_commands: true` on the default branch opts into trusting pushed-branch values.
+- `commands`, `agent`, repo-level `review`, and repo-level `review_loop` are code-executing selection fields. By default they are read from the trusted default-branch copy of `.no-mistakes.yaml`, not from the pushed SHA; `allow_repo_commands: true` on the default branch opts into trusting pushed-branch values.
 - If `commands.test` is set, the test step runs it first as the baseline; when user intent is available, the agent may still run afterward to gather evidence-oriented validation.
 - If `commands.test` is empty, the agent detects and runs relevant tests itself.
 - If `commands.lint` is empty, the agent detects relevant linters and formatters, applies safe fixes, verifies them, commits any agent changes, and reports only unresolved issues.
