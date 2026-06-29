@@ -148,6 +148,10 @@ func (c *Client) TriggerPRReview(ctx context.Context, token, orgID, prURL string
 	if orgID == "" {
 		return "", "", fmt.Errorf("devin: empty org id")
 	}
+	prURL = strings.TrimSpace(prURL)
+	if prURL == "" {
+		return "", "", fmt.Errorf("devin: empty PR URL")
+	}
 
 	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
 	if base == "" {

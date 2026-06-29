@@ -400,7 +400,13 @@ func (s *CIStep) maybeRetriggerDevin(sctx *pipeline.StepContext, pr *scm.PR, hea
 	// hits out_of_quota. Otherwise (or if the Review API call fails) fall back to the
 	// legacy /v1/sessions agent-session trigger.
 	orgID := strings.TrimSpace(cfg.DevinOrgID)
-	reviewKey := devin.ResolveReviewAPIKey(cfg.DevinReviewAPIKeyFile)
+	// The review key can only be used when an org id is also configured, so skip the
+	// file read entirely when orgID is empty (the common case for operators who have
+	// not configured the Review API).
+	var reviewKey string
+	if orgID != "" {
+		reviewKey = devin.ResolveReviewAPIKey(cfg.DevinReviewAPIKeyFile)
+	}
 	useReviewAPI := reviewKey != "" && orgID != ""
 	apiKey := devin.ResolveAPIKey(cfg.DevinAPIKeyFile)
 
@@ -436,8 +442,11 @@ func (s *CIStep) maybeRetriggerDevin(sctx *pipeline.StepContext, pr *scm.PR, hea
 		}
 		// Best-effort: log without the token and fall through to the legacy
 		// /v1/sessions path, which may work via a separate DEVIN_API_KEY even when
-		// the review token is expired/misconfigured.
-		slog.Warn("review loop: Devin Review trigger failed", "pr", pr.Number, "head", shortSHA(headSHA), "err", err)
+		// the review token is expired/misconfigured. Match the success log's
+		// "pr_number" int field so the Review API's two log lines stay consistent
+		// for structured-log queries.
+		prNum, _ := strconv.Atoi(pr.Number)
+		slog.Warn("review loop: Devin Review trigger failed", "pr_number", prNum, "head", shortSHA(headSHA), "err", err)
 	}
 
 	if apiKey == "" {
