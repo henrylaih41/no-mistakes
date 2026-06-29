@@ -884,6 +884,148 @@ func TestMaybeRetriggerDevin_NoopWhenLoopDisabled(t *testing.T) {
 	}
 }
 
+// TestMaybeRetriggerDevin_PrefersReviewAPIWhenConfigured asserts that when a
+// Devin Review token AND org id are configured, the loop uses the dedicated
+// Review API (POST /v3/.../pr-reviews) and NOT the legacy /v1/sessions path.
+func TestMaybeRetriggerDevin_PrefersReviewAPIWhenConfigured(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)          // legacy key present
+	t.Setenv("DEVIN_REVIEW_API_KEY", "cog-review-key") // review token present (env precedence)
+	cfg := config.ReviewLoop{Enabled: true, Retrigger: true, DevinOrgID: "org-42"}
+
+	var prCalls, sessionCalls int
+	var gotToken, gotOrg, gotURL string
+	step := &CIStep{
+		triggerPRReview: func(_ context.Context, token, orgID, prURL string) (string, string, error) {
+			prCalls++
+			gotToken, gotOrg, gotURL = token, orgID, prURL
+			return "pending", "headA", nil
+		},
+		triggerReview: func(context.Context, string, string, string) (string, error) {
+			sessionCalls++
+			return "sess", nil
+		},
+	}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+	pr := &scm.PR{Number: "1", URL: "https://github.com/o/r/pull/1"}
+
+	step.maybeRetriggerDevin(sctx, pr, "headA")
+
+	if prCalls != 1 {
+		t.Fatalf("Review-API trigger count = %d, want 1", prCalls)
+	}
+	if sessionCalls != 0 {
+		t.Fatalf("legacy /v1/sessions trigger count = %d, want 0 (Review API preferred)", sessionCalls)
+	}
+	if gotToken != "cog-review-key" || gotOrg != "org-42" || gotURL != pr.URL {
+		t.Fatalf("review args = (%q,%q,%q), want (cog-review-key, org-42, %q)", gotToken, gotOrg, gotURL, pr.URL)
+	}
+}
+
+// TestMaybeRetriggerDevin_LogsReviewedCommit asserts that the success log line
+// surfaces the commit SHA the Review API reported it accepted (the PR's current
+// head) for observability. This is a best-effort nudge: a reviewed commit that
+// differs from the run head must NOT hard-gate, abort, or warn-spam the run.
+func TestMaybeRetriggerDevin_LogsReviewedCommit(t *testing.T) {
+	t.Setenv("DEVIN_REVIEW_API_KEY", "cog-review-key")
+	cfg := config.ReviewLoop{Enabled: true, Retrigger: true, DevinOrgID: "org-42"}
+
+	step := &CIStep{
+		triggerPRReview: func(context.Context, string, string, string) (string, string, error) {
+			return "pending", "headOutOfBand", nil
+		},
+	}
+	var logs []string
+	sctx := newReviewTestContext(cfg, "headA", func(s string) { logs = append(logs, s) })
+	pr := &scm.PR{Number: "1", URL: "https://github.com/o/r/pull/1"}
+
+	step.maybeRetriggerDevin(sctx, pr, "headA")
+
+	got := strings.Join(logs, "\n")
+	if !strings.Contains(got, "triggered Devin Review of") {
+		t.Fatalf("expected a triggered line, got logs: %q", got)
+	}
+	if !strings.Contains(got, shortSHA("headOutOfBand")) {
+		t.Fatalf("expected the reviewed commit %q in the log, got: %q", shortSHA("headOutOfBand"), got)
+	}
+	if strings.Contains(got, "advanced out of band") {
+		t.Fatalf("did not expect a mismatch warning (best-effort nudge), got: %q", got)
+	}
+	// The head is still claimed so the cost guard is not defeated.
+	if step.retriggeredSHA() != "headA" {
+		t.Fatalf("guard = %q, want headA (claim consumed)", step.retriggeredSHA())
+	}
+}
+
+// TestMaybeRetriggerDevin_FallsBackToSessionsWithoutReviewToken asserts that
+// without a review token (even with an org id set) the loop stays on the legacy
+// /v1/sessions trigger, preserving existing behavior for unconfigured orgs.
+func TestMaybeRetriggerDevin_FallsBackToSessionsWithoutReviewToken(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)
+	t.Setenv("DEVIN_REVIEW_API_KEY", "") // no review token
+	cfg := config.ReviewLoop{
+		Enabled:               true,
+		Retrigger:             true,
+		DevinOrgID:            "org-42",
+		DevinReviewAPIKeyFile: "/nonexistent/no-mistakes-test-review-key", // absent -> resolves to ""
+	}
+	rt := &recordingTrigger{}
+	prCalls := 0
+	step := &CIStep{
+		triggerReview: rt.fn,
+		triggerPRReview: func(context.Context, string, string, string) (string, string, error) {
+			prCalls++
+			return "pending", "headA", nil
+		},
+	}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+	pr := &scm.PR{Number: "1", URL: "https://github.com/o/r/pull/1"}
+
+	step.maybeRetriggerDevin(sctx, pr, "headA")
+
+	if prCalls != 0 {
+		t.Fatalf("Review-API trigger count = %d, want 0 (no review token)", prCalls)
+	}
+	if rt.count() != 1 {
+		t.Fatalf("legacy /v1/sessions trigger count = %d, want 1 (fallback)", rt.count())
+	}
+}
+
+// TestMaybeRetriggerDevin_ReviewAPIFailureFallsBackToSessions asserts that when
+// the Review API is configured but its call fails (e.g. an expired/misconfigured
+// review token), the loop falls back to the legacy /v1/sessions trigger within the
+// SAME poll, so a working DEVIN_API_KEY is not permanently blocked for the head.
+func TestMaybeRetriggerDevin_ReviewAPIFailureFallsBackToSessions(t *testing.T) {
+	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)          // legacy key present
+	t.Setenv("DEVIN_REVIEW_API_KEY", "cog-review-key") // review token present but bad
+	cfg := config.ReviewLoop{Enabled: true, Retrigger: true, DevinOrgID: "org-42"}
+
+	var prCalls int
+	rt := &recordingTrigger{}
+	step := &CIStep{
+		triggerReview: rt.fn,
+		triggerPRReview: func(context.Context, string, string, string) (string, string, error) {
+			prCalls++
+			return "", "", errors.New("401 unauthorized")
+		},
+	}
+	sctx := newReviewTestContext(cfg, "headA", func(string) {})
+	pr := &scm.PR{Number: "1", URL: "https://github.com/o/r/pull/1"}
+
+	step.maybeRetriggerDevin(sctx, pr, "headA")
+
+	if prCalls != 1 {
+		t.Fatalf("Review-API trigger count = %d, want 1", prCalls)
+	}
+	if rt.count() != 1 {
+		t.Fatalf("legacy /v1/sessions trigger count = %d, want 1 (fallback after Review API failure)", rt.count())
+	}
+	// A second poll for the same head is a no-op: both paths were attempted once.
+	step.maybeRetriggerDevin(sctx, pr, "headA")
+	if prCalls != 1 || rt.count() != 1 {
+		t.Fatalf("second poll retried (pr=%d, sessions=%d), want both still 1", prCalls, rt.count())
+	}
+}
+
 func TestMaybeRetriggerDevin_NoopWhenRetriggerFalse(t *testing.T) {
 	t.Setenv("DEVIN_API_KEY", fakeLoopAPIKey)
 	cfg := config.ReviewLoop{Enabled: true, Retrigger: false}

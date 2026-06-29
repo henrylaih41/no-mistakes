@@ -66,6 +66,12 @@ type CIStep struct {
 	// devin.Client.TriggerReview: (ctx, apiKey, prURL, headSHA) -> (sessionID, err).
 	triggerReview func(ctx context.Context, apiKey, prURL, headSHA string) (string, error)
 
+	// triggerPRReview, when nil, defaults to a real Devin API client. Injected in
+	// tests. Its signature matches devin.Client.TriggerPRReview:
+	// (ctx, token, orgID, prURL) -> (status, commitSHA, err). Used in preference to
+	// triggerReview when a Devin Review token AND org id are configured.
+	triggerPRReview func(ctx context.Context, token, orgID, prURL string) (string, string, error)
+
 	checksGracePeriod    time.Duration // minimum wait before trusting empty CI checks (0 = default 60s)
 	pollIntervalOverride time.Duration // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error

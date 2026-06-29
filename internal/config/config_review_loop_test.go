@@ -63,6 +63,23 @@ func TestMerge_ReviewLoopBlankKeyFileKeepsDefault(t *testing.T) {
 	}
 }
 
+// TestMerge_ReviewLoopRepoClearsDevinOrgID asserts a repo-level devin_org_id: ""
+// clears a globally-set org id, since DevinOrgID has empty-means-disabled
+// semantics (it is the switch that selects the Review API). This lets one repo opt
+// back onto the legacy /v1/sessions path without disabling retrigger entirely.
+func TestMerge_ReviewLoopRepoClearsDevinOrgID(t *testing.T) {
+	globalOrg := "org-42"
+	emptyOrg := ""
+	global := &GlobalConfig{ReviewLoop: ReviewLoopRaw{DevinOrgID: &globalOrg}}
+	repo := &RepoConfig{ReviewLoop: ReviewLoopRaw{DevinOrgID: &emptyOrg}}
+
+	cfg := Merge(global, repo)
+
+	if cfg.ReviewLoop.DevinOrgID != "" {
+		t.Errorf("ReviewLoop.DevinOrgID = %q, want \"\" (repo override clears global)", cfg.ReviewLoop.DevinOrgID)
+	}
+}
+
 func TestMerge_ReviewLoopReplyOnFixOverride(t *testing.T) {
 	replyOff := false
 	global := &GlobalConfig{

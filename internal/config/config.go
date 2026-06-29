@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/devin"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"gopkg.in/yaml.v3"
 )
@@ -185,13 +186,15 @@ const DefaultReviewLoopBotLogin = "devin-ai-integration[bot]"
 // layer). Pointer fields distinguish "not set" (nil) from explicit zero/false
 // values so global defaults survive a partially-specified repo block.
 type ReviewLoopRaw struct {
-	Enabled         *bool   `yaml:"enabled"`
-	BotLogin        *string `yaml:"bot_login"`
-	MaxRounds       *int    `yaml:"max_rounds"`
-	FailOpen        *bool   `yaml:"fail_open"`
-	ReplyOnFix      *bool   `yaml:"reply_on_fix"`
-	Retrigger       *bool   `yaml:"retrigger"`
-	DevinAPIKeyFile *string `yaml:"devin_api_key_file"`
+	Enabled               *bool   `yaml:"enabled"`
+	BotLogin              *string `yaml:"bot_login"`
+	MaxRounds             *int    `yaml:"max_rounds"`
+	FailOpen              *bool   `yaml:"fail_open"`
+	ReplyOnFix            *bool   `yaml:"reply_on_fix"`
+	Retrigger             *bool   `yaml:"retrigger"`
+	DevinAPIKeyFile       *string `yaml:"devin_api_key_file"`
+	DevinReviewAPIKeyFile *string `yaml:"devin_review_api_key_file"`
+	DevinOrgID            *string `yaml:"devin_org_id"`
 }
 
 // ReviewLoop is the resolved post-PR review-loop config. When Enabled is false
@@ -238,6 +241,17 @@ type ReviewLoop struct {
 	// security requirement: an untrusted PR branch must not be able to redirect it
 	// to read/exfiltrate an arbitrary file via the Devin trigger.
 	DevinAPIKeyFile string
+	// DevinReviewAPIKeyFile is the path read for the dedicated Devin Review API
+	// token (DEVIN_REVIEW_API_KEY override) — a cog_-prefixed service-user token,
+	// distinct from DevinAPIKeyFile. When this token AND DevinOrgID both resolve,
+	// the loop triggers reviews via the Devin Review API (POST /v3/.../pr-reviews),
+	// which is not per-org ACU-limited; otherwise it falls back to /v1/sessions.
+	// Default ~/.config/devin/review_api_key. Same trust-gating as DevinAPIKeyFile.
+	DevinReviewAPIKeyFile string
+	// DevinOrgID is the Devin organization id used in the Devin Review API path
+	// (/v3/organizations/{org_id}/pr-reviews). Required (with a review token) to use
+	// the Review API; empty keeps the loop on the legacy /v1/sessions trigger.
+	DevinOrgID string
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -390,6 +404,14 @@ intent:
 #                     # unset. SECURITY: honored only from the trusted default
 #                     # branch, so a pushed branch cannot redirect it to read an
 #                     # arbitrary file.
+#   # Devin Review API (preferred). Set BOTH of the next two to trigger reviews via
+#   # the dedicated Devin Review product (POST /v3/organizations/{org}/pr-reviews)
+#   # instead of /v1/sessions. Unlike sessions it is NOT per-org ACU-limited, so it
+#   # keeps working when sessions hit out_of_quota. Needs a cog_ service-user token
+#   # (distinct from devin_api_key_file). Without both, the loop uses /v1/sessions.
+#   # devin_org_id: "your-devin-org-id"
+#   # devin_review_api_key_file: "~/.config/devin/review_api_key"  # read when
+#                     # DEVIN_REVIEW_API_KEY is unset. Same trust-gating as above.
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -1092,19 +1114,29 @@ func resolveReview(raw ReviewRaw) Review {
 // finding is the helpful default (it is inert while Enabled is false).
 func reviewLoopDefaults() ReviewLoop {
 	return ReviewLoop{
-		Enabled:         false,
-		BotLogin:        DefaultReviewLoopBotLogin,
-		MaxRounds:       3,
-		FailOpen:        true,
-		ReplyOnFix:      true,
-		Retrigger:       true,
-		DevinAPIKeyFile: DefaultDevinAPIKeyFile,
+		Enabled:               false,
+		BotLogin:              DefaultReviewLoopBotLogin,
+		MaxRounds:             3,
+		FailOpen:              true,
+		ReplyOnFix:            true,
+		Retrigger:             true,
+		DevinAPIKeyFile:       DefaultDevinAPIKeyFile,
+		DevinReviewAPIKeyFile: DefaultDevinReviewAPIKeyFile,
 	}
 }
 
 // DefaultDevinAPIKeyFile is the default path the review loop reads the Devin API
-// key from when DEVIN_API_KEY is unset (a leading ~ is expanded at use time).
-const DefaultDevinAPIKeyFile = "~/.config/devin/api_key"
+// key from when DEVIN_API_KEY is unset (a leading ~ is expanded at use time). It
+// aliases devin.DefaultAPIKeyFile so the path has a single source of truth and can
+// never drift from the fallback ResolveAPIKey actually uses.
+const DefaultDevinAPIKeyFile = devin.DefaultAPIKeyFile
+
+// DefaultDevinReviewAPIKeyFile is the default path the review loop reads the Devin
+// Review API token from when DEVIN_REVIEW_API_KEY is empty. It aliases
+// devin.DefaultReviewAPIKeyFile so the path has a single source of truth: the
+// default advertised here can never drift from the fallback ResolveReviewAPIKey
+// actually uses.
+const DefaultDevinReviewAPIKeyFile = devin.DefaultReviewAPIKeyFile
 
 // applyReviewLoopOverrides applies non-nil raw values onto resolved defaults.
 func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
@@ -1128,6 +1160,17 @@ func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
 	}
 	if src.DevinAPIKeyFile != nil && strings.TrimSpace(*src.DevinAPIKeyFile) != "" {
 		dst.DevinAPIKeyFile = strings.TrimSpace(*src.DevinAPIKeyFile)
+	}
+	if src.DevinReviewAPIKeyFile != nil && strings.TrimSpace(*src.DevinReviewAPIKeyFile) != "" {
+		dst.DevinReviewAPIKeyFile = strings.TrimSpace(*src.DevinReviewAPIKeyFile)
+	}
+	if src.DevinOrgID != nil {
+		// DevinOrgID has explicit empty-means-disabled semantics (it is the switch
+		// that selects the Review API), unlike the key-file/login paths where empty
+		// is never a valid override. So apply the override whenever it is set,
+		// allowing a repo-level `devin_org_id: ""` to clear a global value and opt
+		// the repo back onto the legacy /v1/sessions path.
+		dst.DevinOrgID = strings.TrimSpace(*src.DevinOrgID)
 	}
 }
 

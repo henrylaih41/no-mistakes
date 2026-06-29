@@ -392,15 +392,66 @@ func (s *CIStep) maybeRetriggerDevin(sctx *pipeline.StepContext, pr *scm.PR, hea
 	if headSHA == s.retriggeredSHA() {
 		return
 	}
+	// Resolve both paths up front so we can decide whether to claim the head AND so
+	// a failed Review API attempt can fall back to the legacy path in the SAME poll.
+	// Prefer the dedicated Devin Review API (POST /v3/.../pr-reviews) when a review
+	// service-user token AND org id are configured: it is the vendor-recommended
+	// path and is NOT per-org ACU-limited, so it keeps working when /v1/sessions
+	// hits out_of_quota. Otherwise (or if the Review API call fails) fall back to the
+	// legacy /v1/sessions agent-session trigger.
+	orgID := strings.TrimSpace(cfg.DevinOrgID)
+	// The review key can only be used when an org id is also configured, so skip the
+	// file read entirely when orgID is empty (the common case for operators who have
+	// not configured the Review API).
+	var reviewKey string
+	if orgID != "" {
+		reviewKey = devin.ResolveReviewAPIKey(cfg.DevinReviewAPIKeyFile)
+	}
+	useReviewAPI := reviewKey != "" && orgID != ""
 	apiKey := devin.ResolveAPIKey(cfg.DevinAPIKeyFile)
-	if apiKey == "" {
-		// No key -> SKIP the trigger (best-effort). Do NOT consume the once-per-head
-		// guard, so a key that appears later can still trigger this head.
+
+	if !useReviewAPI && apiKey == "" {
+		// Nothing to trigger with -> SKIP (best-effort). Do NOT consume the
+		// once-per-head guard, so a key that appears later can still trigger this head.
 		return
 	}
-	// Claim the head BEFORE the call so a failed/rate-limited POST is not retried
-	// every poll. Caps the spend at one paid Devin session per head SHA.
+
+	// Claim the head BEFORE any network call so a failed/rate-limited trigger is not
+	// retried every poll. The claim is SHARED across both paths: we attempt at most
+	// one trigger per head, trying the preferred Review API first and falling back to
+	// /v1/sessions within the same poll when it fails — so a misconfigured review
+	// token does not permanently block a working legacy DEVIN_API_KEY for this head.
 	if !s.claimRetrigger(headSHA) {
+		return
+	}
+
+	if useReviewAPI {
+		trigger := s.triggerPRReview
+		if trigger == nil {
+			trigger = (&devin.Client{}).TriggerPRReview
+		}
+		ctx, cancel := context.WithTimeout(sctx.Ctx, devinRetriggerTimeout)
+		status, reviewedSHA, err := trigger(ctx, reviewKey, orgID, pr.URL)
+		cancel()
+		if err == nil {
+			// This is a best-effort nudge: the Review API reviews the PR's CURRENT
+			// head, so the accepted commit is surfaced for observability only — it
+			// never hard-gates the run.
+			sctx.Log(fmt.Sprintf("triggered Devin Review of %s (status %s)", shortSHA(reviewedSHA), status))
+			return
+		}
+		// Best-effort: log without the token and fall through to the legacy
+		// /v1/sessions path, which may work via a separate DEVIN_API_KEY even when
+		// the review token is expired/misconfigured. Match the success log's
+		// "pr_number" int field so the Review API's two log lines stay consistent
+		// for structured-log queries.
+		prNum, _ := strconv.Atoi(pr.Number)
+		slog.Warn("review loop: Devin Review trigger failed", "pr_number", prNum, "head", shortSHA(headSHA), "err", err)
+	}
+
+	if apiKey == "" {
+		// Review API was attempted and failed, and there is no legacy key to fall
+		// back to. The head stays claimed (we already attempted once this head).
 		return
 	}
 
@@ -413,7 +464,10 @@ func (s *CIStep) maybeRetriggerDevin(sctx *pipeline.StepContext, pr *scm.PR, hea
 	sessionID, err := trigger(ctx, apiKey, pr.URL, headSHA)
 	if err != nil {
 		// Best-effort: log without the key and keep waiting for the auto-review.
-		slog.Warn("review loop: Devin re-trigger failed", "pr", pr.Number, "head", shortSHA(headSHA), "err", err)
+		// Use the same "pr_number" int field as the Review API log lines so
+		// structured-log queries stay consistent across both trigger paths.
+		prNum, _ := strconv.Atoi(pr.Number)
+		slog.Warn("review loop: Devin re-trigger failed", "pr_number", prNum, "head", shortSHA(headSHA), "err", err)
 		return
 	}
 	sctx.Log(fmt.Sprintf("triggered Devin review of %s (session %s)", shortSHA(headSHA), sessionID))
