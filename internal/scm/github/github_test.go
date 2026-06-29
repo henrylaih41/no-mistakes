@@ -306,6 +306,23 @@ func thread(resolved, outdated bool, author, path string, line int, body string)
 	return threadID(0, resolved, outdated, author, path, line, body)
 }
 
+// threadWithCommit is threadID with an explicit originalCommit { oid } field on
+// the first comment, modeling the real GraphQL API shape. The oid is the head
+// SHA the thread was originally posted on. GetBotFindings must filter threads
+// whose originalCommit.oid does not match the current headSHA so stale threads
+// from old heads (already fixed but not marked outdated) don't drive redundant
+// fix rounds or get redundant "Addressed in" replies.
+func threadWithCommit(databaseID int64, resolved, outdated bool, author, path string, line int, body, commitOID string) string {
+	typename := "User"
+	if strings.HasSuffix(strings.ToLower(author), "[bot]") || strings.EqualFold(author, botSlug) {
+		typename = "Bot"
+	}
+	return fmt.Sprintf(
+		`{"isResolved":%t,"isOutdated":%t,"comments":{"nodes":[{"author":{"login":%q,"__typename":%q},"databaseId":%d,"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/7#discussion","originalCommit":{"oid":%q}}]}}`,
+		resolved, outdated, author, typename, databaseID, path, line, line, body, commitOID,
+	)
+}
+
 // liveThreads is the MIX used across the read-layer tests: two LIVE bot findings
 // (🔴 high + 🚩 medium), one OUTDATED bot finding (the anchored code changed =
 // addressed), one RESOLVED bot finding (someone closed it), and one LIVE
@@ -1014,4 +1031,75 @@ func TestGitHubHelperProcess(t *testing.T) {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// TestGetBotFindingsFiltersStaleThreadsByHeadSHA is the multi-reply regression
+// test. On a real PR (robinhood-tracker#4), Devin posted findings on headA, the
+// loop fixed and pushed headB, Devin re-reviewed headB with NEW findings
+// (CHANGES_REQUESTED), and the loop fixed again — but the OLD threads from
+// headA (not resolved, not outdated because the fix touched different lines)
+// were still returned by GetBotFindings and got redundant "Addressed in <sha>"
+// replies on every round (4 replies across 4 commits on the same thread).
+//
+// The fix: GetBotFindings must filter threads by originalCommit.oid == headSHA
+// so only findings posted on the CURRENT head are live. Threads from older
+// heads are stale (the loop already fixed them; Devin chose not to re-post on
+// the new head) and must not drive fixes or receive replies.
+//
+// This test creates threads with explicit originalCommit { oid } fields:
+//   - 2 threads on the current head (headSHA) → must be returned as findings
+//   - 2 threads on an old head ("oldSHA123") → must be filtered out
+//   - 1 thread with empty originalCommit.oid → must be returned (fail-safe:
+//     a thread without commit metadata is treated as current-head, matching
+//     the existing behavior for APIs that don't expose originalCommit)
+func TestGetBotFindingsFiltersStaleThreadsByHeadSHA(t *testing.T) {
+	t.Parallel()
+
+	threads := []string{
+		// Live bot threads on the CURRENT head — must be returned.
+		threadWithCommit(101, false, false, botSlug, "internal/batch/download.go", 42, "🔴 **Bug on current head**", headSHA),
+		threadWithCommit(102, false, false, botSlug, "internal/batch/path.go", 17, "🚩 **Medium on current head**", headSHA),
+		// Live bot threads on an OLD head (not resolved, not outdated, but
+		// originalCommit.oid != headSHA) — must be filtered out.
+		threadWithCommit(201, false, false, botSlug, "internal/old/stale1.go", 10, "🔴 **Stale finding from old head**", "oldSHA123"),
+		threadWithCommit(202, false, false, botSlug, "internal/old/stale2.go", 20, "🚩 **Stale medium from old head**", "oldSHA123"),
+		// Live bot thread with empty originalCommit.oid — fail-safe: treat as
+		// current-head (don't filter) so a host that doesn't expose the field
+		// doesn't accidentally suppress all findings.
+		threadWithCommit(301, false, false, botSlug, "internal/no/commit_meta.go", 5, "🔴 **No commit metadata**", ""),
+	}
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(threads...),
+	}), nil, "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetBotFindings() error = %v", err)
+	}
+
+	// 2 current-head threads + 1 empty-commit fail-safe thread = 3 findings.
+	// The 2 stale threads from "oldSHA123" must be filtered out.
+	if len(findings) != 3 {
+		t.Fatalf("len(findings) = %d, want 3 (2 current-head + 1 empty-commit fail-safe; 2 stale filtered): %+v", len(findings), findings)
+	}
+
+	// Verify no stale thread (from oldSHA123) is in the results.
+	for _, f := range findings {
+		if f.ID == 201 || f.ID == 202 {
+			t.Fatalf("stale thread from old head was not filtered out: %+v", f)
+		}
+	}
+
+	// Verify the current-head and empty-commit findings are present.
+	gotIDs := map[int64]bool{}
+	for _, f := range findings {
+		gotIDs[f.ID] = true
+	}
+	if !gotIDs[101] || !gotIDs[102] {
+		t.Fatalf("current-head findings missing, got IDs: %v", gotIDs)
+	}
+	if !gotIDs[301] {
+		t.Fatalf("empty-commit fail-safe finding missing, got IDs: %v", gotIDs)
+	}
 }

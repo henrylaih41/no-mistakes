@@ -455,7 +455,7 @@ type ghUser struct {
 // first:100 window. On a busy PR a newest live severe finding could land past
 // the first page, get truncated, and wrongly read as APPROVED, so GetBotFindings
 // walks every page (after:$cursor) before filtering.
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login __typename} databaseId path line originalLine body url}}}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login __typename} databaseId path line originalLine body url originalCommit{oid}}}}}}}`
 
 // ghReviewThreadsResponse is the `gh api graphql` payload for reviewThreadsQuery.
 type ghReviewThreadsResponse struct {
@@ -486,14 +486,19 @@ type ghReviewThread struct {
 
 // ghThreadComment is a single comment node within a review thread. DatabaseID is
 // the comment's REST id, used as ReviewComment.ID so the loop can reply to it.
+// OriginalCommit.OID is the head SHA the thread was originally posted on, used by
+// GetBotFindings to filter stale threads from older heads (see the headSHA filter).
 type ghThreadComment struct {
-	Author       ghThreadAuthor `json:"author"`
-	DatabaseID   int64          `json:"databaseId"`
-	Path         string         `json:"path"`
-	Line         int            `json:"line"`
-	OriginalLine int            `json:"originalLine"`
-	Body         string         `json:"body"`
-	URL          string         `json:"url"`
+	Author         ghThreadAuthor `json:"author"`
+	DatabaseID     int64          `json:"databaseId"`
+	Path           string         `json:"path"`
+	Line           int            `json:"line"`
+	OriginalLine   int            `json:"originalLine"`
+	Body           string         `json:"body"`
+	URL            string         `json:"url"`
+	OriginalCommit struct {
+		OID string `json:"oid"`
+	} `json:"originalCommit"`
 }
 
 // ghThreadAuthor is the author of a GraphQL review-thread comment. GraphQL
@@ -623,6 +628,20 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 			continue
 		}
 		first := t.Comments.Nodes[0]
+		// Filter stale threads from older heads: a thread whose originalCommit.oid
+		// does not match the current headSHA was posted on a previous commit the
+		// loop already fixed. GitHub only marks a thread isOutdated when the
+		// anchored lines changed, so a fix that touched different lines leaves the
+		// thread live — but it is stale (Devin chose not to re-post it on the new
+		// head). Without this filter, stale threads drive redundant fix rounds and
+		// get redundant "Addressed in <sha>" replies on every push (observed on a
+		// real PR: 4 replies across 4 commits on one thread). A thread with an
+		// empty originalCommit.oid (a host or API version that doesn't expose the
+		// field) is treated as current-head (fail-safe: don't suppress findings
+		// when the metadata is absent).
+		if oid := strings.TrimSpace(first.OriginalCommit.OID); oid != "" && !strings.EqualFold(oid, headSHA) {
+			continue
+		}
 		// Only the configured review bot's threads are findings. Match the
 		// author by normalized login (handles the REST "[bot]" vs GraphQL
 		// bare-slug inconsistency) AND positively assert the actor is a Bot —
