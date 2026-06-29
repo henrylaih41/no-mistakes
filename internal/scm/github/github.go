@@ -721,8 +721,11 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 	// Rather than letting an empty SHA act as a wildcard that matches every review
 	// in the PR's history, report not-yet-reviewed so the caller's grace window /
 	// fail policy decides. This also keeps GetReviewVerdict and GetBotFindings
-	// consistent (GetBotFindings likewise returns nothing on an empty head).
-	if strings.TrimSpace(headSHA) == "" {
+	// consistent (GetBotFindings likewise returns nothing on an empty head). Trim
+	// once here so every downstream comparison — and the GetBotFindings call below —
+	// uses the normalized value (a callers-can't-be-trusted defensive normalization).
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" {
 		return scm.VerdictNone, nil, nil
 	}
 
@@ -735,7 +738,6 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 		return "", nil, fmt.Errorf("parse PR reviews: %w", err)
 	}
 
-	head := strings.TrimSpace(headSHA)
 	reviewedAny, reviewedHead, headChangesRequested := false, false, false
 	// Track the most recent bot review targeting the head (by submitted_at) so its
 	// state — not the OR of every state in the head's history — decides the native
@@ -756,7 +758,7 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 			continue
 		}
 		reviewedAny = true
-		if !strings.EqualFold(strings.TrimSpace(r.CommitID), head) {
+		if !strings.EqualFold(strings.TrimSpace(r.CommitID), headSHA) {
 			continue
 		}
 		reviewedHead = true
