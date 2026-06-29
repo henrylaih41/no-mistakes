@@ -895,10 +895,10 @@ func TestMaybeRetriggerDevin_PrefersReviewAPIWhenConfigured(t *testing.T) {
 	var prCalls, sessionCalls int
 	var gotToken, gotOrg, gotURL string
 	step := &CIStep{
-		triggerPRReview: func(_ context.Context, token, orgID, prURL string) (string, error) {
+		triggerPRReview: func(_ context.Context, token, orgID, prURL string) (string, string, error) {
 			prCalls++
 			gotToken, gotOrg, gotURL = token, orgID, prURL
-			return "pending", nil
+			return "pending", "headA", nil
 		},
 		triggerReview: func(context.Context, string, string, string) (string, error) {
 			sessionCalls++
@@ -921,6 +921,40 @@ func TestMaybeRetriggerDevin_PrefersReviewAPIWhenConfigured(t *testing.T) {
 	}
 }
 
+// TestMaybeRetriggerDevin_WarnsWhenReviewedHeadDiffers asserts that when the
+// Review API reports it reviewed a commit other than the run head (the PR head
+// advanced out of band), the loop surfaces the mismatch instead of logging a
+// plain "triggered" line, so the never-arriving head-scoped verdict is not
+// silently waited out.
+func TestMaybeRetriggerDevin_WarnsWhenReviewedHeadDiffers(t *testing.T) {
+	t.Setenv("DEVIN_REVIEW_API_KEY", "cog-review-key")
+	cfg := config.ReviewLoop{Enabled: true, Retrigger: true, DevinOrgID: "org-42"}
+
+	step := &CIStep{
+		triggerPRReview: func(context.Context, string, string, string) (string, string, error) {
+			return "pending", "headOutOfBand", nil
+		},
+	}
+	var logs []string
+	sctx := newReviewTestContext(cfg, "headA", func(s string) { logs = append(logs, s) })
+	pr := &scm.PR{Number: "1", URL: "https://github.com/o/r/pull/1"}
+
+	step.maybeRetriggerDevin(sctx, pr, "headA")
+
+	if got := strings.Join(logs, "\n"); !strings.Contains(got, "advanced out of band") {
+		t.Fatalf("expected a mismatch warning, got logs: %q", got)
+	}
+	for _, l := range logs {
+		if strings.HasPrefix(l, "triggered Devin Review of") {
+			t.Fatalf("did not expect a plain triggered line on head mismatch, got: %q", l)
+		}
+	}
+	// The head is still claimed so the cost guard is not defeated.
+	if step.retriggeredSHA() != "headA" {
+		t.Fatalf("guard = %q, want headA (claim consumed despite mismatch)", step.retriggeredSHA())
+	}
+}
+
 // TestMaybeRetriggerDevin_FallsBackToSessionsWithoutReviewToken asserts that
 // without a review token (even with an org id set) the loop stays on the legacy
 // /v1/sessions trigger, preserving existing behavior for unconfigured orgs.
@@ -936,8 +970,11 @@ func TestMaybeRetriggerDevin_FallsBackToSessionsWithoutReviewToken(t *testing.T)
 	rt := &recordingTrigger{}
 	prCalls := 0
 	step := &CIStep{
-		triggerReview:   rt.fn,
-		triggerPRReview: func(context.Context, string, string, string) (string, error) { prCalls++; return "pending", nil },
+		triggerReview: rt.fn,
+		triggerPRReview: func(context.Context, string, string, string) (string, string, error) {
+			prCalls++
+			return "pending", "headA", nil
+		},
 	}
 	sctx := newReviewTestContext(cfg, "headA", func(string) {})
 	pr := &scm.PR{Number: "1", URL: "https://github.com/o/r/pull/1"}

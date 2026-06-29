@@ -138,7 +138,7 @@ Bitbucket Cloud PR creation and CI monitoring use environment variables instead 
 - `NO_MISTAKES_BITBUCKET_API_TOKEN`
 - `NO_MISTAKES_BITBUCKET_API_BASE_URL` - optional API base URL override
 
-The post-PR review loop reads a Devin API token from `DEVIN_API_KEY` (falling back to `review_loop.devin_api_key_file`) when it re-triggers a Devin review.
+The post-PR review loop reads a Devin token when it re-triggers a Devin review. When a Devin Review token (`DEVIN_REVIEW_API_KEY`, falling back to `review_loop.devin_review_api_key_file`) **and** `review_loop.devin_org_id` both resolve, it uses the dedicated Devin Review API; otherwise it falls back to the legacy `/v1/sessions` token from `DEVIN_API_KEY` (falling back to `review_loop.devin_api_key_file`).
 
 ## Repo config
 

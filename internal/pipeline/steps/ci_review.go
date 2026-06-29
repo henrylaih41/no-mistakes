@@ -412,10 +412,21 @@ func (s *CIStep) maybeRetriggerDevin(sctx *pipeline.StepContext, pr *scm.PR, hea
 		}
 		ctx, cancel := context.WithTimeout(sctx.Ctx, devinRetriggerTimeout)
 		defer cancel()
-		status, err := trigger(ctx, reviewKey, orgID, pr.URL)
+		status, reviewedSHA, err := trigger(ctx, reviewKey, orgID, pr.URL)
 		if err != nil {
 			// Best-effort: log without the token and keep waiting for the review.
 			slog.Warn("review loop: Devin Review trigger failed", "pr", pr.Number, "head", shortSHA(headSHA), "err", err)
+			return
+		}
+		// The Review API reviews the PR's CURRENT head. If it advanced out of band
+		// past the run head, Devin reviewed a different commit and the head-scoped
+		// verdict will never arrive for this run head — surface the mismatch so the
+		// grace/fail policy isn't silently waited out instead of looking triggered.
+		if reviewedSHA != "" && reviewedSHA != headSHA {
+			slog.Warn("review loop: Devin reviewed a different head than the run head",
+				"pr", pr.Number, "run_head", shortSHA(headSHA), "reviewed_head", shortSHA(reviewedSHA))
+			sctx.Log(fmt.Sprintf("warning: Devin reviewed %s, not the run head %s (PR head advanced out of band)",
+				shortSHA(reviewedSHA), shortSHA(headSHA)))
 			return
 		}
 		sctx.Log(fmt.Sprintf("triggered Devin Review of %s (status %s)", shortSHA(headSHA), status))

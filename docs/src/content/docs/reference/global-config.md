@@ -60,6 +60,8 @@ review_loop:
   reply_on_fix: true
   retrigger: true
   devin_api_key_file: "~/.config/devin/api_key"
+  devin_review_api_key_file: "~/.config/devin/review_api_key"
+  devin_org_id: ""
 
 intent:
   enabled: true
@@ -301,9 +303,11 @@ The loop is off by default, so leaving it unset keeps pipeline behavior byte-ide
 | `review_loop.fail_open` | `bool` | `true` | When `true`, a silent reviewer does not block the PR; when `false`, the loop waits for the bot's verdict |
 | `review_loop.reply_on_fix` | `bool` | `true` | After pushing a fix, post a threaded reply on each addressed review comment |
 | `review_loop.retrigger` | `bool` | `true` | Explicitly re-trigger a Devin review via the Devin HTTP API instead of relying solely on Devin's auto-review |
-| `review_loop.devin_api_key_file` | `string` | `~/.config/devin/api_key` | Path read for the Devin API key when `DEVIN_API_KEY` is unset (a leading `~` expands to the home directory) |
+| `review_loop.devin_api_key_file` | `string` | `~/.config/devin/api_key` | Path read for the legacy `/v1/sessions` Devin API key when `DEVIN_API_KEY` is unset (a leading `~` expands to the home directory) |
+| `review_loop.devin_review_api_key_file` | `string` | `~/.config/devin/review_api_key` | Path read for the dedicated Devin Review API token (a `cog_`-prefixed service-user token, distinct from `devin_api_key_file`) when `DEVIN_REVIEW_API_KEY` is unset |
+| `review_loop.devin_org_id` | `string` | _(empty)_ | Devin organization id used in the Review API path (`/v3/organizations/{org}/pr-reviews`) |
 
-`retrigger` is best-effort: a missing key or any Devin API error is logged and the loop continues. Each trigger creates a paid Devin session (ACUs), so the loop fires it at most once per head SHA. The API key is read from the `DEVIN_API_KEY` environment variable first and from `devin_api_key_file` otherwise; see [`DEVIN_API_KEY`](/no-mistakes/reference/environment/#devin_api_key).
+`retrigger` is best-effort: a missing key or any Devin API error is logged and the loop continues. Each trigger creates a paid Devin review, so the loop fires it at most once per head SHA. When a Devin Review token **and** `devin_org_id` both resolve, the loop prefers the dedicated Devin Review API (`POST /v3/organizations/{org}/pr-reviews`), which is not per-organization ACU-limited and so keeps working when `/v1/sessions` is exhausted (`out_of_quota`); the review token is read from `DEVIN_REVIEW_API_KEY` first and from `devin_review_api_key_file` otherwise (see [`DEVIN_REVIEW_API_KEY`](/no-mistakes/reference/environment/#devin_review_api_key)). Otherwise it falls back to the legacy `/v1/sessions` trigger, whose key is read from `DEVIN_API_KEY` first and from `devin_api_key_file` otherwise (see [`DEVIN_API_KEY`](/no-mistakes/reference/environment/#devin_api_key)).
 
 With `fail_open: false`, the loop waits for the bot and leans on the CI step's idle timeout to escalate to the human gate. That idle timer re-arms whenever the base branch advances (see [`ci_timeout`](#ci_timeout)), so on a PR whose base branch is actively moving while the bot stays silent the timeout may never elapse - abort the run explicitly with `no-mistakes axi abort --run <id>` if that happens.
 
@@ -358,4 +362,4 @@ These are global defaults. Per-repo config can override either field.
 
 ## Environment variables
 
-See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, Bitbucket Cloud credentials, the `DEVIN_API_KEY` review-loop token, and update-check suppression.
+See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, Bitbucket Cloud credentials, the `DEVIN_API_KEY` and `DEVIN_REVIEW_API_KEY` review-loop tokens, and update-check suppression.

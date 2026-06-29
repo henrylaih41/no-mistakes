@@ -105,12 +105,15 @@ func TestTriggerPRReview_PostsToReviewAPIWithBearer(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTPClient: srv.Client(), BaseURL: srv.URL}
-	status, err := c.TriggerPRReview(context.Background(), testAPIKey, orgID, prURL)
+	status, commitSHA, err := c.TriggerPRReview(context.Background(), testAPIKey, orgID, prURL)
 	if err != nil {
 		t.Fatalf("TriggerPRReview() error = %v", err)
 	}
 	if status != "pending" {
 		t.Errorf("status = %q, want pending", status)
+	}
+	if commitSHA != "abc" {
+		t.Errorf("commitSHA = %q, want abc", commitSHA)
 	}
 	if gotMethod != http.MethodPost {
 		t.Errorf("method = %q, want POST", gotMethod)
@@ -137,7 +140,7 @@ func TestTriggerPRReview_Non2xxIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), BaseURL: srv.URL}
-	if _, err := c.TriggerPRReview(context.Background(), testAPIKey, "org", "https://github.com/o/r/pull/1"); err == nil {
+	if _, _, err := c.TriggerPRReview(context.Background(), testAPIKey, "org", "https://github.com/o/r/pull/1"); err == nil {
 		t.Fatal("expected error on 403 response")
 	}
 }
@@ -145,10 +148,10 @@ func TestTriggerPRReview_Non2xxIsError(t *testing.T) {
 func TestTriggerPRReview_RequiresTokenAndOrg(t *testing.T) {
 	t.Parallel()
 	c := &Client{}
-	if _, err := c.TriggerPRReview(context.Background(), "", "org", "u"); err == nil {
+	if _, _, err := c.TriggerPRReview(context.Background(), "", "org", "u"); err == nil {
 		t.Error("expected error on empty token")
 	}
-	if _, err := c.TriggerPRReview(context.Background(), "tok", "", "u"); err == nil {
+	if _, _, err := c.TriggerPRReview(context.Background(), "tok", "", "u"); err == nil {
 		t.Error("expected error on empty org id")
 	}
 }

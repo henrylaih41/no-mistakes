@@ -132,18 +132,22 @@ type prReviewResponse struct {
 // ACU-limited — so it keeps working when sessions are exhausted (out_of_quota).
 // It requires a `cog_`-prefixed service-user token with the review permission
 // (distinct from the /v1/sessions key) plus the Devin org id, and returns the
-// review status (pending|running|completed|errored|cancelled).
+// review status (pending|running|completed|errored|cancelled) together with the
+// commit SHA Devin accepted for review. The Review API reviews the PR's CURRENT
+// head, so the returned commit_sha may differ from a stale run head if the PR
+// branch advanced out of band — callers compare it to know which commit was
+// actually reviewed.
 //
 // A non-2xx status is treated as an error. The token is sent only in the
 // Authorization header and is never logged or included in any returned error.
-func (c *Client) TriggerPRReview(ctx context.Context, token, orgID, prURL string) (string, error) {
+func (c *Client) TriggerPRReview(ctx context.Context, token, orgID, prURL string) (status, commitSHA string, err error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return "", fmt.Errorf("devin: empty review API token")
+		return "", "", fmt.Errorf("devin: empty review API token")
 	}
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {
-		return "", fmt.Errorf("devin: empty org id")
+		return "", "", fmt.Errorf("devin: empty org id")
 	}
 
 	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
@@ -155,15 +159,15 @@ func (c *Client) TriggerPRReview(ctx context.Context, token, orgID, prURL string
 		httpClient = http.DefaultClient
 	}
 
-	body, err := json.Marshal(prReviewRequest{PRURL: prURL})
+	reqBody, err := json.Marshal(prReviewRequest{PRURL: prURL})
 	if err != nil {
-		return "", fmt.Errorf("devin: marshal request: %w", err)
+		return "", "", fmt.Errorf("devin: marshal request: %w", err)
 	}
 
 	endpoint := base + "/v3/organizations/" + url.PathEscape(orgID) + "/pr-reviews"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
 	if err != nil {
-		return "", fmt.Errorf("devin: new request: %w", err)
+		return "", "", fmt.Errorf("devin: new request: %w", err)
 	}
 	// SECURITY: the token lives only in this header for the duration of the request.
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -171,7 +175,7 @@ func (c *Client) TriggerPRReview(ctx context.Context, token, orgID, prURL string
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("devin: post pr-review: %w", err)
+		return "", "", fmt.Errorf("devin: post pr-review: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -179,17 +183,17 @@ func (c *Client) TriggerPRReview(ctx context.Context, token, orgID, prURL string
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// The response body never contains the request's Authorization header, so a
 		// bounded snippet is safe to surface (e.g. an out_of_quota / unauthorized note).
-		return "", fmt.Errorf("devin: pr-review trigger returned %s: %s", resp.Status, snippet(respBody))
+		return "", "", fmt.Errorf("devin: pr-review trigger returned %s: %s", resp.Status, snippet(respBody))
 	}
 
 	var parsed prReviewResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", fmt.Errorf("devin: decode response: %w", err)
+		return "", "", fmt.Errorf("devin: decode response: %w", err)
 	}
 
 	// Log only non-secret identifiers on success. NEVER log the token.
-	slog.Info("devin: triggered PR review", "pr_number", parsed.PRNumber, "status", parsed.Status)
-	return strings.TrimSpace(parsed.Status), nil
+	slog.Info("devin: triggered PR review", "pr_number", parsed.PRNumber, "status", parsed.Status, "commit_sha", parsed.CommitSHA)
+	return strings.TrimSpace(parsed.Status), strings.TrimSpace(parsed.CommitSHA), nil
 }
 
 // reviewPrompt builds the session prompt. It references the PR URL and head SHA

@@ -58,7 +58,7 @@ Useful for mocking in tests or pointing at a proxy.
 
 ## `DEVIN_API_KEY`
 
-Devin API token used by the post-PR [review loop](/no-mistakes/reference/global-config/#review_loop) to explicitly (re-)trigger a Devin review.
+Devin API token used by the post-PR [review loop](/no-mistakes/reference/global-config/#review_loop) to explicitly (re-)trigger a Devin review via the legacy `/v1/sessions` agent session.
 
 | | |
 |---|---|
@@ -66,6 +66,17 @@ Devin API token used by the post-PR [review loop](/no-mistakes/reference/global-
 | Default | (none) |
 
 Takes precedence over `review_loop.devin_api_key_file`. When this variable is empty, no-mistakes reads the key from the configured key file (default `~/.config/devin/api_key`). When neither yields a key, the explicit re-trigger is skipped (best-effort) and the loop falls back to Devin's auto-review. The key is sent only in the Devin API `Authorization` header and is never logged. Only consulted when `review_loop.enabled` and `review_loop.retrigger` are true.
+
+## `DEVIN_REVIEW_API_KEY`
+
+Dedicated Devin Review API token (a `cog_`-prefixed service-user token, distinct from `DEVIN_API_KEY`) used by the post-PR [review loop](/no-mistakes/reference/global-config/#review_loop) to trigger a review via the Devin Review API (`POST /v3/organizations/{org}/pr-reviews`).
+
+| | |
+|---|---|
+| Type | `string` |
+| Default | (none) |
+
+Takes precedence over `review_loop.devin_review_api_key_file` (default `~/.config/devin/review_api_key`). When this token **and** `review_loop.devin_org_id` both resolve, the loop prefers the Review API, which is not per-organization ACU-limited and so keeps working when `/v1/sessions` is exhausted (`out_of_quota`); otherwise it falls back to the legacy `DEVIN_API_KEY` / `/v1/sessions` path. The token is sent only in the Devin API `Authorization` header and is never logged. Only consulted when `review_loop.enabled` and `review_loop.retrigger` are true.
 
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 
