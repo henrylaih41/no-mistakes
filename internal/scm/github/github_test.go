@@ -1103,3 +1103,59 @@ func TestGetBotFindingsFiltersStaleThreadsByHeadSHA(t *testing.T) {
 		t.Fatalf("empty-commit fail-safe finding missing, got IDs: %v", gotIDs)
 	}
 }
+
+// TestGetBotFindingsHeadSHANormalization guards the two defensive normalizations
+// in the stale-thread filter: the head-SHA comparison is case-insensitive
+// (strings.EqualFold), and the headSHA argument is trimmed before comparison so
+// a caller passing a whitespace-padded SHA still matches a clean originalCommit.
+// oid. A regression that swaps EqualFold for == (mixed-case false-negative) or
+// drops the headSHA trim (padded false-negative) would silently filter a
+// current-head finding as stale, dropping a live finding.
+func TestGetBotFindingsHeadSHANormalization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		commitOID string // originalCommit.oid on the thread
+		argSHA    string // headSHA passed to GetBotFindings
+	}{
+		{
+			// Thread's oid is upper-case but the head is lower-case: EqualFold
+			// must still treat them as the same commit.
+			name:      "mixed_case_oid_matches_via_EqualFold",
+			commitOID: strings.ToUpper(headSHA),
+			argSHA:    headSHA,
+		},
+		{
+			// Caller passes a whitespace-padded head SHA: the trim in
+			// GetBotFindings must normalize it so it matches the clean oid.
+			name:      "whitespace_padded_headSHA_matches_after_trim",
+			commitOID: headSHA,
+			argSHA:    "  " + headSHA + "  ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			threads := []string{
+				threadWithCommit(101, false, false, botSlug, "internal/batch/download.go", 42, "🔴 **Bug on current head**", tt.commitOID),
+			}
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(threads...),
+			}), nil, "test/repo")
+
+			findings, err := host.GetBotFindings(context.Background(), 7, tt.argSHA, botUser)
+			if err != nil {
+				t.Fatalf("GetBotFindings() error = %v", err)
+			}
+			if len(findings) != 1 {
+				t.Fatalf("len(findings) = %d, want 1 (current-head thread must not be filtered as stale): %+v", len(findings), findings)
+			}
+			if findings[0].ID != 101 {
+				t.Fatalf("finding ID = %d, want 101", findings[0].ID)
+			}
+		})
+	}
+}

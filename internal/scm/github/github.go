@@ -631,29 +631,6 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 			continue
 		}
 		first := t.Comments.Nodes[0]
-		// Filter stale threads from older heads: a thread whose originalCommit.oid
-		// does not match the current headSHA was posted on a previous commit the
-		// loop already fixed. GitHub only marks a thread isOutdated when the
-		// anchored lines changed, so a fix that touched different lines leaves the
-		// thread live — but it is stale (Devin chose not to re-post it on the new
-		// head). Without this filter, stale threads drive redundant fix rounds and
-		// get redundant "Addressed in <sha>" replies on every push (observed on a
-		// real PR: 4 replies across 4 commits on one thread). A thread with an
-		// empty originalCommit.oid (a host or API version that doesn't expose the
-		// field) is treated as current-head (fail-safe: don't suppress findings
-		// when the metadata is absent).
-		//
-		// Tradeoff: this assumes Devin re-posts still-applicable findings as NEW
-		// threads on each head it reviews. If Devin instead reviews only the
-		// inter-head diff and does NOT re-surface a still-valid finding whose
-		// anchored lines were untouched, this filter silently drops a genuinely-
-		// unaddressed finding and the loop could converge to APPROVED with a real
-		// bug unfixed. The CI idle timeout / human escalation provide a backstop.
-		// Empirically (observed across multiple repos), Devin posts fresh review
-		// threads on each head it reviews, so this assumption holds in practice.
-		if oid := strings.TrimSpace(first.OriginalCommit.OID); oid != "" && !strings.EqualFold(oid, headSHA) {
-			continue
-		}
 		// Only the configured review bot's threads are findings. Match the
 		// author by normalized login (handles the REST "[bot]" vs GraphQL
 		// bare-slug inconsistency) AND positively assert the actor is a Bot —
@@ -665,6 +642,32 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 			continue
 		}
 		if !botLoginMatch(first.Author.Login, botLogin) {
+			continue
+		}
+		// Filter stale findings from older heads: a (bot) thread whose
+		// originalCommit.oid does not match the current headSHA was posted on a
+		// previous commit the loop already fixed. This runs after the bot-identity
+		// checks above because findings are exclusively bot threads — "stale
+		// finding" only has meaning among the bot's own threads, so the head-SHA
+		// scope belongs here, not before the author filter. GitHub only marks a
+		// thread isOutdated when the anchored lines changed, so a fix that touched
+		// different lines leaves the thread live — but it is stale (Devin chose not
+		// to re-post it on the new head). Without this filter, stale threads drive
+		// redundant fix rounds and get redundant "Addressed in <sha>" replies on
+		// every push (observed on a real PR: 4 replies across 4 commits on one
+		// thread). A thread with an empty originalCommit.oid (a host or API version
+		// that doesn't expose the field) is treated as current-head (fail-safe:
+		// don't suppress findings when the metadata is absent).
+		//
+		// Tradeoff: this assumes Devin re-posts still-applicable findings as NEW
+		// threads on each head it reviews. If Devin instead reviews only the
+		// inter-head diff and does NOT re-surface a still-valid finding whose
+		// anchored lines were untouched, this filter silently drops a genuinely-
+		// unaddressed finding and the loop could converge to APPROVED with a real
+		// bug unfixed. The CI idle timeout / human escalation provide a backstop.
+		// Empirically (observed across multiple repos), Devin posts fresh review
+		// threads on each head it reviews, so this assumption holds in practice.
+		if oid := strings.TrimSpace(first.OriginalCommit.OID); oid != "" && !strings.EqualFold(oid, headSHA) {
 			continue
 		}
 		if strings.TrimSpace(first.Path) == "" {
