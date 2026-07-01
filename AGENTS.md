@@ -136,6 +136,7 @@ Safest local verification sequence after non-trivial changes:
 - Unit-test pure helpers and tightly scoped package behavior where speed and failure localization are worth more than full-product realism.
 - Prefer targeted package tests while iterating, then finish with `go test -race ./...` and `make e2e` when your change affects those process or I/O boundaries.
 - The e2e suite lives behind the `e2e` build tag, so it is excluded from `go test ./...` and runs separately in CI via `make e2e`.
+- `make e2e` sweeps both `./internal/e2e/...` (full journey suite) and `./internal/pipeline/steps/...`, so step-local e2e tests (e.g. `internal/pipeline/steps/*_e2e_test.go`, gated by `//go:build e2e`) are also covered. Keep new step-local e2e tests behind the `e2e` tag so `go test ./...` still skips them.
 
 **Repo Config Trust Boundary (security)**
 
