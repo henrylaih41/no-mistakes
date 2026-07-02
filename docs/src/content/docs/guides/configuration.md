@@ -146,6 +146,8 @@ Bitbucket Cloud PR creation and CI monitoring use environment variables instead 
 
 The post-PR review loop reads a Devin token when it re-triggers a Devin review. When a Devin Review token (`DEVIN_REVIEW_API_KEY`, falling back to `review_loop.devin_review_api_key_file`) **and** `review_loop.devin_org_id` both resolve, it uses the dedicated Devin Review API; otherwise it falls back to the legacy `/v1/sessions` token from `DEVIN_API_KEY` (falling back to `review_loop.devin_api_key_file`).
 
+Azure DevOps uses the `az` CLI with the `azure-devops` extension; for non-interactive auth the daemon inherits a Personal Access Token from `AZURE_DEVOPS_EXT_PAT`.
+
 ## Repo config
 
 ```yaml
