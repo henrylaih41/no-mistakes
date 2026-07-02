@@ -80,6 +80,23 @@ asked for that might otherwise look surprising in the diff. A few sentences to a
 short paragraph is normal - write down what you learned from the conversation
 that a reviewer reading only the diff would not know.
 
+## Design context
+
+When there is a design-first agreement, ADR, issue contract, or other text file
+that reviewers and fixers should check the implementation against, pass it with
+repeatable `--design-context` flags when starting the run:
+
+```sh
+no-mistakes axi run --intent "<what the user set out to accomplish>" --design-context docs/design.md
+```
+
+Relative paths resolve from the current working tree. Absolute paths are
+allowed for explicit CLI context, so you may pass local cross-repo files the
+user told you to use. no-mistakes reads the files once at run start and stores
+that materialized contract on the run; reattaching to an in-flight run does not
+add or replace design context. Missing, unreadable, non-text, or invalid files
+fail loudly instead of being silently ignored.
+
 ## Validate and decide
 
 Run the pipeline and decide on its findings as they come up:

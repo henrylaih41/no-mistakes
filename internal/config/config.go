@@ -82,10 +82,11 @@ type RepoConfig struct {
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
 	// the pushed branch controls nothing that executes.
-	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
-	AutoFix           AutoFixRaw `yaml:"auto_fix"`
-	Intent            IntentRaw  `yaml:"intent"`
-	Test              TestRaw    `yaml:"test"`
+	AllowRepoCommands bool             `yaml:"allow_repo_commands"`
+	AutoFix           AutoFixRaw       `yaml:"auto_fix"`
+	Intent            IntentRaw        `yaml:"intent"`
+	Test              TestRaw          `yaml:"test"`
+	DesignContext     DesignContextRaw `yaml:"design_context"`
 	// Review is a pointer so an absent review block (nil) is distinguishable
 	// from an explicit empty one (&ReviewRaw{}). An explicit repo-level
 	// review block - including review.reviewers: [] - overrides the inherited
@@ -140,6 +141,7 @@ type Config struct {
 	AutoFix              AutoFix
 	Intent               Intent
 	Test                 Test
+	DesignContext        DesignContext
 	Review               Review
 	ReviewLoop           ReviewLoop
 }
@@ -269,6 +271,18 @@ type EvidenceRaw struct {
 // Test is the resolved test-step config.
 type Test struct {
 	Evidence Evidence
+}
+
+// DesignContextRaw is the YAML representation of per-run design-context file
+// selectors. Repo selectors are prompt context, not process selection; the
+// daemon validates and jails them to the worktree before reading.
+type DesignContextRaw struct {
+	Files []string `yaml:"files"`
+}
+
+// DesignContext is the resolved design-context config.
+type DesignContext struct {
+	Files []string
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -991,9 +1005,10 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // the execution-affecting surface that Review is gated for. So it is taken ONLY
 // from the trusted default-branch copy.
 //
-// The remaining non-executing fields (ignore patterns, auto-fix, intent, test)
-// are always taken from the pushed copy, matching prior behavior, since they
-// cannot run arbitrary shell, select a process, or steer CI gating.
+// The remaining non-executing fields (ignore patterns, auto-fix, intent, test,
+// design_context) are always taken from the pushed copy, matching prior
+// behavior, since they cannot run arbitrary shell, select a process, or steer
+// CI gating.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -1091,6 +1106,16 @@ func applyTestOverrides(dst *Test, src *TestRaw) {
 	if src.Evidence.Dir != nil && strings.TrimSpace(*src.Evidence.Dir) != "" {
 		dst.Evidence.Dir = strings.TrimSpace(*src.Evidence.Dir)
 	}
+}
+
+func resolveDesignContext(raw DesignContextRaw) DesignContext {
+	files := make([]string, 0, len(raw.Files))
+	for _, file := range raw.Files {
+		if trimmed := strings.TrimSpace(file); trimmed != "" {
+			files = append(files, trimmed)
+		}
+	}
+	return DesignContext{Files: files}
 }
 
 // resolveReview converts a raw review panel into its resolved form. FailOpen
@@ -1283,6 +1308,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		AutoFix:              af,
 		Intent:               intent,
 		Test:                 test,
+		DesignContext:        resolveDesignContext(repo.DesignContext),
 		Review:               review,
 		ReviewLoop:           reviewLoop,
 	}

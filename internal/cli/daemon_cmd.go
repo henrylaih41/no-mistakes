@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
+	"github.com/kunchenguid/no-mistakes/internal/designcontext"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -61,6 +62,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			designContextPaths, err := designcontext.ParsePushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 
 			p, err := paths.New()
 			if err != nil {
@@ -75,13 +80,14 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 
 			var result ipc.PushReceivedResult
 			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
-				Gate:      gate,
-				Ref:       ref,
-				Old:       oldSHA,
-				New:       newSHA,
-				SkipSteps: skipSteps,
-				Intent:    intent,
-				Route:     route,
+				Gate:               gate,
+				Ref:                ref,
+				Old:                oldSHA,
+				New:                newSHA,
+				SkipSteps:          skipSteps,
+				Intent:             intent,
+				Route:              route,
+				DesignContextPaths: designContextPaths,
 			}, &result)
 		},
 	}

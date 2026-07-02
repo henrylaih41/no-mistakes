@@ -77,6 +77,7 @@ An active run on another branch does not block starting validation for the curre
 ```sh
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
+no-mistakes axi run --intent "the user's goal" --design-context docs/design.md
 no-mistakes axi run --intent "the user's goal" --yes
 ```
 
@@ -85,6 +86,7 @@ no-mistakes axi run --intent "the user's goal" --yes
 | `--intent` | `string` | (none) | What the user set out to accomplish; required to start a new run |
 | `-y`, `--yes` | `bool` | `false` | Auto-resolve every gate until a decision point or outcome |
 | `--skip` | `string` | (none) | Comma-separated pipeline steps to skip |
+| `--design-context` | `string[]` | Empty | Repeatable path to a design-context text file for review and fix prompts |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
@@ -92,6 +94,11 @@ Err on the side of completeness: include the goal, important decisions and trade
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 `axi run` starts a run even when there are no new commits to push, including the first run for a branch the gate already mirrors but has never validated — for example a push whose hook notification was dropped while the daemon was down — rather than failing with `no previous run for branch`.
 Reattaching to an in-flight run does not require `--intent`.
+`--design-context` supplies run-scoped design notes, ADRs, issue agreements, or other text context that reviewers and fixers should check the implementation against.
+Relative paths resolve from the current working tree before the run is triggered; absolute paths are allowed because the flag is explicit local user input.
+The daemon reads those files once at run start and stores the materialized context on the run, so later review and fix rounds use the same contract even if the files change.
+Missing, unreadable, non-text, or invalid context files fail loudly instead of being silently ignored.
+Reattaching to an in-flight run does not add or replace its design context.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
