@@ -112,6 +112,58 @@ func TestMaterializeTotalCapUsesIncludedBytesNotOriginalSize(t *testing.T) {
 	}
 }
 
+func TestMaterializeBoundsReadForOversizeFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	big := MaxFileBytes * 4
+	writeFile(t, filepath.Join(root, "big.md"), strings.Repeat("x", big))
+
+	ctx, err := Materialize(root, nil, []string{"big.md"})
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+	if len(ctx.Files) != 1 {
+		t.Fatalf("files = %d, want 1", len(ctx.Files))
+	}
+	f := ctx.Files[0]
+	if !f.Truncated {
+		t.Fatal("expected oversize file to be truncated")
+	}
+	if f.OriginalBytes != int64(big) {
+		t.Fatalf("OriginalBytes = %d, want %d (true file size)", f.OriginalBytes, big)
+	}
+	if len(f.Content) > MaxFileBytes+512 {
+		t.Fatalf("content length = %d, want bounded near per-file cap (read must not load the whole file)", len(f.Content))
+	}
+}
+
+func TestMaterializeStopsAtByteCapWithoutPlaceholderBloat(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// Four MaxFileBytes files exactly fill the total cap.
+	for _, name := range []string{"a.md", "b.md", "c.md", "d.md"} {
+		writeFile(t, filepath.Join(root, name), strings.Repeat("x", MaxFileBytes))
+	}
+	// These sort after the cap-filling files and must be dropped entirely,
+	// not appended as "omitted" placeholder entries that bloat run state.
+	for _, name := range []string{"e.md", "f.md", "g.md", "h.md"} {
+		writeFile(t, filepath.Join(root, name), "later")
+	}
+
+	ctx, err := Materialize(root, nil, []string{"*.md"})
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+	if len(ctx.Files) != 4 {
+		t.Fatalf("files = %d, want 4 (cap reached, remainder dropped)", len(ctx.Files))
+	}
+	for _, f := range ctx.Files {
+		if strings.Contains(f.Content, "omitted because the total cap") {
+			t.Fatalf("unexpected placeholder entry after cap: %q", f.Content)
+		}
+	}
+}
+
 func TestPushOptionRoundTrip(t *testing.T) {
 	t.Parallel()
 	paths := []string{"/tmp/a.md", "/tmp/b.md"}

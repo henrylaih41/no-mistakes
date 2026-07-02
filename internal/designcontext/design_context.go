@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,6 +101,9 @@ func Materialize(workDir string, cliPaths, repoSelectors []string) (types.Design
 	files := make([]types.DesignContextFile, 0, len(refs))
 	total := 0
 	for _, ref := range refs {
+		if total >= MaxTotalBytes {
+			break
+		}
 		if seen[ref.canonical] {
 			continue
 		}
@@ -222,29 +226,39 @@ func canonicalRegularFile(path string) (string, error) {
 }
 
 func readTextFile(source, path string, totalBefore int) (types.DesignContextFile, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return types.DesignContextFile{}, fmt.Errorf("read design context %q: %w", source, err)
-	}
-	if !utf8.Valid(data) {
-		return types.DesignContextFile{}, fmt.Errorf("design context %q is not valid UTF-8", source)
-	}
-	text := string(data)
 	limit := MaxFileBytes
 	if remaining := MaxTotalBytes - totalBefore; remaining < limit {
 		limit = remaining
 	}
-	file := types.DesignContextFile{
-		Source:        source,
-		OriginalBytes: int64(len(data)),
-	}
+	file := types.DesignContextFile{Source: source}
 	if limit <= 0 {
 		file.Content = fmt.Sprintf("[no-mistakes: design context omitted because the total cap of %d bytes was reached before this file]", MaxTotalBytes)
 		file.Truncated = true
 		return file, nil
 	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return types.DesignContextFile{}, fmt.Errorf("read design context %q: %w", source, err)
+	}
+	defer f.Close()
+	if info, statErr := f.Stat(); statErr == nil {
+		file.OriginalBytes = info.Size()
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	if err != nil {
+		return types.DesignContextFile{}, fmt.Errorf("read design context %q: %w", source, err)
+	}
+	if int64(len(data)) > file.OriginalBytes {
+		file.OriginalBytes = int64(len(data))
+	}
+	if !utf8.Valid(data) {
+		return types.DesignContextFile{}, fmt.Errorf("design context %q is not valid UTF-8", source)
+	}
+	text := string(data)
 	if len(text) > limit {
-		file.Content = safePrefix(text, limit) + fmt.Sprintf("\n\n[no-mistakes: design context truncated at %d bytes; original file was %d bytes]", limit, len(data))
+		file.Content = safePrefix(text, limit) + fmt.Sprintf("\n\n[no-mistakes: design context truncated at %d bytes; original file was %d bytes]", limit, file.OriginalBytes)
 		file.Truncated = true
 		return file, nil
 	}
