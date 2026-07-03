@@ -39,6 +39,17 @@ const (
 	// ReReviewingMsg is logged after a fix push while the review bot re-reviews
 	// the new head SHA; the PR is not ready to merge until that re-review lands.
 	ReReviewingMsg = "Devin re-reviewing new commit"
+	// ReviewBodyAmbiguousMsg is logged when the review bot reviewed the current
+	// head SHA with a COMMENTED state whose top-level body carries no recognizable
+	// clean/finding verdict and no severe findings loaded. It stays on the
+	// pending/fail-open path, but the explicit reason lets an agent tell it apart
+	// from "the bot has not reviewed this head yet".
+	ReviewBodyAmbiguousMsg = "Devin review body ambiguous - awaiting a recognizable verdict for the current commit"
+	// ReviewManualVerifyMsg is logged when the review bot's body reports findings
+	// on the current head SHA but no file-scoped review threads could be loaded to
+	// drive an automated fix; the run parks for a human to verify rather than
+	// letting the fixer fabricate changes for a problem it cannot see.
+	ReviewManualVerifyMsg = "Devin review body reports findings but no file-scoped threads loaded - manual verification required"
 )
 
 // Activity summarizes what the CI step has been doing, derived from its logs.
@@ -84,9 +95,12 @@ func ParseActivity(logs []string) Activity {
 			a.Ready = false
 			a.LastEvent = line
 		case strings.Contains(line, WaitingOnReviewMsg),
-			strings.Contains(line, ReReviewingMsg):
+			strings.Contains(line, ReReviewingMsg),
+			strings.Contains(line, ReviewBodyAmbiguousMsg),
+			strings.Contains(line, ReviewManualVerifyMsg):
 			// Checks may be green, but the review verdict for the current head
-			// is still pending/in-flight, so the PR is not ready to merge.
+			// is still pending/in-flight/ambiguous, or the run has parked for a
+			// human to verify — so the PR is not ready to merge.
 			a.AutoFixing = false
 			a.Ready = false
 			a.LastEvent = line

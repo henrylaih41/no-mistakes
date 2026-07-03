@@ -250,6 +250,29 @@ func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline
 	}
 }
 
+// devinManualReviewOutcome parks the run at the human approval gate when the
+// review bot signals a problem on the current head SHA but no concrete
+// file-scoped findings could be loaded to auto-fix (its body reports findings
+// yet the inline threads are missing, or it used a native CHANGES_REQUESTED
+// state with no inline comments). It deliberately does NOT synthesize or
+// fabricate any file-scoped finding summary — it surfaces the single, honest
+// reason and hands the decision to a human (ruling #11).
+func devinManualReviewOutcome(reason string) *pipeline.StepOutcome {
+	findings := Findings{
+		Summary: reason,
+		Items: []Finding{{
+			Severity:    "warning",
+			Description: reason,
+			Action:      types.ActionAskUser,
+		}},
+	}
+	findingsJSON, _ := json.Marshal(findings)
+	return &pipeline.StepOutcome{
+		NeedsApproval: true,
+		Findings:      string(findingsJSON),
+	}
+}
+
 func ciMergeabilityOutcome(summary, description string) *pipeline.StepOutcome {
 	findings := Findings{
 		Summary: summary,

@@ -40,12 +40,22 @@ const (
 	// devinDecisionNotGreen means the bot requested changes / left unresolved
 	// severe findings on the current head SHA; no-mistakes should fix them.
 	devinDecisionNotGreen
+	// devinDecisionManualReview means the bot's body reports findings on the
+	// current head SHA but no file-scoped findings could be loaded to drive an
+	// automated fix. The loop must escalate to a human rather than run the fixer,
+	// which would fabricate changes for a problem it cannot see (ruling #11).
+	devinDecisionManualReview
 	// devinDecisionGreen means the bot reviewed the current head SHA and left no
 	// unresolved severe findings.
 	devinDecisionGreen
 	// devinDecisionFailOpen means the bot stayed silent past the grace window and
 	// fail-open is configured: proceed on checks-only green with a loud log.
 	devinDecisionFailOpen
+	// devinDecisionPendingAmbiguous is a pending state (same waiting/fail-open
+	// behavior as devinDecisionPending) that additionally signals the bot
+	// reviewed the current head with a COMMENTED body that carried no recognizable
+	// verdict, so the caller logs an explicit "ambiguous body" reason.
+	devinDecisionPendingAmbiguous
 )
 
 // evalDevinGate maps a review verdict + findings + loop config + elapsed time
@@ -77,17 +87,49 @@ func evalDevinGate(verdict scm.ReviewVerdict, findings []scm.ReviewComment, cfg 
 	if verdict == scm.VerdictApproved {
 		return devinDecisionGreen
 	}
-	// PENDING or NONE: the bot has not reviewed this head. Stale findings from
-	// older heads must not drive a fix — wait for the re-review.
+	if verdict == scm.VerdictManualReview {
+		// The body reports findings on this head but no file-scoped threads could
+		// be loaded to fix. Give inline threads the grace window to propagate;
+		// once it elapses with the discrepancy unresolved, escalate to a human.
+		// This state NEVER fails open to green and NEVER runs the fixer (ruling
+		// #11) — those would either merge or fabricate around an unread finding.
+		if elapsed < devinGraceWindow {
+			return devinDecisionPending
+		}
+		return devinDecisionManualReview
+	}
+	// PENDING / PENDING_AMBIGUOUS / NONE: the bot has not posted a usable verdict
+	// for this head. Stale findings from older heads must not drive a fix — wait
+	// for the re-review. Ambiguous is a distinct pending value only so the caller
+	// can log why it is waiting; its wait/fail-open behavior is identical.
+	pending := devinDecisionPending
+	if verdict == scm.VerdictPendingAmbiguous {
+		pending = devinDecisionPendingAmbiguous
+	}
 	if elapsed < devinGraceWindow {
-		return devinDecisionPending
+		return pending
 	}
 	if cfg.FailOpen {
 		return devinDecisionFailOpen
 	}
 	// Fail-closed: keep waiting. The CI step's idle timeout eventually escalates
 	// to the human gate rather than silently merging without a review.
-	return devinDecisionPending
+	return pending
+}
+
+// hasActionableDevinFindings reports whether at least one finding carries body
+// text the fixer could act on. It mirrors devinFindingsPromptSection's inclusion
+// rule (non-empty body). When it is false there is nothing concrete to fix, so
+// the fixer must NOT run: autoFixCI would otherwise fall back to its "CI checks
+// failed - you MUST produce changes" prompt and fabricate edits for a problem it
+// cannot see (ruling #11). The caller escalates to a human instead.
+func hasActionableDevinFindings(findings []scm.ReviewComment) bool {
+	for _, f := range findings {
+		if strings.TrimSpace(f.Body) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // hasUnresolvedSevereFindings reports whether any finding is a severe
@@ -285,6 +327,14 @@ func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, 
 	if !forced && fixKey != "" && fixKey == s.devinFixKey() {
 		sctx.Log(cimonitor.ReReviewingMsg)
 		return nil
+	}
+	// Never run the fixer with nothing concrete to fix (e.g. a native
+	// CHANGES_REQUESTED state that carries no inline findings). autoFixCI would
+	// fall back to its "CI checks failed" prompt and fabricate edits for a
+	// problem it cannot see (ruling #11); escalate to a human instead.
+	if !hasActionableDevinFindings(findings) {
+		sctx.Log(cimonitor.ReviewManualVerifyMsg)
+		return devinManualReviewOutcome(cimonitor.ReviewManualVerifyMsg)
 	}
 	maxRounds := sctx.Config.ReviewLoop.MaxRounds
 	rounds := s.devinRounds()

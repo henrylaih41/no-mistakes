@@ -701,14 +701,20 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 //   - NONE: the bot has never reviewed the PR.
 //   - PENDING: the bot has reviewed before but not yet headSHA.
 //   - CHANGES_REQUESTED: the bot reviewed headSHA and EITHER its MOST RECENT
-//     review on the matching head is a native CHANGES_REQUESTED state, its
-//     top-level body says it found potential issues, OR it left at least one
-//     severe (high/medium) LIVE file-scoped finding.
+//     review on the matching head is a native CHANGES_REQUESTED state, OR it left
+//     at least one severe (high/medium) LIVE file-scoped finding.
+//   - MANUAL_REVIEW: the bot reviewed headSHA and its top-level body reports
+//     findings ("found N potential issues"), but no severe LIVE file-scoped
+//     finding could be loaded to drive an automated fix (threads missing,
+//     filtered to another commit, or unreadable). Not green, never auto-fixed:
+//     a human must verify rather than have the fixer fabricate changes.
 //   - APPROVED: the bot reviewed headSHA, its most recent head review is native
 //     APPROVED or its top-level body says "No Issues Found", and no severe LIVE
 //     file-scoped findings remain.
-//   - PENDING: the bot reviewed headSHA with a COMMENTED state whose body does
-//     not carry a recognized clean/finding verdict yet.
+//   - PENDING_AMBIGUOUS: the bot reviewed headSHA with a COMMENTED state whose
+//     body carries no recognized clean/finding verdict and no severe findings
+//     loaded. Handled like PENDING (grace/fail-open) but distinguishable so the
+//     caller can log an explicit "ambiguous body" reason.
 //
 // Only the MOST RECENT bot review targeting the head (by submitted_at) decides
 // the native state: a bot that requested changes and then re-reviewed the same
@@ -789,15 +795,18 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 	}
 
 	bodyVerdict := devinReviewBodyVerdict(latestHeadBody)
-	if bodyVerdict == reviewBodyFindings {
-		headChangesRequested = true
-	}
 	findings, err := h.GetBotFindings(ctx, prNumber, headSHA, botLogin)
 	if err != nil {
 		// A native CHANGES_REQUESTED on the head is authoritative from the review
-		// state/body alone, so surface not-green even when the findings read fails.
+		// state alone, so surface not-green even when the findings read fails.
 		if headChangesRequested {
 			return scm.VerdictChangesRequested, nil, nil
+		}
+		// The body reports findings but we could not even load them: this is not
+		// green and must not be treated as a silent read error (which the caller
+		// would fail open on). Escalate to a human instead of dropping the signal.
+		if bodyVerdict == reviewBodyFindings {
+			return scm.VerdictManualReview, nil, nil
 		}
 		return "", nil, err
 	}
@@ -815,10 +824,19 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 			return scm.VerdictChangesRequested, findings, nil
 		}
 	}
+	// The body reports findings but none loaded as a severe file-scoped finding
+	// (threads missing/filtered/unresolved). This is not green, but there is
+	// nothing concrete to auto-fix — a human must verify.
+	if bodyVerdict == reviewBodyFindings {
+		return scm.VerdictManualReview, findings, nil
+	}
 	if headNativeApproved || bodyVerdict == reviewBodyClean {
 		return scm.VerdictApproved, findings, nil
 	}
-	return scm.VerdictPending, findings, nil
+	// Reviewed the current head with a COMMENTED state but no recognizable
+	// verdict: distinct from "has not reviewed this head yet" so the caller can
+	// log an explicit ambiguous-body reason. Behaves like PENDING downstream.
+	return scm.VerdictPendingAmbiguous, findings, nil
 }
 
 func sameCommitSHA(reviewSHA, headSHA string) bool {

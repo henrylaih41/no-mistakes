@@ -589,11 +589,12 @@ func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		body   string
-		want   scm.ReviewVerdict
-		head   string
-		commit string
+		name    string
+		body    string
+		want    scm.ReviewVerdict
+		head    string
+		commit  string
+		threads []string
 	}{
 		{
 			name:   "no issues body marks commented review green",
@@ -603,16 +604,30 @@ func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
 			commit: headSHA + "999999",
 		},
 		{
-			name:   "findings body is not green even when threads are missing",
+			// The body reports findings but no file-scoped threads loaded: not
+			// green, but routed to a manual-review gate (never the auto-fixer)
+			// so the fixer cannot fabricate changes for a problem it cannot see.
+			name:   "findings body with no loaded threads needs manual review",
 			body:   "## ⚠️ Devin Review: Found 2 potential issues",
-			want:   scm.VerdictChangesRequested,
+			want:   scm.VerdictManualReview,
 			head:   headSHA,
 			commit: headSHA,
 		},
 		{
-			name:   "ambiguous body stays pending",
+			// The body reports findings AND severe file-scoped threads loaded:
+			// this is actionable, so it stays CHANGES_REQUESTED (the fixer runs
+			// with real findings), never the manual-review gate.
+			name:    "findings body with severe threads is changes requested",
+			body:    "## ⚠️ Devin Review: Found 2 potential issues",
+			want:    scm.VerdictChangesRequested,
+			head:    headSHA,
+			commit:  headSHA,
+			threads: liveThreads(),
+		},
+		{
+			name:   "ambiguous body stays pending (ambiguous)",
 			body:   "## Devin Review\nI looked at this change.",
-			want:   scm.VerdictPending,
+			want:   scm.VerdictPendingAmbiguous,
 			head:   headSHA,
 			commit: headSHA,
 		},
@@ -631,7 +646,7 @@ func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
 				"gh api repos/test/repo/pulls/7/reviews --paginate": {
 					stdout: fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"body":%q,"user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, tt.commit, tt.body) + "\n",
 				},
-				graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
+				graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(tt.threads...),
 			}), nil, "test/repo")
 
 			verdict, _, err := host.GetReviewVerdict(context.Background(), 7, tt.head, botUser)
@@ -642,6 +657,35 @@ func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
 				t.Fatalf("GetReviewVerdict() = %q, want %q", verdict, tt.want)
 			}
 		})
+	}
+}
+
+// TestGetReviewVerdictFindingsBodyWithReadErrorNeedsManualReview locks the
+// fail-safe for the literal "threads failed to load" case: the review body
+// reports findings on the current head but the GetBotFindings read errors. That
+// must NOT collapse to a raw error (which the CI loop treats as "not yet
+// reviewed" and can fail open on) — it must surface VerdictManualReview so the
+// run parks for a human instead of silently dropping a not-green signal.
+func TestGetReviewVerdictFindingsBodyWithReadErrorNeedsManualReview(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/pulls/7/reviews --paginate": {
+			stdout: fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"body":"## ⚠️ Devin Review: Found 3 potential issues","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, headSHA) + "\n",
+		},
+		// The reviewThreads read fails (non-zero exit) -> GetBotFindings errors.
+		graphqlThreadsKey("test/repo", 7): {stderr: "graphql: rate limited\n", code: 1},
+	}), nil, "test/repo")
+
+	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
+	if err != nil {
+		t.Fatalf("GetReviewVerdict() error = %v, want nil (findings read error with a findings body must not propagate)", err)
+	}
+	if verdict != scm.VerdictManualReview {
+		t.Fatalf("GetReviewVerdict() = %q, want %q (findings body + unreadable threads -> manual review)", verdict, scm.VerdictManualReview)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("GetReviewVerdict() findings = %d, want 0 (none could be loaded)", len(findings))
 	}
 }
 

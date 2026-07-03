@@ -476,8 +476,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				}
 			}
 			devinNotGreen := devinDecision == devinDecisionNotGreen
+			// The review body reports findings on this head but no file-scoped
+			// threads loaded to fix: a human must verify. Folded into hasIssues so
+			// it is not mistaken for "checks passed, ready to merge", but routed to
+			// a park (never the fixer) below.
+			devinManualReview := devinDecision == devinDecisionManualReview
 
-			hasIssues := hasFailures || mergeConflict || devinNotGreen
+			hasIssues := hasFailures || mergeConflict || devinNotGreen || devinManualReview
 			timeoutFailingChecks = append(timeoutFailingChecks[:0], failing...)
 
 			// If a failing check completed after our last fix push, CI has
@@ -515,7 +520,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						issueDesc = "merge conflict"
 					}
 				}
-				if loopActive && devinNotGreen && !hasFailures && !mergeConflict {
+				if loopActive && devinManualReview && !hasFailures && !mergeConflict {
+					// Checks are clean but the review bot reported findings on this
+					// head that we could not load as file-scoped threads. There is
+					// nothing concrete to auto-fix, so park at the human gate with an
+					// explicit reason instead of running the fixer (which would
+					// fabricate changes for a problem it cannot see, ruling #11).
+					lastMonitorLog = ""
+					sctx.Log(cimonitor.ReviewManualVerifyMsg)
+					return devinManualReviewOutcome(cimonitor.ReviewManualVerifyMsg), nil
+				} else if loopActive && devinNotGreen && !hasFailures && !mergeConflict {
 					// Checks are clean but the review bot requested changes:
 					// run a bounded review-loop fix round. Anti-thrash keys on
 					// (headSHA, finding fingerprints) so a pushed fix waits for
@@ -593,6 +607,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						reviewMsg = cimonitor.ReReviewingMsg
 					}
 					lastMonitorLog = logCIMonitorStatus(sctx, reviewMsg, lastMonitorLog)
+				case loopActive && devinDecision == devinDecisionPendingAmbiguous:
+					// Checks are clean and the bot reviewed the current head, but its
+					// body carried no recognizable verdict. Not ready to merge; the
+					// explicit reason lets an agent tell this apart from "no review
+					// yet" (it still fails open past the grace window per config).
+					lastMonitorLog = logCIMonitorStatus(sctx, cimonitor.ReviewBodyAmbiguousMsg, lastMonitorLog)
 				case len(checks) == 0 && elapsed < s.gracePeriod():
 					// CI checks may not be registered yet, keep polling.
 					lastMonitorLog = ""

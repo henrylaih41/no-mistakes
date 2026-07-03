@@ -115,6 +115,18 @@ func TestEvalDevinGate(t *testing.T) {
 		{"disabled is inert", scm.VerdictChangesRequested, []scm.ReviewComment{severeFinding()}, disabled, time.Hour, devinDecisionDisabled},
 		{"approved is green", scm.VerdictApproved, nil, enabled, time.Hour, devinDecisionGreen},
 		{"changes requested is not green", scm.VerdictChangesRequested, nil, enabled, time.Minute, devinDecisionNotGreen},
+		// MANUAL_REVIEW: body reports findings but no threads loaded. Within grace
+		// we wait (threads may still propagate); past grace we escalate to a human
+		// and NEVER fail open to green, even with FailOpen configured.
+		{"manual review within grace waits", scm.VerdictManualReview, nil, enabled, devinGraceWindow - time.Minute, devinDecisionPending},
+		{"manual review past grace escalates", scm.VerdictManualReview, nil, enabled, devinGraceWindow + time.Minute, devinDecisionManualReview},
+		{"manual review past grace never fails open", scm.VerdictManualReview, nil, failClosed, devinGraceWindow + time.Minute, devinDecisionManualReview},
+		// PENDING_AMBIGUOUS: reviewed the head with an unrecognized body. Same
+		// wait/fail-open behavior as PENDING, but a distinct decision within grace
+		// so the caller can log the explicit ambiguous reason.
+		{"ambiguous within grace is distinct pending", scm.VerdictPendingAmbiguous, nil, enabled, time.Minute, devinDecisionPendingAmbiguous},
+		{"ambiguous past grace fails open", scm.VerdictPendingAmbiguous, nil, enabled, devinGraceWindow + time.Minute, devinDecisionFailOpen},
+		{"ambiguous past grace fail-closed keeps waiting", scm.VerdictPendingAmbiguous, nil, failClosed, devinGraceWindow + time.Minute, devinDecisionPendingAmbiguous},
 		// PR #5 regression: a PENDING verdict means Devin has NOT reviewed the
 		// current head. The findings returned alongside a PENDING verdict are from
 		// GetBotFindings, which does NOT filter by head SHA — so they are STALE
@@ -417,6 +429,40 @@ func TestEvalDevinReview_VerdictToDecision(t *testing.T) {
 	}
 }
 
+// TestEvalDevinReview_ManualReviewAndAmbiguous verifies the read-layer verdicts
+// added for nm#20 flow through evalDevinReview to their decisions: a
+// MANUAL_REVIEW verdict past the grace window becomes devinDecisionManualReview
+// (a human gate, never the fixer), and a PENDING_AMBIGUOUS verdict becomes the
+// distinct devinDecisionPendingAmbiguous so the caller logs why it is waiting.
+func TestEvalDevinReview_ManualReviewAndAmbiguous(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, BotLogin: "bot", MaxRounds: 3, FailOpen: true}
+	pr := &scm.PR{Number: "42"}
+
+	t.Run("manual review past grace escalates", func(t *testing.T) {
+		host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}, verdict: scm.VerdictManualReview}
+		current := time.Unix(0, 0)
+		step := &CIStep{now: func() time.Time { return current }}
+		sctx := newReviewTestContext(cfg, "head", func(string) {})
+		if d, _ := step.evalDevinReview(sctx, host, pr); d != devinDecisionPending {
+			t.Fatalf("within grace: want pending (wait for threads), got %v", d)
+		}
+		current = current.Add(devinGraceWindow + time.Minute)
+		if d, _ := step.evalDevinReview(sctx, host, pr); d != devinDecisionManualReview {
+			t.Fatalf("past grace: want manualReview, got %v", d)
+		}
+	})
+
+	t.Run("ambiguous body is distinct pending", func(t *testing.T) {
+		host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}, verdict: scm.VerdictPendingAmbiguous}
+		step := &CIStep{now: func() time.Time { return time.Unix(0, 0) }}
+		sctx := newReviewTestContext(cfg, "head", func(string) {})
+		if d, _ := step.evalDevinReview(sctx, host, pr); d != devinDecisionPendingAmbiguous {
+			t.Fatalf("ambiguous within grace: want pendingAmbiguous, got %v", d)
+		}
+	})
+}
+
 func TestEvalDevinReview_DefaultsBotLoginAndVerdictReadError(t *testing.T) {
 	t.Parallel()
 	cfg := config.ReviewLoop{Enabled: true, BotLogin: "", MaxRounds: 3, FailOpen: true}
@@ -530,6 +576,39 @@ func TestHandleDevinFixRound_EscalatesAtMaxRounds(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "escalating for manual review") {
 		t.Fatalf("expected escalation log, got: %v", logs)
+	}
+}
+
+// TestHandleDevinFixRound_NoActionableFindingsEscalatesWithoutFixing locks the
+// ruling #11 guard: a not-green state with no actionable findings (e.g. a native
+// CHANGES_REQUESTED with no inline comments) must escalate to a human gate
+// WITHOUT invoking the fixer — autoFixCI would otherwise fall back to its "CI
+// checks failed - you MUST produce changes" prompt and fabricate edits for a
+// problem it cannot see. The agent must never run and no round is consumed.
+func TestHandleDevinFixRound_NoActionableFindingsEscalatesWithoutFixing(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+	var logs []string
+	sctx := newReviewTestContext(cfg, "head", func(s string) { logs = append(logs, s) })
+	sctx.Agent = &mockAgent{runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("fixer agent must not run when there are no actionable findings")
+		return nil, nil
+	}}
+	step := &CIStep{}
+
+	// Findings with no body text (e.g. a native CHANGES_REQUESTED that carried no
+	// inline comments) are not actionable.
+	for _, findings := range [][]scm.ReviewComment{nil, {{Path: "a.go", Line: 1, Severity: "high"}}} {
+		outcome := step.handleDevinFixRound(sctx, &fakeReviewHost{}, &scm.PR{Number: "9"}, findings, "freshkey", nil, false)
+		if outcome == nil || !outcome.NeedsApproval {
+			t.Fatalf("expected manual-review escalation, got %+v", outcome)
+		}
+		if step.devinFixRounds != 0 {
+			t.Fatalf("no round should be consumed when there is nothing to fix, got %d", step.devinFixRounds)
+		}
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "manual verification required") {
+		t.Fatalf("expected a manual-verification log, got: %v", logs)
 	}
 }
 
