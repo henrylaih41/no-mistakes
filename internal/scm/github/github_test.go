@@ -588,6 +588,12 @@ func TestGetReviewVerdictConvergesWhenSevereThreadsAddressed(t *testing.T) {
 func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
 	t.Parallel()
 
+	// A realistic full-length (40 hex char) head SHA plus the 7-char abbreviation
+	// GitHub's REST API sometimes reports as a review's commit_id. sameCommitSHA
+	// must recognize the abbreviation as the same commit.
+	fullHeadSHA := "abc123def" + strings.Repeat("0", 31)
+	abbrevCommitID := fullHeadSHA[:7]
+
 	tests := []struct {
 		name    string
 		body    string
@@ -597,11 +603,21 @@ func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
 		threads []string
 	}{
 		{
-			name:   "no issues body marks commented review green",
+			name:   "no issues body marks commented review green (abbreviated review commit_id)",
 			body:   "## ✅ Devin Review: No Issues Found",
 			want:   scm.VerdictApproved,
+			head:   fullHeadSHA,
+			commit: abbrevCommitID,
+		},
+		{
+			// The zero-count complement of the "found N potential issues" findings
+			// template: an explicit "Found 0" is unambiguously clean and must green,
+			// not fall through to an ambiguous/pending verdict.
+			name:   "found zero potential issues body marks commented review green",
+			body:   "## ✅ Devin Review: Found 0 potential issues",
+			want:   scm.VerdictApproved,
 			head:   headSHA,
-			commit: headSHA + "999999",
+			commit: headSHA,
 		},
 		{
 			// The body reports findings but no file-scoped threads loaded: not
@@ -655,6 +671,74 @@ func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
 			}
 			if verdict != tt.want {
 				t.Fatalf("GetReviewVerdict() = %q, want %q", verdict, tt.want)
+			}
+		})
+	}
+}
+
+// TestSameCommitSHA locks the safe-abbreviation semantics: an exact match or a
+// genuine git abbreviation of a full-length object id is the same commit, but two
+// arbitrary partial strings sharing a prefix (or non-hex text) never are — a
+// false positive would scope the review verdict to the wrong commit.
+func TestSameCommitSHA(t *testing.T) {
+	t.Parallel()
+
+	full := "abc123def" + strings.Repeat("0", 31)       // 40 hex (SHA-1)
+	otherFull := "abc123def" + strings.Repeat("1", 31)  // shares 9-char prefix with full
+	full256 := "abc123def456" + strings.Repeat("0", 52) // 64 hex (SHA-256)
+
+	cases := []struct {
+		name      string
+		reviewSHA string
+		headSHA   string
+		want      bool
+	}{
+		{"exact full match", full, full, true},
+		{"exact short match", "abc123def", "abc123def", true},
+		{"abbreviated review commit_id prefixes full head", full[:7], full, true},
+		{"abbreviated head prefixes full review commit_id", full, full[:7], true},
+		{"sha256 abbreviation of full head", full256[:12], full256, true},
+		{"case and whitespace insensitive", "  ABC123DEF" + strings.Repeat("0", 31) + " ", full, true},
+		{"two distinct full SHAs sharing a prefix never match", full, otherFull, false},
+		{"two mid-length partials sharing a 7-char prefix never match", "abc123def12", "abc123def99", false},
+		{"non-hex prefix of a full head never matches", "abc123z", full, false},
+		{"prefix shorter than 7 never matches", full[:6], full, false},
+		{"long side not a full-length SHA never matches", "abc123def", "abc123def999999", false},
+		{"empty review sha", "", full, false},
+		{"empty head sha", full, "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameCommitSHA(tc.reviewSHA, tc.headSHA); got != tc.want {
+				t.Fatalf("sameCommitSHA(%q, %q) = %v, want %v", tc.reviewSHA, tc.headSHA, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDevinReviewBodyVerdict locks the body → verdict mapping, including the
+// zero-count clean complement of the "found N potential issues" template.
+func TestDevinReviewBodyVerdict(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		body string
+		want reviewBodyVerdict
+	}{
+		{"no issues found is clean", "## ✅ Devin Review: No Issues Found", reviewBodyClean},
+		{"found zero potential issues is clean", "## ✅ Devin Review: Found 0 potential issues", reviewBodyClean},
+		{"found N potential issues is findings", "## ⚠️ Devin Review: Found 2 potential issues", reviewBodyFindings},
+		{"found one potential issue is findings", "Found 1 potential issue", reviewBodyFindings},
+		{"unrecognized body is unknown", "## Devin Review\nI looked at this change.", reviewBodyUnknown},
+		{"empty body is unknown", "", reviewBodyUnknown},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := devinReviewBodyVerdict(tc.body); got != tc.want {
+				t.Fatalf("devinReviewBodyVerdict(%q) = %v, want %v", tc.body, got, tc.want)
 			}
 		})
 	}

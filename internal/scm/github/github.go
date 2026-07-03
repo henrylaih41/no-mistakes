@@ -839,6 +839,19 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 	return scm.VerdictPendingAmbiguous, findings, nil
 }
 
+// sameCommitSHA reports whether a review's commit_id and the run's head SHA name
+// the same commit. GitHub's REST API sometimes reports an abbreviated commit_id
+// on review objects, so an exact string match alone would miss a current-head
+// review and leave the verdict stuck at PENDING. A non-exact match is therefore
+// accepted, but ONLY as a genuine git abbreviation: both sides must be hex, the
+// shorter must be at least a 7-char (git's default) abbreviation, and the LONGER
+// must be a full-length object id (40 hex for SHA-1, 64 for SHA-256). Anchoring
+// the long side to a full-length SHA keeps this from ever collapsing two
+// arbitrary partial strings — or non-SHA text — into a false "same commit"; a
+// false positive would scope the review verdict to the wrong commit. Two
+// distinct full-length SHAs are equal-length and non-equal, so they never
+// prefix-match. Fails safe: when either operand is not a recognizable SHA, no
+// fuzzy match is attempted.
 func sameCommitSHA(reviewSHA, headSHA string) bool {
 	reviewSHA = strings.ToLower(strings.TrimSpace(reviewSHA))
 	headSHA = strings.ToLower(strings.TrimSpace(headSHA))
@@ -848,16 +861,35 @@ func sameCommitSHA(reviewSHA, headSHA string) bool {
 	if reviewSHA == headSHA {
 		return true
 	}
-	if len(reviewSHA) < 7 || len(headSHA) < 7 {
+	short, long := reviewSHA, headSHA
+	if len(short) > len(long) {
+		short, long = long, short
+	}
+	if len(short) < 7 || !isFullLengthSHA(long) || !isHexString(short) {
 		return false
 	}
-	if len(reviewSHA) > len(headSHA) {
-		return strings.HasPrefix(reviewSHA, headSHA)
+	return strings.HasPrefix(long, short)
+}
+
+// isHexString reports whether s is non-empty and composed solely of lowercase
+// hex digits. Callers lowercase before calling.
+func isHexString(s string) bool {
+	if s == "" {
+		return false
 	}
-	if len(headSHA) > len(reviewSHA) {
-		return strings.HasPrefix(headSHA, reviewSHA)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
 	}
-	return false
+	return true
+}
+
+// isFullLengthSHA reports whether s is a full-length git object id: 40 hex chars
+// for SHA-1 or 64 for SHA-256.
+func isFullLengthSHA(s string) bool {
+	return (len(s) == 40 || len(s) == 64) && isHexString(s)
 }
 
 type reviewBodyVerdict int
@@ -870,7 +902,13 @@ const (
 
 var (
 	reviewBodyNoIssuesRE = regexp.MustCompile(`(?i)\bno\s+issues?\s+found\b`)
-	reviewBodyFindingsRE = regexp.MustCompile(`(?i)\bfound\s+[1-9][0-9]*\s+potential\s+issues?\b`)
+	// reviewBodyZeroFoundRE is the explicit zero-count complement of the "found N
+	// potential issues" findings template: reviewBodyFindingsRE requires N>=1, so
+	// without this a clean "Found 0 potential issues" body would fall through to
+	// an ambiguous/pending verdict instead of green. A "0" count is unambiguously
+	// clean, so it can never false-green a real "found N" finding.
+	reviewBodyZeroFoundRE = regexp.MustCompile(`(?i)\bfound\s+0+\s+potential\s+issues?\b`)
+	reviewBodyFindingsRE  = regexp.MustCompile(`(?i)\bfound\s+[1-9][0-9]*\s+potential\s+issues?\b`)
 )
 
 func devinReviewBodyVerdict(body string) reviewBodyVerdict {
@@ -881,7 +919,7 @@ func devinReviewBodyVerdict(body string) reviewBodyVerdict {
 	if reviewBodyFindingsRE.MatchString(body) {
 		return reviewBodyFindings
 	}
-	if reviewBodyNoIssuesRE.MatchString(body) {
+	if reviewBodyNoIssuesRE.MatchString(body) || reviewBodyZeroFoundRE.MatchString(body) {
 		return reviewBodyClean
 	}
 	return reviewBodyUnknown
