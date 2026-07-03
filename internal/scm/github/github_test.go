@@ -564,7 +564,7 @@ func TestGetReviewVerdictConvergesWhenSevereThreadsAddressed(t *testing.T) {
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
+			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","body":"## ✅ Devin Review: No Issues Found","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		// Two severe bot threads, but both are addressed: one outdated, one resolved.
 		// No live severe finding remains.
@@ -582,6 +582,66 @@ func TestGetReviewVerdictConvergesWhenSevereThreadsAddressed(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Fatalf("GetReviewVerdict() findings = %d, want 0 (no live findings remain): %+v", len(findings), findings)
+	}
+}
+
+func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		body   string
+		want   scm.ReviewVerdict
+		head   string
+		commit string
+	}{
+		{
+			name:   "no issues body marks commented review green",
+			body:   "## ✅ Devin Review: No Issues Found",
+			want:   scm.VerdictApproved,
+			head:   headSHA,
+			commit: headSHA + "999999",
+		},
+		{
+			name:   "findings body is not green even when threads are missing",
+			body:   "## ⚠️ Devin Review: Found 2 potential issues",
+			want:   scm.VerdictChangesRequested,
+			head:   headSHA,
+			commit: headSHA,
+		},
+		{
+			name:   "ambiguous body stays pending",
+			body:   "## Devin Review\nI looked at this change.",
+			want:   scm.VerdictPending,
+			head:   headSHA,
+			commit: headSHA,
+		},
+		{
+			name:   "stale clean body stays pending",
+			body:   "## ✅ Devin Review: No Issues Found",
+			want:   scm.VerdictPending,
+			head:   headSHA,
+			commit: "0000oldsha",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh api repos/test/repo/pulls/7/reviews --paginate": {
+					stdout: fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"body":%q,"user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, tt.commit, tt.body) + "\n",
+				},
+				graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
+			}), nil, "test/repo")
+
+			verdict, _, err := host.GetReviewVerdict(context.Background(), 7, tt.head, botUser)
+			if err != nil {
+				t.Fatalf("GetReviewVerdict() error = %v", err)
+			}
+			if verdict != tt.want {
+				t.Fatalf("GetReviewVerdict() = %q, want %q", verdict, tt.want)
+			}
+		})
 	}
 }
 

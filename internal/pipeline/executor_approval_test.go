@@ -122,6 +122,74 @@ func TestExecutor_AwaitingAgentMarkerSetOnGateClearedOnRespond(t *testing.T) {
 	}
 }
 
+func TestExecutor_AutoApprovesParkedGateWhenResolverPasses(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	resolverCalls := make(chan struct{}, 1)
+	step := &adaptiveCallStep{
+		name: types.StepCI,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"severity":"warning","description":"PR was still open when CI monitoring timed out","action":"ask-user"}],"summary":"CI monitoring timed out before PR was merged or closed"}`,
+				ApprovalAutoResolve: func(context.Context) bool {
+					select {
+					case resolverCalls <- struct{}{}:
+					default:
+					}
+					return true
+				},
+				ApprovalAutoResolveInterval: time.Millisecond,
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step, newPassStep(types.StepTest)}, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, workDir)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("executor error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor did not auto-approve parked gate")
+	}
+
+	select {
+	case <-resolverCalls:
+	default:
+		t.Fatal("expected approval auto-resolver to run")
+	}
+
+	dbRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if dbRun.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, want %s", dbRun.Status, types.RunCompleted)
+	}
+	if dbRun.AwaitingAgentSince != nil {
+		t.Fatalf("AwaitingAgentSince = %d after auto-approval, want nil", *dbRun.AwaitingAgentSince)
+	}
+
+	dbSteps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	if dbSteps[0].Status != types.StepStatusCompleted {
+		t.Fatalf("ci step status = %s, want %s", dbSteps[0].Status, types.StepStatusCompleted)
+	}
+	if dbSteps[1].Status != types.StepStatusCompleted {
+		t.Fatalf("test step status = %s, want %s", dbSteps[1].Status, types.StepStatusCompleted)
+	}
+}
+
 func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

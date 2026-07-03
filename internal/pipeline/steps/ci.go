@@ -10,8 +10,10 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -90,6 +92,74 @@ func (s *CIStep) gracePeriod() time.Duration {
 		return s.checksGracePeriod
 	}
 	return defaultChecksGracePeriod
+}
+
+func ciPRClosedAutoResolver(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) func(context.Context) bool {
+	return func(ctx context.Context) bool {
+		state, err := host.GetPRState(ctx, pr)
+		if err != nil {
+			if ctx.Err() == nil && sctx.Log != nil {
+				sctx.Log(fmt.Sprintf("warning: could not re-check PR state while CI gate is parked: %v", err))
+			}
+			return false
+		}
+		switch state {
+		case scm.PRStateMerged:
+			if sctx.Log != nil {
+				sctx.Log("PR has been merged after CI timeout; clearing parked CI gate")
+			}
+			return true
+		case scm.PRStateClosed:
+			if sctx.Log != nil {
+				sctx.Log("PR has been closed after CI timeout; clearing parked CI gate")
+			}
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+type reviewLoopActivation struct {
+	active bool
+	reason string
+}
+
+func reviewLoopForRun(sctx *pipeline.StepContext, host scm.Host) reviewLoopActivation {
+	if sctx == nil || sctx.Config == nil {
+		return reviewLoopActivation{}
+	}
+	cfg := sctx.Config.ReviewLoop
+	if sctx.Run != nil && sctx.Run.ReviewLoopDisabled {
+		return reviewLoopActivation{reason: "review loop disabled for this run via no-mistakes.review-loop=off; CI monitoring continues without Devin"}
+	}
+	if !reviewLoopActive(cfg, host) {
+		return reviewLoopActivation{}
+	}
+	if reason := reviewLoopApplicabilitySkipReason(sctx.Repo); reason != "" {
+		return reviewLoopActivation{reason: reason}
+	}
+	return reviewLoopActivation{active: true}
+}
+
+func reviewLoopApplicabilitySkipReason(repo *db.Repo) string {
+	if repo == nil || strings.TrimSpace(repo.ForkURL) == "" {
+		return ""
+	}
+	baseSlug := github.RepoSlug(repo.UpstreamURL)
+	forkSlug := github.RepoSlug(repo.ForkURL)
+	if baseSlug == "" || forkSlug == "" {
+		return ""
+	}
+	baseOwner, _, baseOK := strings.Cut(baseSlug, "/")
+	forkOwner, _, forkOK := strings.Cut(forkSlug, "/")
+	if !baseOK || !forkOK || baseOwner == "" || forkOwner == "" {
+		return ""
+	}
+	if strings.EqualFold(baseOwner, forkOwner) {
+		return ""
+	}
+	return fmt.Sprintf("review loop skipped: PR base %s differs from fork %s; CI monitoring continues without Devin", baseSlug, forkSlug)
 }
 
 // devinRounds returns the number of completed post-PR review-loop fix rounds,
@@ -216,9 +286,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 
 	// reviewLoop is the post-PR review loop (Devin). It is inert unless both the
-	// config flag and the host's review capability are present; when inactive the
-	// CI step's control flow and log vocabulary are byte-identical to before.
-	loopActive := reviewLoopActive(sctx.Config.ReviewLoop, host)
+	// config flag and the host's review capability are present; per-run disable
+	// and cross-owner applicability skips disable only Devin while preserving CI
+	// monitoring.
+	loop := reviewLoopForRun(sctx, host)
+	loopActive := loop.active
+	if loop.reason != "" {
+		sctx.Log(loop.reason)
+	}
 
 	// Get PR URL from run record
 	prURL := ""
@@ -278,16 +353,23 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	mergeabilityBlockedReason := ""
 	timeoutFailingChecks := []string{}
 	timeoutMergeConflict := false
+	timeoutAutoResolve := ciPRClosedAutoResolver(sctx, host, pr)
 	lastMonitorLog := ""
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
-			return ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present"), nil
+			outcome := ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present")
+			outcome.ApprovalAutoResolve = timeoutAutoResolve
+			return outcome, nil
 		}
 		if mergeabilityBlockedReason != "" {
-			return ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason), nil
+			outcome := ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason)
+			outcome.ApprovalAutoResolve = timeoutAutoResolve
+			return outcome, nil
 		}
-		return ciMonitoringTimeoutOutcome(), nil
+		outcome := ciMonitoringTimeoutOutcome()
+		outcome.ApprovalAutoResolve = timeoutAutoResolve
+		return outcome, nil
 	}
 
 	for {

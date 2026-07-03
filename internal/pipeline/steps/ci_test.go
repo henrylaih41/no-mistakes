@@ -1013,9 +1013,10 @@ func reviewThreadNode(databaseID int64, path string, line int, body string) stri
 }
 
 // devinReviewsJSON renders the REST pulls/{n}/reviews response: a COMMENTED
-// review by the bot (REST-form login with "[bot]" + type "Bot") on the head SHA.
+// review by the bot (REST-form login with "[bot]" + type "Bot") on the head SHA
+// carrying Devin's clean top-level verdict body.
 func devinReviewsJSON(headSHA string) string {
-	return fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, headSHA)
+	return fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"body":"## ✅ Devin Review: No Issues Found","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, headSHA)
 }
 
 // TestCIStep_DevinGreenProceedsToReady is the Bug 2 acceptance test: with no

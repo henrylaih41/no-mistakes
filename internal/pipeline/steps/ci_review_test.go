@@ -23,6 +23,7 @@ import (
 // behavior; the rest satisfy the interface and are unused by the review loop.
 type fakeReviewHost struct {
 	caps     scm.Capabilities
+	state    scm.PRState
 	verdict  scm.ReviewVerdict
 	verdErr  error
 	findings []scm.ReviewComment
@@ -60,6 +61,9 @@ func (h *fakeReviewHost) UpdatePR(context.Context, *scm.PR, scm.PRContent) (*scm
 	return nil, nil
 }
 func (h *fakeReviewHost) GetPRState(context.Context, *scm.PR) (scm.PRState, error) {
+	if h.state != "" {
+		return h.state, nil
+	}
 	return scm.PRStateOpen, nil
 }
 func (h *fakeReviewHost) GetChecks(context.Context, *scm.PR) ([]scm.Check, error) {
@@ -332,6 +336,60 @@ func TestReviewLoopActive(t *testing.T) {
 	}
 	if !reviewLoopActive(on, withReviews) {
 		t.Error("enabled config + review capability must be active")
+	}
+}
+
+func TestReviewLoopForRun_DisablesOnlyDevinLoop(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.ReviewLoop{Enabled: true}
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
+	sctx := newReviewTestContext(cfg, "headsha", func(string) {})
+	sctx.Run.ReviewLoopDisabled = true
+
+	got := reviewLoopForRun(sctx, host)
+	if got.active {
+		t.Fatal("per-run disable must turn off Devin review loop")
+	}
+	if !strings.Contains(got.reason, "review-loop=off") {
+		t.Fatalf("disable reason = %q, want push-option provenance", got.reason)
+	}
+}
+
+func TestReviewLoopForRun_SkipsCrossOwnerForkBase(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.ReviewLoop{Enabled: true}
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
+	sctx := newReviewTestContext(cfg, "headsha", func(string) {})
+	sctx.Repo = &db.Repo{
+		UpstreamURL: "https://github.com/kunchenguid/no-mistakes.git",
+		ForkURL:     "https://github.com/henrylaih41/no-mistakes.git",
+	}
+
+	got := reviewLoopForRun(sctx, host)
+	if got.active {
+		t.Fatal("cross-owner fork PR should skip Devin loop by default")
+	}
+	if !strings.Contains(got.reason, "CI monitoring continues without Devin") {
+		t.Fatalf("skip reason = %q, want loud CI-preserving provenance", got.reason)
+	}
+}
+
+func TestReviewLoopForRun_AllowsSameOwnerForkBase(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.ReviewLoop{Enabled: true}
+	host := &fakeReviewHost{caps: scm.Capabilities{Reviews: true}}
+	sctx := newReviewTestContext(cfg, "headsha", func(string) {})
+	sctx.Repo = &db.Repo{
+		UpstreamURL: "https://github.com/henrylaih41/no-mistakes.git",
+		ForkURL:     "git@github.com:henrylaih41/no-mistakes.git",
+	}
+
+	got := reviewLoopForRun(sctx, host)
+	if !got.active {
+		t.Fatalf("same-owner base/fork should keep Devin loop active, reason=%q", got.reason)
 	}
 }
 

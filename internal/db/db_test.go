@@ -41,6 +41,9 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
+	if !hasColumn(t, d, "runs", "review_loop_disabled") {
+		t.Fatal("runs.review_loop_disabled column missing from fresh schema")
+	}
 }
 
 func TestOpenCreatesStepRoundsTable(t *testing.T) {

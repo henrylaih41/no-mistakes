@@ -75,6 +75,7 @@ type PushReceivedParams struct {
 	Intent             string           `json:"intent,omitempty"`
 	Route              string           `json:"route,omitempty"`
 	DesignContextPaths []string         `json:"design_context_paths,omitempty"`
+	ReviewLoopDisabled bool             `json:"review_loop_disabled,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.
@@ -103,6 +104,7 @@ type RerunParams struct {
 	SkipSteps          []types.StepName `json:"skip_steps,omitempty"`
 	Intent             string           `json:"intent,omitempty"`
 	DesignContextPaths []string         `json:"design_context_paths,omitempty"`
+	ReviewLoopDisabled bool             `json:"review_loop_disabled,omitempty"`
 	// ExpectedHeadSHA, when set, permits bootstrapping the FIRST run for a branch
 	// the gate already mirrors but has never run: HandleRerun starts a fresh run
 	// only when this matches the current gate head. `axi run` sets it to the head
@@ -208,6 +210,7 @@ type RunInfo struct {
 	// are observability only and clear the moment the agent responds.
 	AwaitingAgent      bool             `json:"awaiting_agent,omitempty"`
 	AwaitingAgentSince *int64           `json:"awaiting_agent_since,omitempty"`
+	ReviewLoopDisabled bool             `json:"review_loop_disabled,omitempty"`
 	Steps              []StepResultInfo `json:"steps,omitempty"`
 	CreatedAt          int64            `json:"created_at"`
 	UpdatedAt          int64            `json:"updated_at"`

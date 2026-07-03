@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -554,6 +555,7 @@ type ghReview struct {
 	CommitID    string `json:"commit_id"`
 	SubmittedAt string `json:"submitted_at"`
 	HTMLURL     string `json:"html_url"`
+	Body        string `json:"body"`
 	User        ghUser `json:"user"`
 }
 
@@ -699,10 +701,14 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 //   - NONE: the bot has never reviewed the PR.
 //   - PENDING: the bot has reviewed before but not yet headSHA.
 //   - CHANGES_REQUESTED: the bot reviewed headSHA and EITHER its MOST RECENT
-//     review on the matching head is a native CHANGES_REQUESTED state, OR it left
-//     at least one severe (high/medium) LIVE file-scoped finding.
-//   - APPROVED: the bot reviewed headSHA, its most recent head review is not
-//     CHANGES_REQUESTED, and no severe LIVE file-scoped findings remain.
+//     review on the matching head is a native CHANGES_REQUESTED state, its
+//     top-level body says it found potential issues, OR it left at least one
+//     severe (high/medium) LIVE file-scoped finding.
+//   - APPROVED: the bot reviewed headSHA, its most recent head review is native
+//     APPROVED or its top-level body says "No Issues Found", and no severe LIVE
+//     file-scoped findings remain.
+//   - PENDING: the bot reviewed headSHA with a COMMENTED state whose body does
+//     not carry a recognized clean/finding verdict yet.
 //
 // Only the MOST RECENT bot review targeting the head (by submitted_at) decides
 // the native state: a bot that requested changes and then re-reviewed the same
@@ -742,6 +748,8 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 	}
 
 	reviewedAny, reviewedHead, headChangesRequested := false, false, false
+	headNativeApproved := false
+	var latestHeadBody string
 	// Track the most recent bot review targeting the head (by submitted_at) so its
 	// state — not the OR of every state in the head's history — decides the native
 	// verdict. Ties (or unparseable timestamps) fall back to API order, which is
@@ -761,7 +769,7 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 			continue
 		}
 		reviewedAny = true
-		if !strings.EqualFold(strings.TrimSpace(r.CommitID), headSHA) {
+		if !sameCommitSHA(r.CommitID, headSHA) {
 			continue
 		}
 		reviewedHead = true
@@ -771,16 +779,23 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 		}
 		latestHeadAt = submittedAt
 		haveLatestHead = true
-		headChangesRequested = strings.EqualFold(strings.TrimSpace(r.State), "CHANGES_REQUESTED")
+		state := strings.TrimSpace(r.State)
+		headChangesRequested = strings.EqualFold(state, "CHANGES_REQUESTED")
+		headNativeApproved = strings.EqualFold(state, "APPROVED")
+		latestHeadBody = r.Body
 	}
 	if !reviewedAny {
 		return scm.VerdictNone, nil, nil
 	}
 
+	bodyVerdict := devinReviewBodyVerdict(latestHeadBody)
+	if bodyVerdict == reviewBodyFindings {
+		headChangesRequested = true
+	}
 	findings, err := h.GetBotFindings(ctx, prNumber, headSHA, botLogin)
 	if err != nil {
 		// A native CHANGES_REQUESTED on the head is authoritative from the review
-		// state alone, so surface not-green even when the findings read fails.
+		// state/body alone, so surface not-green even when the findings read fails.
 		if headChangesRequested {
 			return scm.VerdictChangesRequested, nil, nil
 		}
@@ -800,7 +815,58 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 			return scm.VerdictChangesRequested, findings, nil
 		}
 	}
-	return scm.VerdictApproved, findings, nil
+	if headNativeApproved || bodyVerdict == reviewBodyClean {
+		return scm.VerdictApproved, findings, nil
+	}
+	return scm.VerdictPending, findings, nil
+}
+
+func sameCommitSHA(reviewSHA, headSHA string) bool {
+	reviewSHA = strings.ToLower(strings.TrimSpace(reviewSHA))
+	headSHA = strings.ToLower(strings.TrimSpace(headSHA))
+	if reviewSHA == "" || headSHA == "" {
+		return false
+	}
+	if reviewSHA == headSHA {
+		return true
+	}
+	if len(reviewSHA) < 7 || len(headSHA) < 7 {
+		return false
+	}
+	if len(reviewSHA) > len(headSHA) {
+		return strings.HasPrefix(reviewSHA, headSHA)
+	}
+	if len(headSHA) > len(reviewSHA) {
+		return strings.HasPrefix(headSHA, reviewSHA)
+	}
+	return false
+}
+
+type reviewBodyVerdict int
+
+const (
+	reviewBodyUnknown reviewBodyVerdict = iota
+	reviewBodyClean
+	reviewBodyFindings
+)
+
+var (
+	reviewBodyNoIssuesRE = regexp.MustCompile(`(?i)\bno\s+issues?\s+found\b`)
+	reviewBodyFindingsRE = regexp.MustCompile(`(?i)\bfound\s+[1-9][0-9]*\s+potential\s+issues?\b`)
+)
+
+func devinReviewBodyVerdict(body string) reviewBodyVerdict {
+	body = strings.Join(strings.Fields(body), " ")
+	if body == "" {
+		return reviewBodyUnknown
+	}
+	if reviewBodyFindingsRE.MatchString(body) {
+		return reviewBodyFindings
+	}
+	if reviewBodyNoIssuesRE.MatchString(body) {
+		return reviewBodyClean
+	}
+	return reviewBodyUnknown
 }
 
 // ReplyToReviewComment posts a threaded reply under an existing PR review comment

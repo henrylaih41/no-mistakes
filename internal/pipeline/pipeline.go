@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -62,6 +63,13 @@ type StepOutcome struct {
 	// reported for this step. Used by demo mode to show realistic durations
 	// without actually waiting.
 	DurationOverrideMS int64
+
+	// ApprovalAutoResolve, when set on an approval-gated outcome, is checked
+	// while the executor is parked waiting for an agent response. Returning true
+	// means the external condition that required approval has already resolved,
+	// so the executor can approve the gate and continue without human input.
+	ApprovalAutoResolve         func(context.Context) bool
+	ApprovalAutoResolveInterval time.Duration
 }
 
 // Step is the interface that each pipeline step implements.

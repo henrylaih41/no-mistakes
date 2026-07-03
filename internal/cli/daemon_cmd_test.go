@@ -119,3 +119,31 @@ func TestParseRoutePushOptionGarbageRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewLoopPushOptionDisablesOnlyLoop(t *testing.T) {
+	got, err := parseReviewLoopPushOption([]string{"no-mistakes.skip=test", "no-mistakes.review-loop=off"})
+	if err != nil {
+		t.Fatalf("parseReviewLoopPushOption() error = %v", err)
+	}
+	if !got {
+		t.Fatal("review-loop=off should disable the per-run review loop")
+	}
+	if opt := formatReviewLoopPushOption(true); opt != "no-mistakes.review-loop=off" {
+		t.Fatalf("formatReviewLoopPushOption(true) = %q", opt)
+	}
+	if opt := formatReviewLoopPushOption(false); opt != "" {
+		t.Fatalf("formatReviewLoopPushOption(false) = %q, want empty", opt)
+	}
+}
+
+func TestReviewLoopPushOptionRejectsEnableOrEmpty(t *testing.T) {
+	for _, bad := range []string{
+		"no-mistakes.review-loop=",
+		"no-mistakes.review-loop=on",
+		"no-mistakes.review-loop=enabled",
+	} {
+		if _, err := parseReviewLoopPushOption([]string{bad}); err == nil {
+			t.Fatalf("expected %q to fail", bad)
+		}
+	}
+}
