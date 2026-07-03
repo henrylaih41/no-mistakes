@@ -217,6 +217,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	if run != nil && run.Intent != nil {
 		userIntent = *run.Intent
 	}
+	designContext := types.DesignContext{}
+	if run != nil && run.DesignContextJSON != nil {
+		parsed, err := types.ParseDesignContextJSON(*run.DesignContextJSON)
+		if err != nil {
+			return false, fmt.Errorf("parse run design context: %w", err)
+		}
+		designContext = parsed
+	}
 	// Default the review panel to the single impl agent when none is
 	// configured, so every step (including review) is byte-identical to the
 	// pre-panel behavior.
@@ -225,16 +233,17 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		reviewers = []agent.Agent{e.agent}
 	}
 	sctx := &StepContext{
-		Ctx:          ctx,
-		Run:          run,
-		Repo:         repo,
-		WorkDir:      workDir,
-		Agent:        e.agent,
-		Reviewers:    reviewers,
-		Config:       e.config,
-		DB:           e.db,
-		StepResultID: sr.ID,
-		UserIntent:   userIntent,
+		Ctx:           ctx,
+		Run:           run,
+		Repo:          repo,
+		WorkDir:       workDir,
+		Agent:         e.agent,
+		Reviewers:     reviewers,
+		Config:        e.config,
+		DB:            e.db,
+		StepResultID:  sr.ID,
+		UserIntent:    userIntent,
+		DesignContext: designContext,
 		Log: func(text string) {
 			if text != "" {
 				prefix := ""

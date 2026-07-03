@@ -6,7 +6,7 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: code-executing fields are read from the default branch]
-`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, `agent` selects which process launches there (including `acp:` targets), `review.reviewers` selects extra reviewer processes, and `review_loop` gates the post-PR review loop (it names the bot login whose comments become fix-prompt content, bounds how many automated fix rounds run, and points at a secret key file), all with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, `review`, and `review_loop` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, those repo-level code-executing fields are forced empty or absent - the run proceeds on built-in/global defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands`, `agent`, `review` panel, and `review_loop` you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`) are still read from the pushed branch.
+`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, `agent` selects which process launches there (including `acp:` targets), `review.reviewers` selects extra reviewer processes, and `review_loop` gates the post-PR review loop (it names the bot login whose comments become fix-prompt content, bounds how many automated fix rounds run, and points at a secret key file), all with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, `review`, and `review_loop` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, those repo-level code-executing fields are forced empty or absent - the run proceeds on built-in/global defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands`, `agent`, `review` panel, and `review_loop` you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`, `design_context`) are still read from the pushed branch.
 
 If you genuinely want per-branch `commands`, `agent`, `review`, and `review_loop` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -50,6 +50,11 @@ test:
   evidence:
     store_in_repo: true
     dir: .no-mistakes/evidence
+
+design_context:
+  files:
+    - docs/design/*.md
+    - docs/adr/*.md
 ```
 
 ## Fields
@@ -91,6 +96,23 @@ Explicit test command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 When set, the test step runs this exact command first as the baseline and checks the exit code.
 When empty, the agent detects and runs relevant tests itself.
 When user intent is available, the agent may still run after a successful baseline command to gather evidence-oriented validation.
+
+### design_context.files
+
+Repository-relative design-context file selectors to inject into reviewer and fixer prompts for every run on that branch.
+
+| | |
+|---|---|
+| Type | `string[]` |
+| Default | Empty |
+
+Each entry is a repository-relative path or glob.
+Matches are sorted and de-duplicated, read once at run start, and stored on the run so later fix rounds use the same design contract even if files change.
+Reviewers and fixers are told to check the implementation against this contract and to flag deviations from it, not to treat the files as instructions that override no-mistakes prompt rules.
+
+Repo-config paths must stay inside the run worktree after symlink resolution.
+Absolute paths, `~`, `..`, non-regular files, missing explicit files, globs with no matches, and invalid UTF-8 fail the run start with a clear error.
+Use [`no-mistakes axi run --design-context`](/no-mistakes/reference/cli/#no-mistakes-axi-run) for explicit local files outside the repository.
 
 ### commands.lint
 

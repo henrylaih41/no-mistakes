@@ -37,6 +37,10 @@ type StepContext struct {
 	// was trying to accomplish, inferred from local agent transcripts. It's
 	// surfaced in step prompts so agents have context beyond the diff.
 	UserIntent string
+	// DesignContext is the immutable design contract materialized at run start.
+	// Reviewers and fixers use it to check implementation against agreed
+	// decisions without rereading mutable files.
+	DesignContext types.DesignContext
 }
 
 // StepOutcome is the result of executing a pipeline step.

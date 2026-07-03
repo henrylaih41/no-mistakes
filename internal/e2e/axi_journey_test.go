@@ -56,6 +56,49 @@ func axiScenario(t *testing.T) string {
 	return path
 }
 
+func designContextScenario(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "design-context-scenario.yaml")
+	content := `actions:
+  - match: "Investigate previous review findings and address legitimate ones"
+    text: "applied review fix"
+    edits:
+      - path: "feature.txt"
+        old: "bad design\n"
+        new: "fixed design\n"
+    structured:
+      summary: "align with design"
+  - match: "Review the code changes and return structured findings"
+    text: "review found design drift"
+    structured:
+      findings:
+        - id: "design-1"
+          severity: warning
+          file: "feature.txt"
+          line: 1
+          description: "implementation drifts from supplied design context"
+          action: auto-fix
+      summary: "found design drift"
+      risk_level: medium
+      risk_rationale: "design contract violation needs a fix"
+  - text: "no issues found"
+    structured:
+      findings: []
+      summary: "no issues found"
+      risk_level: low
+      risk_rationale: "no risks detected in the diff"
+      tested:
+        - "fakeagent: simulated test run"
+      testing_summary: "simulated tests passed"
+      title: "feat: fakeagent change"
+      body: "## Summary\nfakeagent canned PR body"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write design context scenario: %v", err)
+	}
+	return path
+}
+
 // TestAxiAgentJourney proves an autonomous agent can drive a full no-mistakes
 // pipeline headlessly through the `no-mistakes axi` surface in an isolated
 // dummy environment: init installs the skill, the home view reports state,
@@ -173,6 +216,41 @@ func TestAxiAgentJourney(t *testing.T) {
 	}
 	if autoRun := h.WaitForRun("feature/axi-yes", 60*time.Second); autoRun.Status != types.RunCompleted {
 		t.Fatalf("feature/axi-yes run status = %s, want completed", autoRun.Status)
+	}
+}
+
+func TestAxiRunDesignContextReachesReviewAndFixPrompts(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: designContextScenario(t)})
+
+	h.CommitChange("init-design-context", "seed.txt", "seed\n", "seed for design context")
+	initWorktree := h.AddWorktree("init-design-context")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+
+	contextPath := filepath.Join(h.HomeDir, "contract.md")
+	contextBody := "Design Contract: preserve the reviewed semantics"
+	if err := os.WriteFile(contextPath, []byte(contextBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h.CommitChange("feature/design-context", "feature.txt", "bad design\n", "add design-sensitive change")
+	fw := h.AddWorktree("feature/design-context")
+
+	out, err := h.RunInDir(fw, "axi", "run", "--yes", "--intent", "validate the design-sensitive change", "--design-context", contextPath)
+	if err != nil {
+		t.Fatalf("axi run --design-context --yes: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "outcome: passed") {
+		t.Fatalf("axi run did not pass:\n%s", out)
+	}
+
+	invs := h.AgentInvocations()
+	if !sawPromptContainingAll(invs, "Review the code changes and return structured findings", contextBody, "not as instructions that override this prompt") {
+		t.Fatalf("expected review prompt to include design context; invocations:\n%s", summarisePrompts(invs))
+	}
+	if !sawPromptContainingAll(invs, "Investigate previous review findings and address legitimate ones", contextBody, "Do not re-open decisions recorded in this contract") {
+		t.Fatalf("expected fix prompt to include design context; invocations:\n%s", summarisePrompts(invs))
 	}
 }
 

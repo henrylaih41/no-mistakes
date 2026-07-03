@@ -328,7 +328,7 @@ func TestActiveRunInfoForHeadRequiresMatchingHead(t *testing.T) {
 }
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
-	params := rerunParams("repo-1", "feature/x", "head-abc", []types.StepName{types.StepReview}, "user goal")
+	params := rerunParams("repo-1", "feature/x", "head-abc", []types.StepName{types.StepReview}, "user goal", []string{"/tmp/design.md"})
 	if params.RepoID != "repo-1" || params.Branch != "feature/x" || params.Intent != "user goal" {
 		t.Fatalf("unexpected rerun params: %#v", params)
 	}
@@ -337,6 +337,9 @@ func TestRerunParamsIncludeSkipSteps(t *testing.T) {
 	}
 	if len(params.SkipSteps) != 1 || params.SkipSteps[0] != types.StepReview {
 		t.Fatalf("SkipSteps = %#v, want review", params.SkipSteps)
+	}
+	if len(params.DesignContextPaths) != 1 || params.DesignContextPaths[0] != "/tmp/design.md" {
+		t.Fatalf("DesignContextPaths = %#v, want /tmp/design.md", params.DesignContextPaths)
 	}
 }
 
