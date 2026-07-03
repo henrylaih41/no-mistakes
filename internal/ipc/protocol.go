@@ -228,7 +228,7 @@ type RunInfo struct {
 	// AwaitingAgent is true while the run is parked at a gate awaiting the
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both
-	// are observability only and clear the moment the agent responds.
+	// are observability only and clear atomically with the durable gate exit.
 	AwaitingAgent      bool             `json:"awaiting_agent,omitempty"`
 	AwaitingAgentSince *int64           `json:"awaiting_agent_since,omitempty"`
 	ReviewLoopDisabled bool             `json:"review_loop_disabled,omitempty"`
