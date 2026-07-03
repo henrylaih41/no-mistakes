@@ -51,6 +51,30 @@ func TestPrepareDaemonEnvironment_RemovesClaudeSessionVarsAndAppliesShellEnv(t *
 	}
 }
 
+func TestPrepareDaemonEnvironment_PreservesTestDaemonPathBeforeShellPath(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	testDaemonPath := strings.Join([]string{"/tmp/fake-bin", "/process/bin"}, sep)
+	shellPath := strings.Join([]string{"/resolved/bin", "/usr/bin"}, sep)
+
+	t.Setenv("NM_TEST_START_DAEMON", "1")
+	t.Setenv("PATH", testDaemonPath)
+
+	oldApply := applyShellEnvToProcess
+	defer func() { applyShellEnvToProcess = oldApply }()
+
+	applyShellEnvToProcess = func() error {
+		return os.Setenv("PATH", shellPath)
+	}
+
+	if err := prepareDaemonEnvironment(); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{testDaemonPath, shellPath}, sep)
+	if got := os.Getenv("PATH"); got != want {
+		t.Fatalf("PATH = %q, want %q", got, want)
+	}
+}
+
 func TestPrepareDaemonEnvironment_PreservesExistingNMHome(t *testing.T) {
 	t.Setenv("NM_HOME", "/service/root")
 	t.Setenv("PATH", os.Getenv("PATH"))

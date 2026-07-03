@@ -23,6 +23,28 @@ func refExists(t *testing.T, dir, ref string) bool {
 	return cmd.Run() == nil
 }
 
+func TestRebaseTargetLabelHidesPrivateBaseRef(t *testing.T) {
+	t.Parallel()
+
+	if got := rebaseTargetLabel(baseTrackingRef("main"), "main"); got != "origin/main" {
+		t.Fatalf("base target label = %q, want origin/main", got)
+	}
+	if got := rebaseTargetLabel("origin/feature", "main"); got != "origin/feature" {
+		t.Fatalf("branch target label = %q, want origin/feature", got)
+	}
+	if got := rebaseTargetLabel(forkBranchTrackingRef("feature"), "main"); got != "fork:feature" {
+		t.Fatalf("fork branch target label = %q, want fork:feature", got)
+	}
+	if got := rebaseTargetLabel(routeBranchTrackingRef("feature"), "main"); got != "route:feature" {
+		t.Fatalf("route branch target label = %q, want route:feature", got)
+	}
+	for _, target := range []string{forkBranchTrackingRef("feature"), routeBranchTrackingRef("feature")} {
+		if got := rebaseTargetLabel(target, "main"); strings.HasPrefix(got, "refs/") {
+			t.Fatalf("label %q leaks internal ref namespace", got)
+		}
+	}
+}
+
 func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
