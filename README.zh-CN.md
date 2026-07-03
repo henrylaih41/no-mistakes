@@ -22,6 +22,10 @@
   /></a>
 </p>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/27829?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-27829" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/27829" alt="kunchenguid%2Fno-mistakes | Trendshift" width="250" height="55"/></a>
+</p>
+
 <h3 align="center">干掉所有 slop，开出干净的 PR。</h3>
 
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
