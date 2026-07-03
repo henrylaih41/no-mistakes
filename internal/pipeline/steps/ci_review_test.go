@@ -116,9 +116,12 @@ func TestEvalDevinGate(t *testing.T) {
 		{"approved is green", scm.VerdictApproved, nil, enabled, time.Hour, devinDecisionGreen},
 		{"changes requested is not green", scm.VerdictChangesRequested, nil, enabled, time.Minute, devinDecisionNotGreen},
 		// MANUAL_REVIEW: body reports findings but no threads loaded. Within grace
-		// we wait (threads may still propagate); past grace we escalate to a human
-		// and NEVER fail open to green, even with FailOpen configured.
-		{"manual review within grace waits", scm.VerdictManualReview, nil, enabled, devinGraceWindow - time.Minute, devinDecisionPending},
+		// we wait (threads may still propagate) as a DISTINCT manual-review-pending
+		// value so the body-only not-green reason is preserved and never hidden;
+		// past grace we escalate to a human and NEVER fail open to green, even with
+		// FailOpen configured.
+		{"manual review within grace waits as manual-review-pending", scm.VerdictManualReview, nil, enabled, devinGraceWindow - time.Minute, devinDecisionManualReviewPending},
+		{"manual review within grace fail-closed still manual-review-pending", scm.VerdictManualReview, nil, failClosed, devinGraceWindow - time.Minute, devinDecisionManualReviewPending},
 		{"manual review past grace escalates", scm.VerdictManualReview, nil, enabled, devinGraceWindow + time.Minute, devinDecisionManualReview},
 		{"manual review past grace never fails open", scm.VerdictManualReview, nil, failClosed, devinGraceWindow + time.Minute, devinDecisionManualReview},
 		// PENDING_AMBIGUOUS: reviewed the head with an unrecognized body. Same
@@ -444,8 +447,8 @@ func TestEvalDevinReview_ManualReviewAndAmbiguous(t *testing.T) {
 		current := time.Unix(0, 0)
 		step := &CIStep{now: func() time.Time { return current }}
 		sctx := newReviewTestContext(cfg, "head", func(string) {})
-		if d, _ := step.evalDevinReview(sctx, host, pr); d != devinDecisionPending {
-			t.Fatalf("within grace: want pending (wait for threads), got %v", d)
+		if d, _ := step.evalDevinReview(sctx, host, pr); d != devinDecisionManualReviewPending {
+			t.Fatalf("within grace: want manualReviewPending (wait for threads, signal preserved), got %v", d)
 		}
 		current = current.Add(devinGraceWindow + time.Minute)
 		if d, _ := step.evalDevinReview(sctx, host, pr); d != devinDecisionManualReview {

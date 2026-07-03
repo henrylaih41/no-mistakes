@@ -1394,6 +1394,80 @@ func TestCIStep_FailingCheckWithDevinManualReviewSurfacesBothAtTimeout(t *testin
 	}
 }
 
+// TestCIStep_FailingCheckWithDevinManualReviewPendingWithinGraceSurfacesBoth is
+// the review-codex-2-1 within-grace regression test. Before the fix, a
+// MANUAL_REVIEW verdict (body-only not-green: "found N potential issues", no
+// loadable threads) was downgraded to a plain pending during the 11-minute
+// grace window, so it carried NO manual-verify reason. If a CI gate parked in
+// the same poll before the window elapsed — here a failing check with auto-fix
+// disabled — the body-only not-green signal disappeared behind the CI-only park
+// (ruling #3 violation). The fix keeps a distinct manual-review-pending signal
+// during grace and folds it into the earlier CI gate, so the park must carry
+// BOTH the failing check AND the awaiting-manual-verify reason.
+func TestCIStep_FailingCheckWithDevinManualReviewPendingWithinGraceSurfacesBoth(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	// A failing check with NO pending check: all checks are done this poll, so the
+	// monitor decides to park immediately rather than wait for pending checks.
+	checksJSON := `[{"name":"build","state":"FAILURE","bucket":"fail"}]`
+	env := fakeCIGHWithReviews(t, "OPEN", checksJSON,
+		devinReviewsJSONWithBody(headSHA, "## ⚠️ Devin Review: Found 2 potential issues"),
+		reviewThreadsEnvelope(), // body says found N, but no threads load -> manual verify
+	)
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("auto-fixer must not run when CI auto-fix is disabled")
+		return nil, nil
+	}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = time.Hour
+	sctx.Config.AutoFix = config.AutoFix{CI: 0} // disabled -> park immediately, still within grace
+	sctx.Config.ReviewLoop = config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{
+		checksGracePeriod:    time.Minute,
+		pollIntervalOverride: time.Second, // stay well within the 11m Devin grace window
+		now:                  func() time.Time { return current },
+		baseBranchTip:        func(context.Context) (string, bool) { return "basetip", true },
+		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			// The disabled-auto-fix park returns on the first poll; if we ever loop,
+			// bail out rather than spin so a regression surfaces as a failure.
+			cancel()
+			return ctx.Err()
+		},
+	}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked outcome within grace", err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("expected a NeedsApproval park, got %+v", outcome)
+	}
+	if !strings.Contains(outcome.Findings, "build") {
+		t.Errorf("park findings must carry the failing check, got %q", outcome.Findings)
+	}
+	if !strings.Contains(outcome.Findings, cimonitor.ReviewManualVerifyPendingMsg) {
+		t.Errorf("park findings must also carry the pending Devin manual-verify signal (never hidden during grace), got %q", outcome.Findings)
+	}
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("cimonitor.ChecksPassed = true, want false (manual review pending -> not ready): %v", logs)
+	}
+}
+
 // TestCIStep_DevinAmbiguousBodyLogsExplicitReason is the review-codex-2-1
 // acceptance test: a current-head COMMENTED review whose body carries no
 // recognizable verdict must surface an explicit "ambiguous body" reason rather

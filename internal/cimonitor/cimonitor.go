@@ -50,6 +50,13 @@ const (
 	// drive an automated fix; the run parks for a human to verify rather than
 	// letting the fixer fabricate changes for a problem it cannot see.
 	ReviewManualVerifyMsg = "Devin body reports N findings, threads failed to load - manual verify"
+	// ReviewManualVerifyPendingMsg is logged while the review bot's body reports
+	// findings on the current head SHA, the file-scoped threads have not loaded
+	// yet, and the grace window has not elapsed. The run keeps polling (the threads
+	// may still propagate), but this body-only not-green signal is preserved so it
+	// is never mistaken for a clean review and is folded into any CI gate that
+	// parks in the same poll before the grace window escalates to a manual gate.
+	ReviewManualVerifyPendingMsg = "Devin body reports findings, threads not yet loaded - awaiting manual verify"
 )
 
 // Activity summarizes what the CI step has been doing, derived from its logs.
@@ -97,6 +104,7 @@ func ParseActivity(logs []string) Activity {
 		case strings.Contains(line, WaitingOnReviewMsg),
 			strings.Contains(line, ReReviewingMsg),
 			strings.Contains(line, ReviewBodyAmbiguousMsg),
+			strings.Contains(line, ReviewManualVerifyPendingMsg),
 			strings.Contains(line, ReviewManualVerifyMsg):
 			// Checks may be green, but the review verdict for the current head
 			// is still pending/in-flight/ambiguous, or the run has parked for a

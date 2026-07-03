@@ -45,6 +45,16 @@ const (
 	// automated fix. The loop must escalate to a human rather than run the fixer,
 	// which would fabricate changes for a problem it cannot see (ruling #11).
 	devinDecisionManualReview
+	// devinDecisionManualReviewPending is the pre-grace form of
+	// devinDecisionManualReview: the bot's body already reports findings on the
+	// current head (a body-only NOT-GREEN signal) but the file-scoped threads have
+	// not loaded yet and the grace window has not elapsed. It waits like
+	// devinDecisionPending (keep polling; the threads may still propagate) and
+	// NEVER fails open to green, but — unlike a plain pending — it carries the
+	// manual-verify reason so the body-only not-green signal is folded into any CI
+	// gate that parks in the same poll and is never hidden (ruling #3). Once the
+	// grace window elapses it becomes devinDecisionManualReview and parks.
+	devinDecisionManualReviewPending
 	// devinDecisionGreen means the bot reviewed the current head SHA and left no
 	// unresolved severe findings.
 	devinDecisionGreen
@@ -93,8 +103,12 @@ func evalDevinGate(verdict scm.ReviewVerdict, findings []scm.ReviewComment, cfg 
 		// once it elapses with the discrepancy unresolved, escalate to a human.
 		// This state NEVER fails open to green and NEVER runs the fixer (ruling
 		// #11) — those would either merge or fabricate around an unread finding.
+		// Within grace we keep polling, but as a DISTINCT manual-review-pending
+		// value (not a plain pending) so the caller preserves the body-only
+		// not-green reason and folds it into any CI gate that parks first — the
+		// signal must never be hidden while we wait (ruling #3).
 		if elapsed < devinGraceWindow {
-			return devinDecisionPending
+			return devinDecisionManualReviewPending
 		}
 		return devinDecisionManualReview
 	}

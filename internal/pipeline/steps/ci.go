@@ -482,12 +482,22 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			// it is not mistaken for "checks passed, ready to merge", but routed to
 			// a park (never the fixer) below.
 			devinManualReview := devinDecision == devinDecisionManualReview
+			// The pre-grace form of the same body-only not-green signal. It does NOT
+			// force a park on its own (we keep polling for threads to propagate), but
+			// it MUST still contribute the manual-verify reason so an earlier CI gate
+			// or timeout that parks during the grace window never hides it (ruling #3).
+			devinManualReviewPending := devinDecision == devinDecisionManualReviewPending
 			// The manual-verify reason is combined into any CI-failure/mergeability
 			// park (and the timeout outcome) so it is never hidden behind a CI-only
-			// gate that fires in the same poll (ruling #3).
+			// gate that fires in the same poll (ruling #3). Both the escalated and the
+			// still-pending manual-review states carry a reason; the pending one uses
+			// its own message so a park during grace reads as "awaiting" not "failed".
 			devinManualReviewReason := ""
-			if devinManualReview {
+			switch {
+			case devinManualReview:
 				devinManualReviewReason = cimonitor.ReviewManualVerifyMsg
+			case devinManualReviewPending:
+				devinManualReviewReason = cimonitor.ReviewManualVerifyPendingMsg
 			}
 
 			hasIssues := hasFailures || mergeConflict || devinNotGreen || devinManualReview
@@ -622,6 +632,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// explicit reason lets an agent tell this apart from "no review
 					// yet" (it still fails open past the grace window per config).
 					lastMonitorLog = logCIMonitorStatus(sctx, cimonitor.ReviewBodyAmbiguousMsg, lastMonitorLog)
+				case loopActive && devinDecision == devinDecisionManualReviewPending:
+					// Checks are clean and the bot's body reports findings on the
+					// current head, but its file-scoped threads have not loaded yet and
+					// the grace window has not elapsed. Keep polling (the threads may
+					// still propagate), but surface the body-only not-green signal so it
+					// is never mistaken for a ready-to-merge review; once the grace
+					// window elapses this escalates to devinDecisionManualReview and the
+					// run parks for a human. This NEVER fails open to green.
+					lastMonitorLog = logCIMonitorStatus(sctx, cimonitor.ReviewManualVerifyPendingMsg, lastMonitorLog)
 				case len(checks) == 0 && elapsed < s.gracePeriod():
 					// CI checks may not be registered yet, keep polling.
 					lastMonitorLog = ""
