@@ -183,11 +183,22 @@ func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string
 	return targets
 }
 
+// rebaseTargetLabel maps an internal rebase target ref to a user-facing name so
+// conflict findings and summaries never leak the private per-worktree/fork ref
+// namespaces. The base ref becomes origin/<default>; fork and route pushed-branch
+// refs become fork:<branch> and route:<branch>. Anything else (already a
+// user-facing origin/<branch>) is returned unchanged.
 func rebaseTargetLabel(target, defaultBranch string) string {
-	if target == baseTrackingRef(defaultBranch) {
+	switch {
+	case target == baseTrackingRef(defaultBranch):
 		return "origin/" + defaultBranch
+	case strings.HasPrefix(target, forkBranchRefPrefix):
+		return "fork:" + strings.TrimPrefix(target, forkBranchRefPrefix)
+	case strings.HasPrefix(target, routeBranchRefPrefix):
+		return "route:" + strings.TrimPrefix(target, routeBranchRefPrefix)
+	default:
+		return target
 	}
-	return target
 }
 
 // forcePushRebaseTargets returns rebase targets for a force push. The pushed
