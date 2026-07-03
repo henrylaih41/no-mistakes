@@ -106,12 +106,12 @@ func ciPRClosedAutoResolver(sctx *pipeline.StepContext, host scm.Host, pr *scm.P
 		switch state {
 		case scm.PRStateMerged:
 			if sctx.Log != nil {
-				sctx.Log("PR has been merged after CI timeout; clearing parked CI gate")
+				sctx.Log("PR has been merged while CI gate was parked; clearing parked CI gate")
 			}
 			return true
 		case scm.PRStateClosed:
 			if sctx.Log != nil {
-				sctx.Log("PR has been closed after CI timeout; clearing parked CI gate")
+				sctx.Log("PR has been closed while CI gate was parked; clearing parked CI gate")
 			}
 			return true
 		default:
@@ -353,6 +353,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	mergeabilityBlockedReason := ""
 	timeoutFailingChecks := []string{}
 	timeoutMergeConflict := false
+	timeoutDevinManualReviewReason := ""
 	timeoutAutoResolve := ciPRClosedAutoResolver(sctx, host, pr)
 	lastMonitorLog := ""
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
@@ -360,16 +361,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
 			outcome := ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present")
 			outcome.ApprovalAutoResolve = timeoutAutoResolve
-			return outcome, nil
+			return withDevinManualVerify(outcome, timeoutDevinManualReviewReason), nil
 		}
 		if mergeabilityBlockedReason != "" {
 			outcome := ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason)
 			outcome.ApprovalAutoResolve = timeoutAutoResolve
-			return outcome, nil
+			return withDevinManualVerify(outcome, timeoutDevinManualReviewReason), nil
 		}
 		outcome := ciMonitoringTimeoutOutcome()
 		outcome.ApprovalAutoResolve = timeoutAutoResolve
-		return outcome, nil
+		return withDevinManualVerify(outcome, timeoutDevinManualReviewReason), nil
 	}
 
 	for {
@@ -481,9 +482,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			// it is not mistaken for "checks passed, ready to merge", but routed to
 			// a park (never the fixer) below.
 			devinManualReview := devinDecision == devinDecisionManualReview
+			// The manual-verify reason is combined into any CI-failure/mergeability
+			// park (and the timeout outcome) so it is never hidden behind a CI-only
+			// gate that fires in the same poll (ruling #3).
+			devinManualReviewReason := ""
+			if devinManualReview {
+				devinManualReviewReason = cimonitor.ReviewManualVerifyMsg
+			}
 
 			hasIssues := hasFailures || mergeConflict || devinNotGreen || devinManualReview
 			timeoutFailingChecks = append(timeoutFailingChecks[:0], failing...)
+			timeoutDevinManualReviewReason = devinManualReviewReason
 
 			// If a failing check completed after our last fix push, CI has
 			// already re-run since we pushed (possibly too fast to observe
@@ -528,7 +537,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// fabricate changes for a problem it cannot see, ruling #11).
 					lastMonitorLog = ""
 					sctx.Log(cimonitor.ReviewManualVerifyMsg)
-					return devinManualReviewOutcome(cimonitor.ReviewManualVerifyMsg), nil
+					return devinManualReviewOutcome(sctx, host, pr, cimonitor.ReviewManualVerifyMsg), nil
 				} else if loopActive && devinNotGreen && !hasFailures && !mergeConflict {
 					// Checks are clean but the review bot requested changes:
 					// run a bounded review-loop fix round. Anti-thrash keys on
@@ -555,16 +564,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						s.recordCIFix(ciKey, devinKey, devinNotGreen, fixCompletedAt)
 					} else {
 						sctx.Log("CI fix produced no changes, returning for manual intervention...")
-						return ciFailureOutcome(failing, mergeConflict, "CI fix produced no changes - failures require manual intervention"), nil
+						return withDevinManualVerify(ciFailureOutcome(failing, mergeConflict, "CI fix produced no changes - failures require manual intervention"), devinManualReviewReason), nil
 					}
 				} else if sctx.Fixing && s.ciFixAlreadyAttempted(ciKey, devinKey, devinNotGreen) {
 					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
 				} else if ciFixLimit <= 0 {
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fix disabled, waiting for manual intervention...", issueDesc))
-					return ciFailureOutcome(failing, mergeConflict, "CI failures require manual intervention"), nil
+					return withDevinManualVerify(ciFailureOutcome(failing, mergeConflict, "CI failures require manual intervention"), devinManualReviewReason), nil
 				} else if s.ciFixAttempts >= ciFixLimit {
 					sctx.Log(fmt.Sprintf("issues detected: %s - max auto-fix attempts (%d) reached, waiting for manual intervention...", issueDesc, ciFixLimit))
-					return ciFailureOutcome(failing, mergeConflict, "CI failures still present after auto-fix attempts"), nil
+					return withDevinManualVerify(ciFailureOutcome(failing, mergeConflict, "CI failures still present after auto-fix attempts"), devinManualReviewReason), nil
 				} else if s.ciFixAlreadyAttempted(ciKey, devinKey, devinNotGreen) {
 					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
 				} else {

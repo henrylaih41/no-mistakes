@@ -199,6 +199,35 @@ func ciFailureOutcome(failing []string, mergeConflict bool, summary string) *pip
 	}
 }
 
+// withDevinManualVerify folds the body-only Devin "manual verify" signal into an
+// already-parked CI outcome so it is never hidden behind a CI-failure or
+// mergeability gate that happens to fire in the same poll (ruling #3: a not-green
+// review signal must not disappear when checks also fail). reason == "" (no
+// manual-review state) is a no-op that returns the outcome unchanged, so a plain
+// CI-failure park marshals exactly as before.
+func withDevinManualVerify(outcome *pipeline.StepOutcome, reason string) *pipeline.StepOutcome {
+	if outcome == nil || reason == "" {
+		return outcome
+	}
+	parsed, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		return outcome
+	}
+	parsed.Items = append(parsed.Items, Finding{
+		Severity:    "warning",
+		Description: reason,
+		Action:      types.ActionAskUser,
+	})
+	if parsed.Summary != "" {
+		parsed.Summary += "; " + reason
+	} else {
+		parsed.Summary = reason
+	}
+	findingsJSON, _ := json.Marshal(parsed)
+	outcome.Findings = string(findingsJSON)
+	return outcome
+}
+
 // devinSeverityToFinding maps the review bot's coarse severity bucket
 // (high/medium/low, as parsed from comment bodies in the github read layer) onto
 // the pipeline's finding severities (error/warning/info). The rest of the
@@ -257,7 +286,13 @@ func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline
 // state with no inline comments). It deliberately does NOT synthesize or
 // fabricate any file-scoped finding summary — it surfaces the single, honest
 // reason and hands the decision to a human (ruling #11).
-func devinManualReviewOutcome(reason string) *pipeline.StepOutcome {
+//
+// Like the CI-timeout gates, it carries an ApprovalAutoResolve so that if the PR
+// is merged or closed externally while the run is parked awaiting manual
+// verification, the gate self-heals instead of staying parked indefinitely
+// (nm#11); every manual-review park is constructed here so no call site can
+// forget to wire it.
+func devinManualReviewOutcome(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, reason string) *pipeline.StepOutcome {
 	findings := Findings{
 		Summary: reason,
 		Items: []Finding{{
@@ -268,8 +303,9 @@ func devinManualReviewOutcome(reason string) *pipeline.StepOutcome {
 	}
 	findingsJSON, _ := json.Marshal(findings)
 	return &pipeline.StepOutcome{
-		NeedsApproval: true,
-		Findings:      string(findingsJSON),
+		NeedsApproval:       true,
+		Findings:            string(findingsJSON),
+		ApprovalAutoResolve: ciPRClosedAutoResolver(sctx, host, pr),
 	}
 }
 
