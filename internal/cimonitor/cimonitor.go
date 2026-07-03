@@ -49,7 +49,7 @@ const (
 	// on the current head SHA but no file-scoped review threads could be loaded to
 	// drive an automated fix; the run parks for a human to verify rather than
 	// letting the fixer fabricate changes for a problem it cannot see.
-	ReviewManualVerifyMsg = "Devin review body reports findings but no file-scoped threads loaded - manual verification required"
+	ReviewManualVerifyMsg = "Devin body reports N findings, threads failed to load - manual verify"
 )
 
 // Activity summarizes what the CI step has been doing, derived from its logs.

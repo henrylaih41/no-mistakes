@@ -607,7 +607,7 @@ func TestHandleDevinFixRound_NoActionableFindingsEscalatesWithoutFixing(t *testi
 			t.Fatalf("no round should be consumed when there is nothing to fix, got %d", step.devinFixRounds)
 		}
 	}
-	if !strings.Contains(strings.Join(logs, "\n"), "manual verification required") {
+	if !strings.Contains(strings.Join(logs, "\n"), "manual verify") {
 		t.Fatalf("expected a manual-verification log, got: %v", logs)
 	}
 }

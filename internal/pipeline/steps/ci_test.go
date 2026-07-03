@@ -1254,7 +1254,7 @@ func TestCIStep_DevinNeverReviewedStillWaits(t *testing.T) {
 // findings on the current head, but no file-scoped threads loaded. The loop must
 // NOT run the auto-fixer (which would fabricate changes for a problem it cannot
 // see, ruling #11) — once the grace window elapses it must park at the human gate
-// with the explicit "manual verification required" reason.
+// with the explicit "manual verify" reason.
 func TestCIStep_DevinFindingsBodyNoThreadsNeedsManualReview(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -1306,7 +1306,7 @@ func TestCIStep_DevinFindingsBodyNoThreadsNeedsManualReview(t *testing.T) {
 	if outcome == nil || !outcome.NeedsApproval {
 		t.Fatalf("expected a NeedsApproval park for manual review, got %+v", outcome)
 	}
-	if !strings.Contains(outcome.Findings, "manual verification required") {
+	if !strings.Contains(outcome.Findings, "manual verify") {
 		t.Fatalf("park findings must carry the manual-verify reason, got %q", outcome.Findings)
 	}
 	foundManual := false
