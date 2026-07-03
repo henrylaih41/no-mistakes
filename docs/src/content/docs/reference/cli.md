@@ -39,6 +39,7 @@ Creates or refreshes a local bare repo, installs the post-receive hook, best-eff
 If the home `.claude` links to `.agents`, `.claude/skills` links to `.agents/skills`, or the reverse, `init` follows that layout and still makes the skill readable from both logical paths.
 If the repo still contains a vendored skill copy written by an older no-mistakes version, `init` leaves it untouched and prints a notice that it is no longer needed and can be removed.
 The gate advertises Git push-option support, so you can skip steps for one push with `git push -o no-mistakes.skip=test,lint no-mistakes <branch>`.
+You can also disable only the auxiliary Devin review loop for one push with `git push -o no-mistakes.review-loop=off no-mistakes <branch>`; the `ci` step still monitors checks, merge, and close state.
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and pass `--fork-url` with your fork remote URL.
 The push, rebase branch-sync, and CI auto-fix pushes use the fork, while GitHub PR and CI commands stay scoped to the parent repository and create PRs with `--head <fork-owner>:<branch>`.
@@ -78,6 +79,7 @@ An active run on another branch does not block starting validation for the curre
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --design-context docs/design.md
+no-mistakes axi run --intent "the user's goal" --review-loop=off
 no-mistakes axi run --intent "the user's goal" --yes
 ```
 
@@ -87,6 +89,7 @@ no-mistakes axi run --intent "the user's goal" --yes
 | `-y`, `--yes` | `bool` | `false` | Auto-resolve every gate until a decision point or outcome |
 | `--skip` | `string` | (none) | Comma-separated pipeline steps to skip |
 | `--design-context` | `string[]` | Empty | Repeatable path to a design-context text file for review and fix prompts |
+| `--review-loop` | `string` | (none) | Set to `off` to disable only the auxiliary Devin review loop for this run; CI monitoring still runs |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
@@ -99,6 +102,8 @@ Relative paths resolve from the current working tree before the run is triggered
 The daemon reads those files once at run start and stores the materialized context on the run, so later review and fix rounds use the same contract even if the files change.
 Missing, unreadable, non-text, or invalid context files fail loudly instead of being silently ignored.
 Reattaching to an in-flight run does not add or replace its design context.
+`--review-loop=off` disables only the post-PR Devin review loop for the run.
+Use it when the PR base repo is not Devin-applicable or the run should rely on normal CI checks only; it does not skip the `ci` step, so GitHub checks, merge, and close monitoring continue.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.

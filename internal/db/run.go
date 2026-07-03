@@ -36,12 +36,13 @@ type Run struct {
 	// Route is the name of the local route selected for this run (empty for the
 	// implicit default route). Persisted so a rerun re-resolves the SAME route
 	// the original push selected instead of silently retargeting the default.
-	Route     *string
-	CreatedAt int64
-	UpdatedAt int64
+	Route              *string
+	ReviewLoopDisabled bool
+	CreatedAt          int64
+	UpdatedAt          int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, design_context_json, intent, intent_source, intent_session_id, intent_score, route, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, design_context_json, intent, intent_source, intent_session_id, intent_score, route, review_loop_disabled, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -51,7 +52,7 @@ func scanRun(row interface {
 		&r.PRURL, &r.Error, &r.AwaitingAgentSince,
 		&r.DesignContextJSON,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
-		&r.Route, &r.CreatedAt, &r.UpdatedAt,
+		&r.Route, &r.ReviewLoopDisabled, &r.CreatedAt, &r.UpdatedAt,
 	)
 }
 
@@ -199,6 +200,16 @@ func (d *DB) UpdateRunDesignContext(id, raw string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET design_context_json = ?, updated_at = ? WHERE id = ?`, nullableString(strings.TrimSpace(raw)), now(), id)
 	if err != nil {
 		return fmt.Errorf("update run design context: %w", err)
+	}
+	return nil
+}
+
+// UpdateRunReviewLoopDisabled persists the per-run override that disables only
+// the post-PR review loop while leaving the CI monitor active.
+func (d *DB) UpdateRunReviewLoopDisabled(id string, disabled bool) error {
+	_, err := d.sql.Exec(`UPDATE runs SET review_loop_disabled = ?, updated_at = ? WHERE id = ?`, disabled, now(), id)
+	if err != nil {
+		return fmt.Errorf("update run review loop disabled: %w", err)
 	}
 	return nil
 }

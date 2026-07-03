@@ -125,11 +125,12 @@ func TestResponseError(t *testing.T) {
 
 func TestPushReceivedParams(t *testing.T) {
 	params := PushReceivedParams{
-		Gate:      "/path/to/gate.git",
-		Ref:       "refs/heads/main",
-		Old:       "aaa",
-		New:       "bbb",
-		SkipSteps: []types.StepName{types.StepTest, types.StepLint},
+		Gate:               "/path/to/gate.git",
+		Ref:                "refs/heads/main",
+		Old:                "aaa",
+		New:                "bbb",
+		SkipSteps:          []types.StepName{types.StepTest, types.StepLint},
+		ReviewLoopDisabled: true,
 	}
 	data, _ := json.Marshal(params)
 	var got PushReceivedParams
@@ -141,6 +142,9 @@ func TestPushReceivedParams(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.SkipSteps, params.SkipSteps) {
 		t.Errorf("skip_steps = %+v, want %+v", got.SkipSteps, params.SkipSteps)
+	}
+	if !got.ReviewLoopDisabled {
+		t.Error("review_loop_disabled = false, want true")
 	}
 }
 
@@ -181,7 +185,7 @@ func TestGetActiveRunParams(t *testing.T) {
 }
 
 func TestRerunParams(t *testing.T) {
-	params := RerunParams{RepoID: "repo456", Branch: "feature", SkipSteps: []types.StepName{types.StepReview}}
+	params := RerunParams{RepoID: "repo456", Branch: "feature", SkipSteps: []types.StepName{types.StepReview}, ReviewLoopDisabled: true}
 	data, _ := json.Marshal(params)
 	var got RerunParams
 	if err := json.Unmarshal(data, &got); err != nil {
@@ -195,6 +199,9 @@ func TestRerunParams(t *testing.T) {
 	}
 	if len(got.SkipSteps) != 1 || got.SkipSteps[0] != types.StepReview {
 		t.Errorf("skip_steps = %#v, want review", got.SkipSteps)
+	}
+	if !got.ReviewLoopDisabled {
+		t.Error("review_loop_disabled = false, want true")
 	}
 }
 
@@ -239,15 +246,16 @@ func TestRespondParams(t *testing.T) {
 func TestRunInfoRoundTrip(t *testing.T) {
 	prURL := "https://github.com/user/repo/pull/42"
 	info := RunInfo{
-		ID:        "run001",
-		RepoID:    "repo001",
-		Branch:    "feature",
-		HeadSHA:   "abc123",
-		BaseSHA:   "def456",
-		Status:    types.RunRunning,
-		PRURL:     &prURL,
-		CreatedAt: 1700000000,
-		UpdatedAt: 1700000001,
+		ID:                 "run001",
+		RepoID:             "repo001",
+		Branch:             "feature",
+		HeadSHA:            "abc123",
+		BaseSHA:            "def456",
+		Status:             types.RunRunning,
+		PRURL:              &prURL,
+		ReviewLoopDisabled: true,
+		CreatedAt:          1700000000,
+		UpdatedAt:          1700000001,
 	}
 	data, _ := json.Marshal(info)
 	var got RunInfo
@@ -259,6 +267,9 @@ func TestRunInfoRoundTrip(t *testing.T) {
 	}
 	if got.PRURL == nil || *got.PRURL != prURL {
 		t.Errorf("pr_url = %v, want %q", got.PRURL, prURL)
+	}
+	if !got.ReviewLoopDisabled {
+		t.Error("review_loop_disabled = false, want true")
 	}
 }
 

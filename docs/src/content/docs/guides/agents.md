@@ -134,6 +134,8 @@ If your home directory consolidates `.claude` and `.agents` with symlinks, `init
 Re-run `no-mistakes init` after an upgrade to refresh that skill, including overwriting stale `SKILL.md` content from an older binary.
 Older versions vendored the skill into each initialized repo's `.claude/skills` and `.agents/skills`; those copies are no longer needed, and `init` prints a notice when it finds one so you can remove it.
 The skill drives `no-mistakes axi`, a non-interactive command surface that prints TOON to stdout and progress to stderr.
+When a single run should skip only the auxiliary Devin review loop, pass `no-mistakes axi run --review-loop=off` or push with `-o no-mistakes.review-loop=off`.
+That keeps the `ci` step active: GitHub checks, merge, and close monitoring still run.
 When CI is green but the PR is still open, `axi run` and `axi respond` return `outcome: checks-passed` with a help line pointing at the PR instead of waiting for a human merge.
 That is a successful agent stopping point: report that the PR is ready and ask the user to review and merge it.
 Successful outcomes also instruct the agent to summarize the run for the user.

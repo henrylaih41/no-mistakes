@@ -61,6 +61,7 @@ func newAxiRunCmd() *cobra.Command {
 	var skipValue string
 	var intent string
 	var designContextFiles []string
+	var reviewLoopValue string
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -74,7 +75,9 @@ func newAxiRunCmd() *cobra.Command {
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
 			"--design-context is optional and repeatable: pass design notes, ADRs, or\n" +
-			"issue agreements that reviewers and fixers should check the change against.",
+			"issue agreements that reviewers and fixers should check the change against.\n\n" +
+			"--review-loop=off disables only the auxiliary Devin review loop for this run;\n" +
+			"the CI step still monitors GitHub checks, merge, and close state.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -90,7 +93,11 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
 				}
-				return runAxiRun(cmd, autoYes, skipSteps, intent, designContextFiles)
+				reviewLoopDisabled, err := parseReviewLoopValue(reviewLoopValue)
+				if err != nil {
+					return emitError(cmd, 2, err.Error(), "Use --review-loop=off to disable only the Devin loop for this run")
+				}
+				return runAxiRun(cmd, autoYes, skipSteps, intent, designContextFiles, reviewLoopDisabled)
 			})
 		},
 	}
@@ -98,10 +105,11 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringArrayVar(&designContextFiles, "design-context", nil, "path to a design-context text file to inject into review and fix prompts (repeatable)")
+	cmd.Flags().StringVar(&reviewLoopValue, "review-loop", "", "set to off to disable only the Devin review loop for this run")
 	return cmd
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent string, designContextFiles []string) error {
+func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent string, designContextFiles []string, reviewLoopDisabled bool) error {
 	ctx := cmd.Context()
 	env, err := openAxiEnv(true)
 	if err != nil {
@@ -145,7 +153,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 			return emitError(cmd, 2, err.Error())
 		}
 		var startErr error
-		runID, startErr = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, designContextPaths)
+		runID, startErr = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, designContextPaths, reviewLoopDisabled)
 		if startErr != nil {
 			return emitError(cmd, 1, startErr.Error())
 		}
@@ -215,12 +223,15 @@ func preflightGuard(ctx context.Context, env *axiEnv, branch string) func(*cobra
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent string, designContextPaths []string) (string, error) {
+func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent string, designContextPaths []string, reviewLoopDisabled bool) (string, error) {
 	pushOptions := formatSkipPushOptions(skipSteps)
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
 	if opt := designcontext.FormatPushOption(designContextPaths); opt != "" {
+		pushOptions = append(pushOptions, opt)
+	}
+	if opt := formatReviewLoopPushOption(reviewLoopDisabled); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
 	pushErr := git.PushWithOptions(ctx, ".", gate.RemoteName, "refs/heads/"+branch, "", false, pushOptions)
@@ -235,7 +246,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	// No run appeared: the push was likely up-to-date. Rerun the latest gate
 	// head so `axi run` is still useful when there are no new commits.
 	var rr ipc.RerunResult
-	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, headSHA, skipSteps, intent, designContextPaths), &rr); err != nil {
+	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, headSHA, skipSteps, intent, designContextPaths, reviewLoopDisabled), &rr); err != nil {
 		return "", fmt.Errorf("no run started for %q: %v", branch, err)
 	}
 	return rr.RunID, nil
@@ -277,8 +288,8 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 	return &ipc.GetActiveRunParams{RepoID: repoID, Branch: branch}
 }
 
-func rerunParams(repoID, branch, expectedHead string, skipSteps []types.StepName, intent string, designContextPaths []string) *ipc.RerunParams {
-	return &ipc.RerunParams{RepoID: repoID, Branch: branch, ExpectedHeadSHA: expectedHead, SkipSteps: skipSteps, Intent: intent, DesignContextPaths: designContextPaths}
+func rerunParams(repoID, branch, expectedHead string, skipSteps []types.StepName, intent string, designContextPaths []string, reviewLoopDisabled bool) *ipc.RerunParams {
+	return &ipc.RerunParams{RepoID: repoID, Branch: branch, ExpectedHeadSHA: expectedHead, SkipSteps: skipSteps, Intent: intent, DesignContextPaths: designContextPaths, ReviewLoopDisabled: reviewLoopDisabled}
 }
 
 // driveRun polls a run until it reaches an approval gate, a terminal state, or

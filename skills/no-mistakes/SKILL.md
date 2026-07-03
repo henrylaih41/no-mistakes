@@ -97,6 +97,20 @@ that materialized contract on the run; reattaching to an in-flight run does not
 add or replace design context. Missing, unreadable, non-text, or invalid files
 fail loudly instead of being silently ignored.
 
+## Per-run review loop disable
+
+If a single run should skip only the auxiliary Devin review loop, pass
+`--review-loop=off` when starting the run:
+
+```sh
+no-mistakes axi run --intent "<what the user set out to accomplish>" --review-loop=off
+```
+
+Use this for a PR whose base repo is not Devin-applicable, or when the user
+explicitly asks to rely on CI checks only. It does NOT skip the `ci` step:
+GitHub checks, merge, and close monitoring still run. The equivalent Git
+push-option is `no-mistakes.review-loop=off`.
+
 ## Validate and decide
 
 Run the pipeline and decide on its findings as they come up:

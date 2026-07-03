@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -554,6 +555,7 @@ type ghReview struct {
 	CommitID    string `json:"commit_id"`
 	SubmittedAt string `json:"submitted_at"`
 	HTMLURL     string `json:"html_url"`
+	Body        string `json:"body"`
 	User        ghUser `json:"user"`
 }
 
@@ -701,8 +703,18 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 //   - CHANGES_REQUESTED: the bot reviewed headSHA and EITHER its MOST RECENT
 //     review on the matching head is a native CHANGES_REQUESTED state, OR it left
 //     at least one severe (high/medium) LIVE file-scoped finding.
-//   - APPROVED: the bot reviewed headSHA, its most recent head review is not
-//     CHANGES_REQUESTED, and no severe LIVE file-scoped findings remain.
+//   - MANUAL_REVIEW: the bot reviewed headSHA and its top-level body reports
+//     findings ("found N potential issues"), but no severe LIVE file-scoped
+//     finding could be loaded to drive an automated fix (threads missing,
+//     filtered to another commit, or unreadable). Not green, never auto-fixed:
+//     a human must verify rather than have the fixer fabricate changes.
+//   - APPROVED: the bot reviewed headSHA, its most recent head review is native
+//     APPROVED or its top-level body says "No Issues Found", and no severe LIVE
+//     file-scoped findings remain.
+//   - PENDING_AMBIGUOUS: the bot reviewed headSHA with a COMMENTED state whose
+//     body carries no recognized clean/finding verdict and no severe findings
+//     loaded. Handled like PENDING (grace/fail-open) but distinguishable so the
+//     caller can log an explicit "ambiguous body" reason.
 //
 // Only the MOST RECENT bot review targeting the head (by submitted_at) decides
 // the native state: a bot that requested changes and then re-reviewed the same
@@ -742,6 +754,8 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 	}
 
 	reviewedAny, reviewedHead, headChangesRequested := false, false, false
+	headNativeApproved := false
+	var latestHeadBody string
 	// Track the most recent bot review targeting the head (by submitted_at) so its
 	// state — not the OR of every state in the head's history — decides the native
 	// verdict. Ties (or unparseable timestamps) fall back to API order, which is
@@ -761,7 +775,7 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 			continue
 		}
 		reviewedAny = true
-		if !strings.EqualFold(strings.TrimSpace(r.CommitID), headSHA) {
+		if !sameCommitSHA(r.CommitID, headSHA) {
 			continue
 		}
 		reviewedHead = true
@@ -771,18 +785,28 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 		}
 		latestHeadAt = submittedAt
 		haveLatestHead = true
-		headChangesRequested = strings.EqualFold(strings.TrimSpace(r.State), "CHANGES_REQUESTED")
+		state := strings.TrimSpace(r.State)
+		headChangesRequested = strings.EqualFold(state, "CHANGES_REQUESTED")
+		headNativeApproved = strings.EqualFold(state, "APPROVED")
+		latestHeadBody = r.Body
 	}
 	if !reviewedAny {
 		return scm.VerdictNone, nil, nil
 	}
 
+	bodyVerdict := devinReviewBodyVerdict(latestHeadBody)
 	findings, err := h.GetBotFindings(ctx, prNumber, headSHA, botLogin)
 	if err != nil {
 		// A native CHANGES_REQUESTED on the head is authoritative from the review
 		// state alone, so surface not-green even when the findings read fails.
 		if headChangesRequested {
 			return scm.VerdictChangesRequested, nil, nil
+		}
+		// The body reports findings but we could not even load them: this is not
+		// green and must not be treated as a silent read error (which the caller
+		// would fail open on). Escalate to a human instead of dropping the signal.
+		if bodyVerdict == reviewBodyFindings {
+			return scm.VerdictManualReview, nil, nil
 		}
 		return "", nil, err
 	}
@@ -800,7 +824,105 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 			return scm.VerdictChangesRequested, findings, nil
 		}
 	}
-	return scm.VerdictApproved, findings, nil
+	// The body reports findings but none loaded as a severe file-scoped finding
+	// (threads missing/filtered/unresolved). This is not green, but there is
+	// nothing concrete to auto-fix — a human must verify.
+	if bodyVerdict == reviewBodyFindings {
+		return scm.VerdictManualReview, findings, nil
+	}
+	if headNativeApproved || bodyVerdict == reviewBodyClean {
+		return scm.VerdictApproved, findings, nil
+	}
+	// Reviewed the current head with a COMMENTED state but no recognizable
+	// verdict: distinct from "has not reviewed this head yet" so the caller can
+	// log an explicit ambiguous-body reason. Behaves like PENDING downstream.
+	return scm.VerdictPendingAmbiguous, findings, nil
+}
+
+// sameCommitSHA reports whether a review's commit_id and the run's head SHA name
+// the same commit. GitHub's REST API sometimes reports an abbreviated commit_id
+// on review objects, so an exact string match alone would miss a current-head
+// review and leave the verdict stuck at PENDING. A non-exact match is therefore
+// accepted, but ONLY as a genuine git abbreviation: both sides must be hex, the
+// shorter must be at least a 7-char (git's default) abbreviation, and the LONGER
+// must be a full-length object id (40 hex for SHA-1, 64 for SHA-256). Anchoring
+// the long side to a full-length SHA keeps this from ever collapsing two
+// arbitrary partial strings — or non-SHA text — into a false "same commit"; a
+// false positive would scope the review verdict to the wrong commit. Two
+// distinct full-length SHAs are equal-length and non-equal, so they never
+// prefix-match. Fails safe: when either operand is not a recognizable SHA, no
+// fuzzy match is attempted.
+func sameCommitSHA(reviewSHA, headSHA string) bool {
+	reviewSHA = strings.ToLower(strings.TrimSpace(reviewSHA))
+	headSHA = strings.ToLower(strings.TrimSpace(headSHA))
+	if reviewSHA == "" || headSHA == "" {
+		return false
+	}
+	if reviewSHA == headSHA {
+		return true
+	}
+	short, long := reviewSHA, headSHA
+	if len(short) > len(long) {
+		short, long = long, short
+	}
+	if len(short) < 7 || !isFullLengthSHA(long) || !isHexString(short) {
+		return false
+	}
+	return strings.HasPrefix(long, short)
+}
+
+// isHexString reports whether s is non-empty and composed solely of lowercase
+// hex digits. Callers lowercase before calling.
+func isHexString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// isFullLengthSHA reports whether s is a full-length git object id: 40 hex chars
+// for SHA-1 or 64 for SHA-256.
+func isFullLengthSHA(s string) bool {
+	return (len(s) == 40 || len(s) == 64) && isHexString(s)
+}
+
+type reviewBodyVerdict int
+
+const (
+	reviewBodyUnknown reviewBodyVerdict = iota
+	reviewBodyClean
+	reviewBodyFindings
+)
+
+var (
+	reviewBodyNoIssuesRE = regexp.MustCompile(`(?i)\bno\s+issues?\s+found\b`)
+	// reviewBodyZeroFoundRE is the explicit zero-count complement of the "found N
+	// potential issues" findings template: reviewBodyFindingsRE requires N>=1, so
+	// without this a clean "Found 0 potential issues" body would fall through to
+	// an ambiguous/pending verdict instead of green. A "0" count is unambiguously
+	// clean, so it can never false-green a real "found N" finding.
+	reviewBodyZeroFoundRE = regexp.MustCompile(`(?i)\bfound\s+0+\s+potential\s+issues?\b`)
+	reviewBodyFindingsRE  = regexp.MustCompile(`(?i)\bfound\s+[1-9][0-9]*\s+potential\s+issues?\b`)
+)
+
+func devinReviewBodyVerdict(body string) reviewBodyVerdict {
+	body = strings.Join(strings.Fields(body), " ")
+	if body == "" {
+		return reviewBodyUnknown
+	}
+	if reviewBodyFindingsRE.MatchString(body) {
+		return reviewBodyFindings
+	}
+	if reviewBodyNoIssuesRE.MatchString(body) || reviewBodyZeroFoundRE.MatchString(body) {
+		return reviewBodyClean
+	}
+	return reviewBodyUnknown
 }
 
 // ReplyToReviewComment posts a threaded reply under an existing PR review comment
