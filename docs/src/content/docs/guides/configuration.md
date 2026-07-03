@@ -181,6 +181,12 @@ test:
   evidence:
     store_in_repo: true
     dir: .no-mistakes/evidence
+
+# Optional repo-wide design-context files injected into review and fix prompts.
+design_context:
+  files:
+    - docs/design/*.md
+    - docs/adr/*.md
 ```
 
 See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full field listing.
@@ -196,7 +202,7 @@ See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full fi
 - `review_loop` from the repo config overlays the global review loop field by field. Fields not set in the repo config fall through to the global default.
 - `intent` from the repo config overlays global intent settings. Fields not set in the repo config fall through to the global default, except `intent.disabled_readers`, which adds to globally disabled readers.
 - `test.evidence` from the repo config overlays global test evidence settings. Fields not set in the repo config fall through to the global default.
-- `commands` and `ignore_patterns` are repo-only fields.
+- `commands`, `ignore_patterns`, and `design_context` are repo-only fields.
 - `ci_timeout` and `auto_fix.ci` are the canonical keys; `babysit_timeout` and `auto_fix.babysit` are still accepted as legacy aliases.
 - `commands`, `agent`, repo-level `review`, and repo-level `review_loop` are code-executing selection fields. By default they are read from the trusted default-branch copy of `.no-mistakes.yaml`, not from the pushed SHA; `allow_repo_commands: true` on the default branch opts into trusting pushed-branch values.
 - If `commands.test` is set, the test step runs it first as the baseline; when user intent is available, the agent may still run afterward to gather evidence-oriented validation.
