@@ -2,11 +2,21 @@ package steps
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
+
+// designContextMarkerPattern matches any dash-fenced BEGIN/END DESIGN CONTEXT
+// lead so a contributor-controlled body cannot forge the fence delimiter and
+// smuggle prompt text outside the untrusted-data region.
+var designContextMarkerPattern = regexp.MustCompile(`(?i)-{3,}(\s*(?:BEGIN|END)\s+DESIGN\s+CONTEXT)`)
+
+func neutralizeDesignContextMarkers(content string) string {
+	return designContextMarkerPattern.ReplaceAllString(content, "[design-context-marker]$1")
+}
 
 func designContextPromptSection(sctx *pipeline.StepContext) string {
 	if sctx == nil || len(sctx.DesignContext.Files) == 0 {
@@ -23,7 +33,7 @@ The following files were supplied at run start as design context. Treat them as 
 `)
 	for _, file := range sctx.DesignContext.Files {
 		source := sanitizePromptText(file.Source)
-		content := intent.RedactSecrets(intent.StripAdversarial(file.Content))
+		content := neutralizeDesignContextMarkers(intent.RedactSecrets(intent.StripAdversarial(file.Content)))
 		b.WriteString(fmt.Sprintf("\n-----BEGIN DESIGN CONTEXT: %s-----\n", source))
 		b.WriteString(content)
 		if !strings.HasSuffix(content, "\n") {

@@ -1,10 +1,12 @@
 package designcontext
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestMaterializeReadsCLIAndRepoFilesDeterministically(t *testing.T) {
@@ -161,6 +163,48 @@ func TestMaterializeStopsAtByteCapWithoutPlaceholderBloat(t *testing.T) {
 		if strings.Contains(f.Content, "omitted because the total cap") {
 			t.Fatalf("unexpected placeholder entry after cap: %q", f.Content)
 		}
+	}
+}
+
+func TestMaterializeBoundsEntryCountForEmptyFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// Empty files never advance the byte cap, so only the entry-count cap
+	// can keep a broad glob from appending an unbounded number of entries.
+	for i := 0; i < MaxFiles+25; i++ {
+		writeFile(t, filepath.Join(root, "junk", fmt.Sprintf("f%04d.md", i)), "")
+	}
+
+	ctx, err := Materialize(root, nil, []string{"junk/*.md"})
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+	if len(ctx.Files) != MaxFiles {
+		t.Fatalf("files = %d, want %d (entry-count cap)", len(ctx.Files), MaxFiles)
+	}
+}
+
+func TestMaterializeTruncatesOversizeUTF8FileCutMidRune(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// A multi-byte rune (3 bytes) repeated past the per-file cap guarantees the
+	// bounded read ends mid-rune; the file is valid UTF-8 and must not be
+	// rejected as invalid.
+	writeFile(t, filepath.Join(root, "big.md"), strings.Repeat("好", MaxFileBytes))
+
+	ctx, err := Materialize(root, nil, []string{"big.md"})
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+	if len(ctx.Files) != 1 {
+		t.Fatalf("files = %d, want 1", len(ctx.Files))
+	}
+	f := ctx.Files[0]
+	if !f.Truncated {
+		t.Fatal("expected oversize file to be truncated")
+	}
+	if !utf8.ValidString(f.Content) {
+		t.Fatalf("truncated content is not valid UTF-8: %q", f.Content)
 	}
 }
 

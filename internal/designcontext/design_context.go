@@ -17,6 +17,7 @@ import (
 const (
 	MaxFileBytes  = 64 * 1024
 	MaxTotalBytes = 256 * 1024
+	MaxFiles      = 64
 
 	pushOptionPrefix = "no-mistakes.design-context="
 )
@@ -101,7 +102,7 @@ func Materialize(workDir string, cliPaths, repoSelectors []string) (types.Design
 	files := make([]types.DesignContextFile, 0, len(refs))
 	total := 0
 	for _, ref := range refs {
-		if total >= MaxTotalBytes {
+		if total >= MaxTotalBytes || len(files) >= MaxFiles {
 			break
 		}
 		if seen[ref.canonical] {
@@ -253,17 +254,37 @@ func readTextFile(source, path string, totalBefore int) (types.DesignContextFile
 	if int64(len(data)) > file.OriginalBytes {
 		file.OriginalBytes = int64(len(data))
 	}
-	if !utf8.Valid(data) {
+	truncated := len(data) > limit
+	validate := data
+	if truncated {
+		validate = trimIncompleteTrailingRune(data)
+	}
+	if !utf8.Valid(validate) {
 		return types.DesignContextFile{}, fmt.Errorf("design context %q is not valid UTF-8", source)
 	}
-	text := string(data)
-	if len(text) > limit {
-		file.Content = safePrefix(text, limit) + fmt.Sprintf("\n\n[no-mistakes: design context truncated at %d bytes; original file was %d bytes]", limit, file.OriginalBytes)
+	if truncated {
+		file.Content = safePrefix(string(data), limit) + fmt.Sprintf("\n\n[no-mistakes: design context truncated at %d bytes; original file was %d bytes]", limit, file.OriginalBytes)
 		file.Truncated = true
 		return file, nil
 	}
-	file.Content = text
+	file.Content = string(data)
 	return file, nil
+}
+
+// trimIncompleteTrailingRune drops a multi-byte UTF-8 sequence that the bounded
+// read cut mid-rune, so a valid oversized file is not misclassified as invalid.
+// A genuinely invalid trailing byte is a full-width error rune, so it is kept
+// and utf8.Valid still rejects it.
+func trimIncompleteTrailingRune(data []byte) []byte {
+	for i := 1; i <= utf8.UTFMax && i <= len(data); i++ {
+		if utf8.RuneStart(data[len(data)-i]) {
+			if utf8.FullRune(data[len(data)-i:]) {
+				return data
+			}
+			return data[:len(data)-i]
+		}
+	}
+	return data
 }
 
 func accountedSourceBytes(original int64, remaining int) int {
