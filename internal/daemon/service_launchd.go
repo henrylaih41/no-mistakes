@@ -33,7 +33,13 @@ func installLaunchAgent(p *paths.Paths, exe string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create launch agents directory: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(renderLaunchAgent(exe, p, home)), 0o644); err != nil {
+	// writeServiceFile resolves the proxy environment once and feeds it to the
+	// renderer, so the plist content and its permission mode stay in sync
+	// (see serviceProxyEnv / writeServiceFile).
+	render := func(proxyEnv [][2]string) string {
+		return renderLaunchAgentWithProxyEnv(exe, p, home, proxyEnv)
+	}
+	if err := writeServiceFile(path, launchAgentProxyEnv, render); err != nil {
 		return fmt.Errorf("write launch agent: %w", err)
 	}
 	cleanupLegacyLaunchAgent(p)
@@ -173,7 +179,19 @@ func launchdDomainTarget() (string, error) {
 	return "gui/" + u.Uid, nil
 }
 
+// renderLaunchAgent renders the launchd plist, resolving the proxy environment
+// from the current process environment itself. It is a convenience wrapper used
+// only by tests; production callers use renderLaunchAgentWithProxyEnv, because
+// both the install path and drift detection resolve the proxy environment once
+// (preferring the on-disk definition when the live environment has none) and
+// pass it in.
 func renderLaunchAgent(exe string, p *paths.Paths, home string) string {
+	return renderLaunchAgentWithProxyEnv(exe, p, home, serviceProxyEnv())
+}
+
+// renderLaunchAgentWithProxyEnv renders the launchd plist using a proxy
+// environment supplied by the caller (see serviceProxyEnv).
+func renderLaunchAgentWithProxyEnv(exe string, p *paths.Paths, home string, proxyEnv [][2]string) string {
 	values := []string{exe, "daemon", "run", "--root", p.Root()}
 	var args strings.Builder
 	for _, value := range values {
@@ -181,6 +199,29 @@ func renderLaunchAgent(exe string, p *paths.Paths, home string) string {
 		args.WriteString(xmlEscaped(value))
 		args.WriteString("</string>\n")
 	}
+	// Build the entire EnvironmentVariables <dict> as one self-contained block:
+	// the fixed HOME/PATH entries plus the forwarded proxy variables, closed by
+	// its own </dict>. Assembling the complete dict here avoids splicing a
+	// proxy fragment into the template via "%s  </dict>", which depended on the
+	// fragment's trailing newline and indentation lining up. Proxy variables are
+	// forwarded so the daemon (and the agents it spawns) can reach the network
+	// through the user's proxy. See serviceProxyEnv.
+	var envDict strings.Builder
+	envDict.WriteString("  <dict>\n")
+	envDict.WriteString("    <key>HOME</key>\n    <string>")
+	envDict.WriteString(xmlEscaped(home))
+	envDict.WriteString("</string>\n")
+	envDict.WriteString("    <key>PATH</key>\n    <string>")
+	envDict.WriteString(xmlEscaped(managedServicePath(home)))
+	envDict.WriteString("</string>\n")
+	for _, kv := range proxyEnv {
+		envDict.WriteString("    <key>")
+		envDict.WriteString(xmlEscaped(kv[0]))
+		envDict.WriteString("</key>\n    <string>")
+		envDict.WriteString(xmlEscaped(kv[1]))
+		envDict.WriteString("</string>\n")
+	}
+	envDict.WriteString("  </dict>")
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -193,12 +234,7 @@ func renderLaunchAgent(exe string, p *paths.Paths, home string) string {
   <key>WorkingDirectory</key>
   <string>%s</string>
   <key>EnvironmentVariables</key>
-  <dict>
-    <key>HOME</key>
-    <string>%s</string>
-    <key>PATH</key>
-    <string>%s</string>
-  </dict>
+%s
   <key>StandardOutPath</key>
   <string>%s</string>
   <key>StandardErrorPath</key>
@@ -209,7 +245,7 @@ func renderLaunchAgent(exe string, p *paths.Paths, home string) string {
   <true/>
 </dict>
 </plist>
-`, xmlEscaped(launchdServiceLabel(p)), args.String(), xmlEscaped(p.Root()), xmlEscaped(home), xmlEscaped(managedServicePath(home)), xmlEscaped(p.DaemonLog()), xmlEscaped(p.DaemonLog()))
+`, xmlEscaped(launchdServiceLabel(p)), args.String(), xmlEscaped(p.Root()), envDict.String(), xmlEscaped(p.DaemonLog()), xmlEscaped(p.DaemonLog()))
 }
 
 // managedServicePath returns a default PATH for daemons started by a service

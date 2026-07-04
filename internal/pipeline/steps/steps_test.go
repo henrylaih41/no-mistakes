@@ -3,6 +3,7 @@ package steps
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -18,6 +19,10 @@ func TestMain(m *testing.M) {
 		handleFakeCLI(mode)
 		return
 	}
+	// Agent harnesses inject git config (e.g. safe.bareRepository=explicit)
+	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n; tests that need it re-set it with
+	// t.Setenv (issue #362).
+	os.Unsetenv("GIT_CONFIG_COUNT")
 	os.Exit(m.Run())
 }
 
@@ -32,6 +37,7 @@ func handleFakeCLI(mode string) {
 			f.Close()
 		}
 	}
+	logFakeCLIStdinBody(args, logFile)
 
 	switch mode {
 	case "gh":
@@ -59,6 +65,32 @@ func handleFakeCLI(mode string) {
 	default:
 		os.Exit(1)
 	}
+}
+
+func logFakeCLIStdinBody(args []string, logFile string) {
+	if logFile == "" || !argsUseStdinBodyFile(args) {
+		return
+	}
+	body, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprint(f, "stdin --body ")
+	fmt.Fprintln(f, string(body))
+}
+
+func argsUseStdinBodyFile(args []string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--body-file" && args[i+1] == "-" {
+			return true
+		}
+	}
+	return false
 }
 
 func fakeRecordSuccessHandler() {

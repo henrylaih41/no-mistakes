@@ -72,13 +72,21 @@ Default agent for all repos and setup-wizard suggestions. Can be overridden per-
 
 | | |
 |---|---|
-| Type | `string` |
+| Type | `string` or `string[]` |
 | Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `acp:<target>` |
 | Default | `auto` |
 
 `auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, then `copilot`.
 `acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`.
 ACP agents are opt-in and are not considered by `agent: auto`.
+
+You can also set an ordered fallback list:
+
+```yaml
+agent: [codex, claude]
+```
+
+The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent. If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback. Structured findings and schema/output validation problems do not trigger fallback.
 
 ### acpx_path
 
@@ -189,7 +197,7 @@ agent_args_override:
 
 ### ci_timeout
 
-How long the CI step monitors an open PR, including provider CI status and on GitHub or GitLab PR mergeability, before giving up.
+How long the CI step monitors an open PR, including provider CI status and on GitHub, GitLab, or Azure DevOps PR mergeability, before giving up.
 
 | | |
 |---|---|
@@ -200,7 +208,7 @@ Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 
 This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
 So an actively-updated green PR keeps its monitor no matter how long it stays open.
-If it later develops an actual GitHub or GitLab merge conflict, the CI auto-fix path rebases and re-pushes it, while a clean behind PR needs no command.
+If it later develops an actual GitHub, GitLab, or Azure DevOps merge conflict, the CI auto-fix path rebases and re-pushes it, while a clean behind PR needs no command.
 A genuinely idle/abandoned PR is still reaped after the timeout elapses.
 
 Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to monitor until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`.
@@ -234,7 +242,7 @@ For empty `commands.lint`, the agent still attempts safe fixes during the initia
 | `auto_fix.test` | `int` | `3` | Test failure auto-fix attempts |
 | `auto_fix.document` | `int` | `3` | Not used by the automatic document pass |
 | `auto_fix.lint` | `int` | `3` | Lint issue auto-fix attempts |
-| `auto_fix.ci` | `int` | `3` | CI auto-fix attempts for CI failures, plus GitHub and GitLab merge conflicts |
+| `auto_fix.ci` | `int` | `3` | CI auto-fix attempts for CI failures, plus GitHub, GitLab, and Azure DevOps merge conflicts |
 
 Legacy alias: `auto_fix.babysit`.
 

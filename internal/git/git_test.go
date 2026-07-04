@@ -9,6 +9,28 @@ import (
 	"testing"
 )
 
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "no-mistakes-git-tests-")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(dir, "gitconfig")); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("GIT_CONFIG_NOSYSTEM", "1"); err != nil {
+		panic(err)
+	}
+	// Agent harnesses inject git config (e.g. safe.bareRepository=explicit)
+	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n; tests that need it re-set it with
+	// t.Setenv (issue #362).
+	if err := os.Unsetenv("GIT_CONFIG_COUNT"); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // helper: create a non-bare git repo with an initial commit
 func initTestRepo(t *testing.T) string {
 	t.Helper()
@@ -339,5 +361,66 @@ func TestIsDetachedHEADWhenDetached(t *testing.T) {
 	}
 	if !detached {
 		t.Fatal("expected detached HEAD after checking out a commit SHA")
+	}
+}
+
+// setSafeBareRepositoryExplicit injects the git config used by agent
+// harnesses (e.g. Claude Code) and hardened CI environments, which forbids
+// cwd-based discovery of bare repositories (issue #362).
+func setSafeBareRepositoryExplicit(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+}
+
+func TestRunOnBareRepoUnderSafeBareRepositoryExplicit(t *testing.T) {
+	setSafeBareRepositoryExplicit(t)
+	ctx := context.Background()
+
+	bare := filepath.Join(t.TempDir(), "gate.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatalf("init bare: %v", err)
+	}
+
+	if _, err := Run(ctx, bare, "config", "receive.advertisePushOptions", "true"); err != nil {
+		t.Fatalf("config write on bare repo: %v", err)
+	}
+	got, err := Run(ctx, bare, "config", "--get", "receive.advertisePushOptions")
+	if err != nil {
+		t.Fatalf("config read on bare repo: %v", err)
+	}
+	if got != "true" {
+		t.Fatalf("receive.advertisePushOptions = %q, want true", got)
+	}
+
+	// A working repo must keep using normal cwd discovery.
+	work := initTestRepo(t)
+	if out, err := Run(ctx, work, "rev-parse", "--is-inside-work-tree"); err != nil || out != "true" {
+		t.Fatalf("rev-parse in working repo = %q, %v; want true, nil", out, err)
+	}
+}
+
+func TestWorktreeAddRemoveOnBareRepoUnderSafeBareRepositoryExplicit(t *testing.T) {
+	setSafeBareRepositoryExplicit(t)
+	ctx := context.Background()
+
+	work := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "gate.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatalf("init bare: %v", err)
+	}
+	run(t, work, "git", "push", bare, "HEAD:refs/heads/main")
+	sha := run(t, work, "git", "rev-parse", "HEAD")
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := WorktreeAdd(ctx, bare, wt, sha); err != nil {
+		t.Fatalf("worktree add from bare repo: %v", err)
+	}
+	if got, err := Run(ctx, wt, "rev-parse", "HEAD"); err != nil || got != sha {
+		t.Fatalf("rev-parse in worktree = %q, %v; want %q, nil", got, err, sha)
+	}
+	if err := WorktreeRemove(ctx, bare, wt); err != nil {
+		t.Fatalf("worktree remove from bare repo: %v", err)
 	}
 }

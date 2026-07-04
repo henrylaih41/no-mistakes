@@ -46,7 +46,7 @@ auto_fix:
   test: 3
   document: 3
   lint: 3
-  ci: 3        # shared by CI for failures, and on GitHub/GitLab for merge conflicts
+  ci: 3        # shared by CI for failures, and on GitHub/GitLab/Azure DevOps for merge conflicts
 ```
 
 Setting a step to `0` disables the follow-up auto-fix loop, so the pipeline pauses for human input when that step finds issues.
@@ -55,7 +55,7 @@ For empty `commands.lint`, the initial lint pass can still apply safe fixes befo
 
 `auto_fix.review` defaults to `0`, so review findings require manual approval unless you opt in.
 
-`auto_fix.ci` applies to the CI step. The same limit covers CI-failure fixes for supported providers, plus merge-conflict fixes on GitHub and GitLab.
+`auto_fix.ci` applies to the CI step. The same limit covers CI-failure fixes for supported providers, plus merge-conflict fixes on GitHub, GitLab, and Azure DevOps.
 
 Repo config overlays global config - you can set `auto_fix.lint: 5` in a repo's `.no-mistakes.yaml` to override just that step while inheriting the rest from global.
 
@@ -114,6 +114,10 @@ A round stores its findings, duration, any selected finding IDs and whether that
 That merged payload can include per-finding user notes and user-authored findings added from the TUI or AXI interface.
 The PR body's deterministic risk assessment, testing, and pipeline sections are built from these rounds, giving reviewers visibility into test results, review risk, what was fixed, and how many attempts it took.
 In PR pipeline details, auto-fix rounds are rendered as an issue -> fix -> verification narrative instead of a round-numbered log: each fix summary is followed by either a successful re-check or the findings still open after that fix.
+On very long runs, the PR body uses a 63,488-byte safety cap, which leaves a 2 KB buffer below GitHub's 65,536-character body limit.
+It first keeps the newest pipeline update rounds and replaces older rounds with an omission marker at whole-update boundaries.
+If the newest update or essential body content is still too large, the PR step truncates at line or section boundaries and adds an explicit marker.
+The full round history remains available in the run log.
 
 Round trigger types:
 - `initial` - first execution

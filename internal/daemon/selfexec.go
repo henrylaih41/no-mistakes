@@ -69,6 +69,14 @@ func Start(p *paths.Paths) error {
 		}
 		return fmt.Errorf("daemon already running")
 	}
+	// Canonical socket is dead. A daemon for the same logical root may still be
+	// alive under a different path spelling (symlinked or relative NM_HOME),
+	// which the socket-keyed health check above cannot see. Detect via the OS
+	// process list: refuse if a healthy stray is serving this root, or reap a
+	// stale stray (including a crash-looping managed unit) before starting.
+	if err := reconcileCollidingDaemons(p); err != nil {
+		return err
+	}
 	if managed, err := installManagedService(p); err == nil {
 		if managed {
 			if err := startManagedDaemon(p); err == nil {
@@ -115,23 +123,35 @@ func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
 	}
 
 	existing, readErr := os.ReadFile(installPath)
+	// Inherit any proxy already baked into the existing definition so an
+	// env-less `daemon start` does not render a no-proxy target, falsely detect
+	// drift, and reinstall - which would strip the proxy and re-break the daemon
+	// with "403 Request not allowed". This mirrors the executable inheritance
+	// below: prefer the current environment, fall back to what is on disk.
+	var inheritedProxyEnv [][2]string
 	if readErr == nil {
 		switch runtimeGOOS {
 		case "darwin":
 			if existingExe, ok := launchAgentExecutable(existing); ok {
 				renderedExecutable = existingExe
 			}
+			inheritedProxyEnv = launchAgentProxyEnv(existing)
 		case "linux":
 			if existingExe, ok := systemdUnitExecutable(existing); ok {
 				renderedExecutable = existingExe
 			}
+			inheritedProxyEnv = systemdUnitProxyEnv(existing)
 		}
+	}
+	proxyEnv := serviceProxyEnv()
+	if len(proxyEnv) == 0 {
+		proxyEnv = inheritedProxyEnv
 	}
 	switch runtimeGOOS {
 	case "darwin":
-		wanted = renderLaunchAgent(renderedExecutable, p, home)
+		wanted = renderLaunchAgentWithProxyEnv(renderedExecutable, p, home, proxyEnv)
 	case "linux":
-		wanted = renderSystemdUnit(renderedExecutable, p, home)
+		wanted = renderSystemdUnitWithProxyEnv(renderedExecutable, p, home, proxyEnv)
 	}
 	switch {
 	case readErr == nil && string(existing) == wanted:
@@ -147,7 +167,7 @@ func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
 	}
 	stoppedForRefresh := false
 	restoreOnFailure := func(cause error) (bool, error) {
-		if err := os.WriteFile(installPath, existing, restoreMode); err != nil {
+		if err := writeFileAtomic(installPath, existing, restoreMode); err != nil {
 			return false, fmt.Errorf("%w; restore managed service definition: %v", cause, err)
 		}
 		if err := reloadManagedServiceDefinition(p); err != nil {

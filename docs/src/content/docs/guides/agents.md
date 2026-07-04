@@ -22,6 +22,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
+- Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
 - Configure `review.reviewers` when you want multiple agent families to independently review the same diff.
 - Set explicit `commands.test` and `commands.lint` if you want deterministic baseline command execution regardless of agent choice.
 
@@ -60,6 +61,15 @@ agent: codex
 ```
 
 Repo config takes precedence over global config.
+
+### Ordered fallback list
+
+```yaml
+# ~/.no-mistakes/config.yaml or .no-mistakes.yaml
+agent: [codex, claude]
+```
+
+no-mistakes filters the list to agents available on the daemon's `PATH`, uses the first available entry as the primary agent, and keeps later available entries as fallbacks. If an invocation fails because the current agent process cannot start or exits with an unavailable/error condition, that invocation is retried with the next fallback. Structured findings and schema/output validation failures do not trigger fallback.
 
 ### Optional ACP target
 
@@ -194,6 +204,8 @@ The default binary names are:
 
 When the daemon is running through a managed service, that `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories. If login-shell resolution fails, the daemon logs a warning and uses a degraded fallback `PATH` that may omit version-manager shim directories. On Windows it reuses the current process environment instead of reloading a login shell. If native agent discovery still does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and use an explicit `agent_path_override`.
 
+For an ordered fallback list, no-mistakes checks each configured entry at run startup and drops unavailable entries. If none are available, the run fails before the pipeline starts.
+
 Override paths in global config:
 
 ```yaml
@@ -233,6 +245,10 @@ Each invocation returns:
 - **Text** - raw text output
 - **Usage** - token counts (input, output, cache read, cache creation)
 
+One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, and acpx) are invocation-scoped.
+After no-mistakes starts one, it terminates any remaining child processes when the invocation exits, fails, or is cancelled, so agent-spawned test workers, build watchers, and dev servers do not survive the step.
+Persistent server agents (Rovo Dev and OpenCode) use their managed server lifecycle instead.
+
 Transient API and network failures are retried up to three times with exponential backoff. Retry messages are streamed through the same `OnChunk` path shown in the TUI.
 
 ## Intent extraction
@@ -268,7 +284,7 @@ Starts a persistent HTTP server (`acli rovodev serve`) on first use and reuses i
 
 ## OpenCode
 
-Starts a persistent HTTP server (`opencode serve`) on first use and reuses it across invocations. If a reused server refuses a connection, no-mistakes discards it and retries with a fresh server. Any `agent_args_override.opencode` flags are inserted before no-mistakes' managed serve flags. Similar session lifecycle to Rovo Dev: create session, send message, stream SSE events until idle, delete session. Supports `json_schema` format in the message request for structured output. When native structured output is absent, it falls back to parsing the final text with the same JSON fence and bare-object fallback, validating that fallback result against the requested schema while allowing `null` for optional fields.
+Starts a persistent HTTP server (`opencode serve`) on first use and reuses it across invocations. If a reused server refuses a connection, no-mistakes discards it and retries with a fresh server. Any `agent_args_override.opencode` flags are inserted before no-mistakes' managed serve flags. Similar session lifecycle to Rovo Dev: create session, send message, stream SSE events until idle, delete session. Supports `json_schema` format in the message request for structured output, with `retryCount: 2` so the model gets a second chance to emit a structured response. When opencode reports `info.error.name = "StructuredOutputError"` (the model did not call the StructuredOutput tool after those retries), no-mistakes surfaces a clean error including the retry count rather than falling through to text-parsing the streamed reasoning prose. When native structured output is genuinely absent, it falls back to parsing the final text with the same JSON fence and bare-object fallback, validating that fallback result against the requested schema while allowing `null` for optional fields.
 
 ## Pi
 

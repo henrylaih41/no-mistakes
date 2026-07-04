@@ -111,6 +111,12 @@ no-mistakes daemon stop
 no-mistakes daemon start
 ```
 
+## Agents fail with "403 Request not allowed" behind a proxy
+
+Symptom: runs fail and the step log shows agents (for example `claude --print`) unable to reach the network, often with `403 Request not allowed`.
+
+A managed daemon started by launchd or systemd inherits only a minimal environment, so it does not see the `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` / `ALL_PROXY` variables from your shell. `no-mistakes` bakes any proxy variables that are set when you install or refresh the service into the generated service definition. If you set up the proxy after installing, re-run the installer or `no-mistakes daemon restart` (with the proxy variables exported) so they get baked in, then confirm them in `~/.config/systemd/user/no-mistakes-daemon-*.service` on Linux or `~/Library/LaunchAgents/com.kunchenguid.no-mistakes.daemon.*.plist` on macOS. Once baked in, the values survive later restarts and binary upgrades even from a shell that does not export them, so you only need the variables exported the first time. Windows Task Scheduler inherits your logon environment and needs no forwarding.
+
 ## macOS App Management prompts during agent runs
 
 Pipeline prompts steer agents to keep intentional writes inside the disposable worktree and avoid mutating system locations such as `/Applications`, Homebrew-managed packages, or global tool configuration.
@@ -190,9 +196,10 @@ Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requ
 - `gh` or `glab` not installed
 - `gh auth status` shows not authenticated
 - Bitbucket env vars not set in the daemon's environment
-- Upstream is on a host that isn't supported (GitHub, GitLab, or `bitbucket.org`)
-- Self-hosted GitLab on a hostname with no `gitlab` marker isn't detected because `glab` isn't configured for the host; run `glab auth login --hostname your-gitlab.example.com` so detection finds it
-- A GitLab or Bitbucket repo record has a fork URL set; fork MR/PR routing is currently GitHub-only
+- Upstream is on a host that isn't supported (GitHub, GitLab, `bitbucket.org`, or Azure DevOps)
+- Self-hosted GitHub Enterprise on a hostname that is not `github.com` isn't detected because `gh` isn't configured for the host; run `gh auth login --hostname your-ghe.example.com` so detection finds it. Once detection succeeds, the availability check is host-scoped (`gh auth status --hostname your-ghe.example.com`), so a stale token on `github.com` or any other configured gh host can no longer falsely mark the GHE repo as unauthenticated.
+- Self-hosted GitLab on a hostname with no `gitlab` marker isn't detected because `glab` isn't configured for the host; run `glab auth login --hostname your-gitlab.example.com` so detection finds it. Once detection succeeds, the availability check is host-scoped (`glab auth status --hostname your-gitlab.example.com`), so a stale token on `gitlab.com` or any other configured glab host can no longer falsely mark the self-hosted repo as unauthenticated.
+- A GitLab, Bitbucket, or Azure DevOps repo record has a fork URL set; fork MR/PR routing is currently GitHub-only
 - You pushed the default branch (PR step always skips on the default branch)
 
 ## CI step stuck or timed out
@@ -201,7 +208,7 @@ Symptom: CI step keeps monitoring an open PR longer than expected, or pauses aft
 
 `ci_timeout` defaults to `168h` (7 days) and is an idle timeout.
 It re-arms whenever the upstream default branch advances, so an active long-lived PR keeps being watched.
-If the provider later reports an actual GitHub or GitLab merge conflict, the CI auto-fix path rebases and re-pushes the branch; a clean behind PR needs no command.
+If the provider later reports an actual GitHub, GitLab, or Azure DevOps merge conflict, the CI auto-fix path rebases and re-pushes the branch; a clean behind PR needs no command.
 Set it in `~/.no-mistakes/config.yaml` to choose a different idle window:
 
 ```yaml

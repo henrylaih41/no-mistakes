@@ -83,6 +83,11 @@ The local bare repo gives Git a normal place to receive pushes. That keeps the
 push path simple and lets a standard `post-receive` hook hand work off to the
 daemon.
 
+Git operations on the gate name the bare repo explicitly with `--git-dir`
+instead of relying on working-directory discovery, so hardened environments
+that set `safe.bareRepository=explicit` (common in agent harnesses and CI)
+work unchanged.
+
 ### Daemon
 
 The daemon owns long-running work: creating worktrees, running the pipeline,
@@ -114,6 +119,7 @@ A long-running background process that manages pipeline runs. It:
 - Writes its identity record to `~/.no-mistakes/daemon.pid`
 - Serializes concurrent pushes to the same branch (new push cancels the in-progress run)
 - Creates and cleans up worktrees
+- Scopes configured commands and one-shot agent subprocesses to the step lifetime by terminating remaining child processes on completion, failure, or cancellation
 - Persists state to SQLite
 - Streams events to connected TUI clients via IPC
 

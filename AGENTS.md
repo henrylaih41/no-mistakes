@@ -92,16 +92,23 @@ Safest local verification sequence after non-trivial changes:
 
 - Thread `context.Context` through long-running, subprocess, and networked work.
 - Prefer `exec.CommandContext` for subprocesses.
-- Route every long-lived subprocess spawned on behalf of a cancellable step/agent
-  invocation through `shellenv.ConfigureShellCommand(cmd)` after building the
-  `*exec.Cmd`. It puts the child in its own process group (Unix `Setpgid` /
-  Windows `CREATE_NEW_PROCESS_GROUP`) and installs `cmd.Cancel` to kill the whole
-  tree on context cancellation. Without it, `exec.CommandContext` only kills the
-  direct child and grandchildren survive (e.g. `npm` -> `node` test workers,
-  agent-spawned git/build/editor), keep running, and hold the worktree locked so
-  the next run on the same branch cannot proceed. Applied to the step shell
-  runner (`runShellCommandWithEnv`) and the native agent `runOnce` builders
-  (claude, codex, pi, copilot, acpx); apply it to any new subprocess in those paths.
+- Route every long-lived subprocess spawned on behalf of a cancellable step/agent invocation through `shellenv.ConfigureShellCommand(cmd)` after building the `*exec.Cmd`.
+  It puts the child in its own process tree boundary (Unix `Setpgid`, Windows job object with `taskkill` fallback) and installs `cmd.Cancel` to kill the whole tree on context cancellation.
+  Without it, `exec.CommandContext` only kills the direct child and grandchildren survive (e.g. `npm` -> `node` test workers, agent-spawned git/build/editor), keep running, and hold the worktree locked so the next run on the same branch cannot proceed.
+  Applied to the step shell runner (`runShellCommandWithEnv`) and the native agent `runOnce` builders (claude, codex, pi, copilot, acpx); apply it to any new subprocess in those paths.
+- `cmd.Cancel` only covers the **cancellation** half of the lifecycle.
+  On a clean exit (exit 0) or an error return it never fires, so a grandchild that outlived the leader - a test runner's worker pool, a build watcher, a dev server - is **not** reaped.
+  This is the agent-spawning test step's failure mode: a repo with no `commands.test` asks the agent to run the tests, the agent's worker pool leaks on every clean run, and the orphans accumulate (each a multi-hundred-MB pool) until the host is out of memory and the OS OOM-killer SIGKILLs the daemon - surfacing on the next start as `daemon crashed during execution` (no Go stack trace, because SIGKILL is uncatchable).
+  Use `shellenv.RunShellCommand`, `shellenv.OutputShellCommand`, or `shellenv.CombinedOutputShellCommand` for one-shot commands; they start the command and reap the group on success/error paths too.
+  When manual pipe handling is needed, use `shellenv.StartShellCommand(cmd)` and ensure `shellenv.TerminateShellCommandGroup(cmd)` runs as soon as the command is done or the parse loop fails.
+  For stdout/stderr parsers that read until EOF, make the Wait owner terminate the group when the leader exits so a descendant holding inherited pipes cannot wedge the parser.
+  `startNativeAgentCommand` owns that lifecycle for the native agent runners.
+  Group termination is a harmless no-op (ESRCH) when nothing survived.
+  `ConfigureShellCommand` also installs a `cmd.WaitDelay` pipe backstop (5s, now on unix as well as Windows) so a grandchild holding an inherited stdout/stderr pipe open after exit can't wedge `cmd.Wait`/`CombinedOutput` forever; it bounds the hang into a graceful step failure instead of taking the daemon down.
+  Regressions:
+  `TestCodexAgent_Run_ReapsLeakedGrandchildOnCleanExit` (agent path),
+  `TestRunShellCommandWithEnv_ReapsGrandchildOnCleanExit` (configured-command path),
+  `TestTerminateShellCommandGroup_*` (the primitive).
 - Use derived contexts and timeouts for cleanup and HTTP calls.
 - Use `context.Background()` mainly at top-level boundaries, background tasks, or in tests.
 - Protect shared mutable state with `sync.Mutex`, `sync.RWMutex`, `sync.Map`, or `atomic` where appropriate.
@@ -115,6 +122,10 @@ Safest local verification sequence after non-trivial changes:
 - Existing code typically uses `0o755` for directories and `0o644` for files such as logs.
 - On macOS, remember that path comparisons may need symlink resolution like `/var` vs `/private/var`.
 
+**Git on Bare Gate Repos (`safe.bareRepository`)**
+
+- Agent harnesses (e.g. Claude Code) and hardened CI inject `safe.bareRepository=explicit` via `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, which forbids cwd-based discovery of bare repositories. Every git operation on a gate repo must therefore name it explicitly: `git.Run` detects a bare git dir (`isBareGitDir`: `HEAD` file + `objects/` dir, no `.git` entry) and prepends `--git-dir=<dir>`; working trees and linked worktrees keep normal discovery. Route gate git calls through `git.Run` - never shell out to git in a bare gate repo relying only on `cmd.Dir` or `-C` discovery (issue #362). Regressions: `TestRunOnBareRepoUnderSafeBareRepositoryExplicit`, `TestWorktreeAddRemoveOnBareRepoUnderSafeBareRepositoryExplicit`, `TestInitUnderSafeBareRepositoryExplicit`.
+
 **Testing Conventions**
 
 - Tests live next to the code in `*_test.go` files.
@@ -124,11 +135,13 @@ Safest local verification sequence after non-trivial changes:
 - Use `t.TempDir()` for isolated filesystem state.
 - Use `t.Setenv()` for environment-dependent behavior.
 - Prefer creating real git repos in temp directories instead of relying on heavy mocking.
+- Packages whose tests shell out to git unset `GIT_CONFIG_COUNT` in `TestMain` so ambient `GIT_CONFIG_*` injection from agent harnesses cannot leak into tests; a test that exercises the injected config re-sets it with `t.Setenv` (see `internal/git`, `internal/gate`, `internal/daemon`, `internal/pipeline/steps`). Follow the same pattern in new git-spawning test packages.
 - CLI tests often capture output and assert with `strings.Contains`.
 - Prefer e2e tests, new or existing, for behavior that crosses a process or I/O boundary: CLI flags, config loading, git operations, agent spawning, daemon/process coordination, stdout/stderr, and recorded fixtures.
 - Unit-test pure helpers and tightly scoped package behavior where speed and failure localization are worth more than full-product realism.
 - Prefer targeted package tests while iterating, then finish with `go test -race ./...` and `make e2e` when your change affects those process or I/O boundaries.
 - The e2e suite lives behind the `e2e` build tag, so it is excluded from `go test ./...` and runs separately in CI via `make e2e`.
+- `make e2e` sweeps both `./internal/e2e/...` (full journey suite) and `./internal/pipeline/steps/...`, so step-local e2e tests (e.g. `internal/pipeline/steps/*_e2e_test.go`, gated by `//go:build e2e`) are also covered. Keep new step-local e2e tests behind the `e2e` tag so `go test ./...` still skips them.
 
 **Repo Config Trust Boundary (security)**
 
