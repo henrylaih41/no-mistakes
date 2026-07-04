@@ -161,6 +161,39 @@ func TestRecoverOnStartupLogsOrphanWorktreeActorAndReason(t *testing.T) {
 	}
 }
 
+func TestDaemonExitState_SetOnce(t *testing.T) {
+	s := newDaemonExitState()
+	if got := s.get(); got != "unknown" {
+		t.Fatalf("initial reason = %q, want %q", got, "unknown")
+	}
+
+	// First real reason wins over the initial sentinel.
+	s.set("signal: terminated")
+	if got := s.get(); got != "signal: terminated" {
+		t.Fatalf("after first set reason = %q, want %q", got, "signal: terminated")
+	}
+
+	// A later downstream cause must not clobber the first-recorded reason.
+	s.set("serve error")
+	if got := s.get(); got != "signal: terminated" {
+		t.Fatalf("after second set reason = %q, want %q (set-once)", got, "signal: terminated")
+	}
+
+	// An empty reason is normalized but still cannot overwrite once recorded.
+	s.set("")
+	if got := s.get(); got != "signal: terminated" {
+		t.Fatalf("after empty set reason = %q, want %q (set-once)", got, "signal: terminated")
+	}
+}
+
+func TestDaemonExitState_SetNormalizesEmptyFirstReason(t *testing.T) {
+	s := newDaemonExitState()
+	s.set("")
+	if got := s.get(); got != "unspecified" {
+		t.Fatalf("empty first reason = %q, want %q", got, "unspecified")
+	}
+}
+
 func TestClassifyRunCleanup_FinishedVsCancelled(t *testing.T) {
 	t.Run("normal finish reads cause before self-cancel", func(t *testing.T) {
 		ctx, cancel := context.WithCancelCause(context.Background())

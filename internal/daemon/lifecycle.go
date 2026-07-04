@@ -78,6 +78,10 @@ func newDaemonExitState() *daemonExitState {
 	return &daemonExitState{reason: "unknown"}
 }
 
+// set records the daemon's exit reason with set-once semantics: only the first
+// recorded reason wins. The daemon's true exit cause is whatever fired first
+// (a signal, an IPC stop, a fatal startup error); a later downstream cause
+// triggered by that shutdown (e.g. the listener closing) must not clobber it.
 func (s *daemonExitState) set(reason string) {
 	if reason == "" {
 		reason = "unspecified"
@@ -86,9 +90,7 @@ func (s *daemonExitState) set(reason string) {
 	defer s.mu.Unlock()
 	if s.reason == "unknown" {
 		s.reason = reason
-		return
 	}
-	s.reason = reason
 }
 
 func (s *daemonExitState) get() string {
