@@ -90,13 +90,21 @@ Default agent for all repos and setup-wizard suggestions. Can be overridden per-
 
 | | |
 |---|---|
-| Type | `string` |
+| Type | `string` or `string[]` |
 | Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok`, `acp:<target>` |
 | Default | `auto` |
 
 `auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `grok` (when `grok --version` succeeds).
 `acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`.
 ACP agents are opt-in and are not considered by `agent: auto`.
+
+You can also set an ordered fallback list:
+
+```yaml
+agent: [codex, claude]
+```
+
+The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent. If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback. Structured findings and schema/output validation problems do not trigger fallback.
 
 ### acpx_path
 
