@@ -172,12 +172,16 @@ When an agent starts a new run, `--intent` is required and should describe what 
 Agents should prefer a few complete sentences over a terse summary, capturing user decisions, tradeoffs, constraints, ruled-out approaches, and explicit requests that would not be obvious from the diff alone.
 If the repo is on the default branch or has uncommitted changes, direct `axi run` returns a structured error with the command the agent should run instead of silently creating a branch or commit.
 Approval gates are exposed as `gate:` objects with finding IDs, severities, sources, files, actions, descriptions, and help commands for `no-mistakes axi respond`.
-While a non-terminal run is parked at an `awaiting_approval` or `fix_review` gate, the run object also includes `awaiting_agent: parked <duration>`.
+While a non-terminal run is parked at an `awaiting_approval`, `fix_review`, or `awaiting_triage` gate, the run object also includes `awaiting_agent: parked <duration>`.
 Use that field in `axi status` output to tell in one read that the run is waiting for the driving agent to send `axi respond`, not actively running, fixing, or watching CI.
 It is observability only: it does not auto-resume the run, change gate resolution, or make `--yes` the default.
 A long-running `axi run` or `axi respond` call is working, not stalled, and an agent may background it if its harness needs to, but the run never advances past a gate on its own, so the agent must read every return and respond at each `gate:`, looping until an `outcome:`, and never idle-wait for the run to move forward by itself.
 An agent should resolve `action: auto-fix` findings on its own judgment, ignore `action: no-op` findings when approving, and stop on `action: ask-user` findings unless it is running with explicit `--yes` consent.
 Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed.
+If review reaches `review.max_fix_rounds`, it parks as `awaiting_triage`.
+The agent must report the residual findings to master for triage instead of sending another normal fix.
+Only after master rules a residual merge-blocking should the agent run `no-mistakes axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <ids>`; the reason is persisted on the triggering round.
+`--yes` stops at `awaiting_triage` and never supplies that override implicitly.
 The review gate output flags this with a `note`.
 When it stops for `ask-user`, it should relay each finding's ID, source when present, file, and full description to the user before choosing `approve`, `fix`, or `skip`.
 Resolving a finding always means responding with `no-mistakes axi respond --action fix`, which has the pipeline apply the fix and re-review it - the agent must not edit the code itself while a run is active.

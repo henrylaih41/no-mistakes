@@ -807,6 +807,8 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound) (statusLine, deta
 		return buildDetail(fmt.Sprintf("🔄 **%s** - auto-fixing", name))
 	case types.StepStatusFixReview:
 		return buildDetail(fmt.Sprintf("⏸️ **%s** - review fix", name))
+	case types.StepStatusAwaitingTriage:
+		return buildDetail(fmt.Sprintf("⏸️ **%s** - awaiting triage", name))
 	case types.StepStatusFailed:
 		return buildDetail(fmt.Sprintf("❌ **%s** - failed", name))
 	}
@@ -1153,6 +1155,8 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult) {
 		b.WriteString("Agent is currently applying fixes.\n\n")
 	case types.StepStatusFixReview:
 		b.WriteString("Waiting to review the latest fix.\n\n")
+	case types.StepStatusAwaitingTriage:
+		b.WriteString("Review fix-round cap reached; waiting for master triage.\n\n")
 	case types.StepStatusSkipped:
 		b.WriteString("Step was skipped.\n\n")
 	case types.StepStatusFailed:

@@ -132,6 +132,11 @@ type RespondParams struct {
 	FindingIDs    []string             `json:"finding_ids,omitempty"`
 	Instructions  map[string]string    `json:"instructions,omitempty"`
 	AddedFindings []types.Finding      `json:"added_findings,omitempty"`
+	// FixOverrideReason is required when a review gate has reached
+	// review.max_fix_rounds and the driver explicitly authorizes one more fix
+	// round. It is persisted on the step_rounds row whose findings triggered
+	// that override.
+	FixOverrideReason string `json:"fix_override_reason,omitempty"`
 }
 
 // CancelRunParams cancels an active pipeline run.

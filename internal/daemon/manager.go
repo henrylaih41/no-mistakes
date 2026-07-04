@@ -491,6 +491,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
+	if err := config.ValidateEffectiveRepoConfig(effectiveRepoCfg); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("validate repo config: %s", err))
+		trackStartFailure("validate_repo_config")
+		return "", fmt.Errorf("validate repo config: %w", err)
+	}
 	if allowRepoCommands {
 		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/agent from pushed branch", "run_id", run.ID, "branch", branch)
 	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Agent != effectiveRepoCfg.Agent {
@@ -729,12 +734,12 @@ func telemetryFailedStepName(database *db.DB, runID string) string {
 
 // HandleRespond routes a user approval action to the executor for the given run.
 func (m *RunManager) HandleRespond(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
-	return m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil)
+	return m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, "")
 }
 
 // HandleRespondWithOverrides is like HandleRespond but also forwards user
 // instructions and user-authored findings to the executor.
-func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding) error {
+func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, fixOverrideReason string) error {
 	m.mu.Lock()
 	exec, ok := m.executors[runID]
 	m.mu.Unlock()
@@ -743,7 +748,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 		return fmt.Errorf("no active executor for run %s", runID)
 	}
 
-	return exec.RespondWithOverrides(step, action, findingIDs, instructions, addedFindings)
+	return exec.RespondWithOverrideReason(step, action, findingIDs, instructions, addedFindings, fixOverrideReason)
 }
 
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent
