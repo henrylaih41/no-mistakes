@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -30,6 +32,86 @@ func findingBySource(items []Finding, source string) (Finding, bool) {
 		}
 	}
 	return Finding{}, false
+}
+
+func TestReviewStep_NoPanelSingleReviewerKeepsLegacyFindings(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	impl := &mockAgent{name: "impl", runFn: reviewReturning(Findings{
+		Items: []Finding{{ID: "agent-id", Severity: "warning", Description: "legacy issue", Action: "auto-fix"}},
+	})}
+
+	sctx := newTestContext(t, impl, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &ReviewStep{}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	merged, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged.Items) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %+v", len(merged.Items), merged.Items)
+	}
+	if merged.Items[0].ID != "agent-id" {
+		t.Errorf("legacy finding id = %q, want agent-id", merged.Items[0].ID)
+	}
+	if merged.Items[0].Source != "" {
+		t.Errorf("legacy finding source = %q, want unstamped", merged.Items[0].Source)
+	}
+	if len(impl.calls) != 1 {
+		t.Fatalf("expected impl agent to run once, got %d", len(impl.calls))
+	}
+	if impl.calls[0].OnChunk == nil {
+		t.Error("expected legacy single-reviewer path to stream chunks")
+	}
+}
+
+func TestReviewStep_FanOut_SingleConfiguredReviewerUsesPanelAttribution(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	codex := &mockAgent{name: "codex", runFn: reviewReturning(Findings{
+		Items: []Finding{{ID: "model-id", Severity: "warning", Description: "codex issue", Action: "auto-fix"}},
+	})}
+	fixAgent := &mockAgent{name: "fixer", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("fix agent must not run during the review pass")
+		return nil, nil
+	}}
+
+	sctx := newTestContext(t, fixAgent, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Reviewers = []agent.Agent{codex}
+	sctx.ReviewPanel = true
+
+	step := &ReviewStep{}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	merged, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged.Items) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %+v", len(merged.Items), merged.Items)
+	}
+	if merged.Items[0].ID != "review-codex-1-1" {
+		t.Errorf("single-panel finding id = %q, want review-codex-1-1", merged.Items[0].ID)
+	}
+	if merged.Items[0].Source != "codex" {
+		t.Errorf("single-panel finding source = %q, want codex", merged.Items[0].Source)
+	}
+	if len(codex.calls) != 1 {
+		t.Fatalf("expected codex to run once, got %d", len(codex.calls))
+	}
+	if codex.calls[0].OnChunk == nil {
+		t.Error("expected single-reviewer panel to keep live streaming")
+	}
 }
 
 func TestReviewStep_FanOut_InitialReviewMergesBothReviewers(t *testing.T) {
@@ -56,6 +138,7 @@ func TestReviewStep_FanOut_InitialReviewMergesBothReviewers(t *testing.T) {
 
 	sctx := newTestContext(t, fixAgent, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Reviewers = []agent.Agent{codex, claude}
+	sctx.ReviewPanel = true
 
 	step := &ReviewStep{}
 	outcome, err := step.Execute(sctx)
@@ -121,6 +204,7 @@ func TestReviewStep_FanOut_RunsInFixMode(t *testing.T) {
 
 	sctx := newTestContextWithDBRecords(t, fixAgent, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Reviewers = []agent.Agent{codex, claude}
+	sctx.ReviewPanel = true
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","description":"earlier","action":"auto-fix"}],"summary":"1 issue"}`
 
@@ -167,6 +251,7 @@ func TestReviewStep_FanOut_FailClosedFailsStep(t *testing.T) {
 
 	sctx := newTestContext(t, fixAgent, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Reviewers = []agent.Agent{codex, claude}
+	sctx.ReviewPanel = true
 	// Config.Review.FailOpen defaults to false (fail-closed).
 
 	step := &ReviewStep{}
@@ -176,6 +261,64 @@ func TestReviewStep_FanOut_FailClosedFailsStep(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "claude") {
 		t.Errorf("error should name the failed reviewer family, got %q", err)
+	}
+}
+
+func TestReviewStep_FanOut_FailClosedCancelsSiblingAndNamesOriginalFailure(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	started := make(chan struct{})
+	codexCanceled := make(chan struct{})
+	codex := &mockAgent{name: "codex", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		close(started)
+		<-ctx.Done()
+		close(codexCanceled)
+		return nil, ctx.Err()
+	}}
+	claude := &mockAgent{name: "claude", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+			return nil, errors.New("codex reviewer did not start")
+		}
+		return nil, errors.New("backend exploded")
+	}}
+	fixAgent := &mockAgent{name: "fixer"}
+
+	sctx := newTestContext(t, fixAgent, dir, baseSHA, headSHA, config.Commands{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+	sctx.Reviewers = []agent.Agent{codex, claude}
+	sctx.ReviewPanel = true
+
+	step := &ReviewStep{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := step.Execute(sctx)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected fail-closed panel to fail")
+		}
+		if !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "backend exploded") {
+			t.Fatalf("error should name the genuinely failing reviewer, got %q", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("fail-closed panel did not return promptly after first reviewer error")
+	}
+
+	select {
+	case <-codexCanceled:
+	default:
+		t.Fatal("expected sibling reviewer to be cancelled")
 	}
 }
 
@@ -194,6 +337,7 @@ func TestReviewStep_FanOut_FailOpenContinues(t *testing.T) {
 
 	sctx := newTestContext(t, fixAgent, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Reviewers = []agent.Agent{codex, claude}
+	sctx.ReviewPanel = true
 	sctx.Config.Review.FailOpen = true
 
 	step := &ReviewStep{}
@@ -210,5 +354,81 @@ func TestReviewStep_FanOut_FailOpenContinues(t *testing.T) {
 	}
 	if merged.Items[0].Source != "codex" {
 		t.Errorf("surviving finding source = %q, want codex", merged.Items[0].Source)
+	}
+}
+
+func TestReviewStep_FanOut_FailOpenWaitsForSiblingCompletion(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	codexCompleted := make(chan struct{})
+	codex := &mockAgent{name: "codex", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		close(started)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-release:
+			close(codexCompleted)
+			out, _ := json.Marshal(Findings{
+				Items: []Finding{{Severity: "warning", Description: "codex issue", Action: "auto-fix"}},
+			})
+			return &agent.Result{Output: out}, nil
+		}
+	}}
+	claude := &mockAgent{name: "claude", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		<-started
+		return nil, errors.New("backend exploded")
+	}}
+	fixAgent := &mockAgent{name: "fixer"}
+
+	sctx := newTestContext(t, fixAgent, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Reviewers = []agent.Agent{codex, claude}
+	sctx.ReviewPanel = true
+	sctx.Config.Review.FailOpen = true
+
+	step := &ReviewStep{}
+	type stepResult struct {
+		outcome *pipeline.StepOutcome
+		err     error
+	}
+	done := make(chan stepResult, 1)
+	go func() {
+		outcome, err := step.Execute(sctx)
+		done <- stepResult{outcome: outcome, err: err}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("codex reviewer did not start")
+	}
+	select {
+	case got := <-done:
+		t.Fatalf("fail-open panel returned before surviving reviewer completed: outcome=%v err=%v", got.outcome, got.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	var got stepResult
+	select {
+	case got = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fail-open panel did not return after surviving reviewer completed")
+	}
+	if got.err != nil {
+		t.Fatalf("fail-open should survive one reviewer error: %v", got.err)
+	}
+	select {
+	case <-codexCompleted:
+	default:
+		t.Fatal("expected surviving reviewer to complete normally")
+	}
+	merged, err := types.ParseFindingsJSON(got.outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged.Items) != 1 || merged.Items[0].Source != "codex" {
+		t.Fatalf("expected codex finding to survive, got %+v", merged.Items)
 	}
 }

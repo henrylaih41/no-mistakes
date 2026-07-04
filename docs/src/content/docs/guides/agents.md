@@ -111,6 +111,7 @@ review:
 
 Merged review findings keep a `source` showing which reviewer reported them, and their IDs are namespaced by reviewer so the AXI and TUI approval flows can address them normally.
 In a reviewer spec, `agent: auto` expands to the already resolved pipeline `agent`; name a reviewer family explicitly when you want a different model family.
+A reviewer with `agent: auto` inherits the pipeline agent's ordered fallback list; reviewers with an explicitly named family do not fall back.
 `review.max_parallel` limits concurrent reviewers; `0` means all reviewers run at once.
 `review.fail_open` defaults to `false`, so any reviewer error fails the review step instead of silently reducing coverage.
 

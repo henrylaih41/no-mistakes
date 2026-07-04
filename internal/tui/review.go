@@ -45,6 +45,31 @@ func reviewerSourceTag(source string) string {
 	}
 }
 
+func findingRefBudget(width int, tagText string) (string, int) {
+	const (
+		findingGutterWidth = 8
+		minFindingRefWidth = 10
+	)
+
+	tagWidth := lipgloss.Width(tagText)
+	maxRefWidth := width - findingGutterWidth - 1 - tagWidth
+	if maxRefWidth < minFindingRefWidth && tagText != "" {
+		maxTagWidth := width - findingGutterWidth - 1 - minFindingRefWidth
+		switch {
+		case maxTagWidth <= 1:
+			tagText = ""
+		case tagWidth > maxTagWidth:
+			tagText, _ = cutText(tagText, maxTagWidth)
+		}
+		tagWidth = lipgloss.Width(tagText)
+		maxRefWidth = width - findingGutterWidth - 1 - tagWidth
+	}
+	if maxRefWidth < 1 {
+		maxRefWidth = 1
+	}
+	return tagText, maxRefWidth
+}
+
 // severityIcon returns the visual indicator for a finding severity.
 func severityIcon(severity string) string {
 	switch severity {
@@ -320,10 +345,13 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 		// findings get a [user] tag; reviewer-panel findings get a [<reviewer>]
 		// tag (e.g. [codex], [claude]) so each reviewer's findings are
 		// attributable at the gate.
+		tagText := ""
+		tagStyle := cyanStyle
 		if isUserSource(item.Source) {
-			line += " " + blueStyle.Render("[user]")
+			tagText = " [user]"
+			tagStyle = blueStyle
 		} else if tag := reviewerSourceTag(item.Source); tag != "" {
-			line += " " + cyanStyle.Render(tag)
+			tagText = " " + tag
 		}
 
 		// File:line reference, truncated to fit within content width.
@@ -333,15 +361,20 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 				ref = fmt.Sprintf("%s:%d", item.File, item.Line)
 			}
 			// Gutter prefix: cursor(1) + sp(1) + checkbox(3) + sp(1) + icon(1) + sp(1) = 8
-			maxRefWidth := width - 8 - 1 // -1 for space before ref
-			if maxRefWidth > 0 && lipgloss.Width(ref) > maxRefWidth {
+			tagText, maxRefWidth := findingRefBudget(width, tagText)
+			if lipgloss.Width(ref) > maxRefWidth {
 				ref, _ = cutText(ref, maxRefWidth)
+			}
+			if tagText != "" {
+				line += tagStyle.Render(tagText)
 			}
 			if idx == cursor {
 				line += " " + ref
 			} else {
 				line += " " + dimStyle.Render(ref)
 			}
+		} else if tagText != "" {
+			line += tagStyle.Render(tagText)
 		}
 
 		b.WriteString(line + "\n")

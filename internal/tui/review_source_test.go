@@ -63,3 +63,32 @@ func TestRenderFindings_ReviewerSourceTags(t *testing.T) {
 		t.Error("did not expect an [agent] attribution tag")
 	}
 }
+
+func TestRenderFindings_ReviewerSourceTagFitsBoxContentWidth(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+
+	longRef := "internal/tui/" + strings.Repeat("a", 29) + ".go"
+	raw := `{"findings":[{"id":"f1","severity":"warning","file":"` + longRef + `","line":7,"description":"narrow finding","source":"acp:gemini-cli"}]}`
+	selected := map[string]bool{"f1": true}
+
+	const narrowBoxWidth = 60
+	narrowContentWidth := narrowBoxWidth - 4
+	box := stripANSI(renderFindingsBoxForHeight(raw, narrowBoxWidth, 0, selected, 0))
+	for _, line := range strings.Split(box, "\n") {
+		if !strings.HasPrefix(line, "│ ") || !strings.HasSuffix(line, " │") {
+			continue
+		}
+		content := strings.TrimSuffix(strings.TrimPrefix(line, "│ "), " │")
+		content = strings.TrimRight(content, " ")
+		if w := lipgloss.Width(content); w > narrowContentWidth {
+			t.Fatalf("finding box content line width = %d, want <= %d:\n%s", w, narrowContentWidth, line)
+		}
+	}
+
+	const wideBoxWidth = 80
+	wideContentWidth := wideBoxWidth - 4
+	wideContent, _ := renderFindingsWithSelection(raw, wideContentWidth, 0, selected, 0)
+	if !strings.Contains(stripANSI(wideContent), longRef+":7") {
+		t.Fatalf("expected 80-column box content to keep file ref unchanged, got:\n%s", stripANSI(wideContent))
+	}
+}

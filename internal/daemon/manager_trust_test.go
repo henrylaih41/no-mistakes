@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -74,7 +76,10 @@ func TestLoadTrustedRepoConfig_FailClosedOnFetchFailure(t *testing.T) {
 	// THE REGRESSION: fetch "failed" → startRun passes an empty trustedSHA.
 	// Even with origin/main present and carrying the stale command, the
 	// trusted config must be nil so the stale command cannot run.
-	got := loadTrustedRepoConfig(ctx, wt, "", "test-run")
+	got, err := loadTrustedRepoConfig(ctx, wt, "", "test-run")
+	if err != nil {
+		t.Fatalf("loadTrustedRepoConfig() error = %v, want nil on empty SHA", err)
+	}
 	if got != nil {
 		t.Fatalf("expected nil trusted config on empty SHA (fetch failure); got commands.lint=%q", got.Commands.Lint)
 	}
@@ -149,11 +154,88 @@ func TestLoadTrustedRepoConfig_PinnedSHAReadsFreshDefaultBranch(t *testing.T) {
 		t.Fatalf("resolved SHA %s != fresh default-branch tip %s", resolved, freshSHA)
 	}
 
-	trusted := loadTrustedRepoConfig(ctx, wt, resolved, "test-run")
+	trusted, err := loadTrustedRepoConfig(ctx, wt, resolved, "test-run")
+	if err != nil {
+		t.Fatalf("loadTrustedRepoConfig() error = %v", err)
+	}
 	if trusted == nil {
 		t.Fatal("expected trusted config at the pinned fresh SHA")
 	}
 	if trusted.Commands.Lint != "echo fresh-B" {
 		t.Fatalf("trusted lint = %q, want fresh-B (read at pinned SHA, not stale ref)", trusted.Commands.Lint)
 	}
+}
+
+func TestLoadTrustedRepoConfig_SemanticValidationErrorReturned(t *testing.T) {
+	ctx, wt, sha := setupTrustedConfigWorktree(t, "review:\n  reviewers:\n    - agent: gpt5\n")
+
+	got, err := loadTrustedRepoConfig(ctx, wt, sha, "test-run")
+	if err == nil {
+		t.Fatal("expected semantic validation error")
+	}
+	if got != nil {
+		t.Fatalf("trusted config = %#v, want nil on validation error", got)
+	}
+	if !errors.Is(err, config.ErrRepoConfigInvalid) {
+		t.Fatalf("error = %v, want ErrRepoConfigInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "gpt5") {
+		t.Fatalf("error = %v, want reviewer details", err)
+	}
+}
+
+func TestLoadTrustedRepoConfig_ParseErrorStillIgnored(t *testing.T) {
+	ctx, wt, sha := setupTrustedConfigWorktree(t, "review:\n  reviewers:\n    - agent: [\n")
+
+	got, err := loadTrustedRepoConfig(ctx, wt, sha, "test-run")
+	if err != nil {
+		t.Fatalf("loadTrustedRepoConfig() error = %v, want nil for legacy parse-error path", err)
+	}
+	if got != nil {
+		t.Fatalf("trusted config = %#v, want nil on parse error", got)
+	}
+}
+
+func setupTrustedConfigWorktree(t *testing.T, repoYAML string) (context.Context, string, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	src := filepath.Join(t.TempDir(), "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, src, "init", "--initial-branch=main")
+	gitCmd(t, src, "config", "user.email", "test@test.com")
+	gitCmd(t, src, "config", "user.name", "Test")
+	gitCmd(t, src, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(src, "README.md"), []byte("# test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, ".no-mistakes.yaml"), []byte(repoYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, src, "add", ".")
+	gitCmd(t, src, "commit", "-m", "trusted config")
+
+	bare := filepath.Join(t.TempDir(), "bare.git")
+	gitCmd(t, "", "init", "--bare", bare)
+	if err := git.AddRemote(ctx, bare, "origin", bare); err != nil {
+		t.Fatalf("add origin to bare: %v", err)
+	}
+	gitCmd(t, src, "remote", "add", "origin", bare)
+	gitCmd(t, src, "push", "origin", "HEAD:refs/heads/main")
+
+	headSHA := gitOutput(t, src, "rev-parse", "HEAD")
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := git.WorktreeAdd(ctx, bare, wt, headSHA); err != nil {
+		t.Fatalf("WorktreeAdd: %v", err)
+	}
+	if err := git.FetchRemoteBranch(ctx, wt, "origin", "main"); err != nil {
+		t.Fatalf("fetch main: %v", err)
+	}
+	resolved, err := git.ResolveRef(ctx, wt, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatalf("resolve origin/main: %v", err)
+	}
+	return ctx, wt, resolved
 }

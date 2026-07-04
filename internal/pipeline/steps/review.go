@@ -180,10 +180,9 @@ Risk assessment (after listing all findings):
 		historySection,
 	)
 
-	// The review panel reviews the same diff independently. An empty Reviewers
-	// slice (the single-agent default) collapses to the configured agent, so
-	// this call site runs in both the initial review and every post-fix
-	// re-review - the fix agent's own re-reviewed code gets the full panel too.
+	// The executor populates Reviewers in production. Some tests build
+	// StepContext directly, so keep this fallback for the empty direct-call
+	// case while preserving production's non-empty guarantee.
 	reviewers := sctx.Reviewers
 	if len(reviewers) == 0 {
 		reviewers = []agent.Agent{sctx.Agent}
@@ -196,9 +195,9 @@ Risk assessment (after listing all findings):
 	}
 
 	var findings Findings
-	if len(reviewers) <= 1 {
-		// Single reviewer: keep the exact streaming single-call path so behavior
-		// is byte-identical to the pre-panel pipeline.
+	if !sctx.ReviewPanel {
+		// No configured panel: keep the exact streaming single-call path so
+		// behavior is byte-identical to the pre-panel pipeline.
 		opts.OnChunk = sctx.LogChunk
 		result, err := reviewers[0].Run(ctx, opts)
 		if err != nil {

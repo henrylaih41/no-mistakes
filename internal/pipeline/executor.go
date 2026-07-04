@@ -220,6 +220,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// Default the review panel to the single impl agent when none is
 	// configured, so every step (including review) is byte-identical to the
 	// pre-panel behavior.
+	reviewPanel := len(e.reviewers) > 0
 	reviewers := e.reviewers
 	if len(reviewers) == 0 {
 		reviewers = []agent.Agent{e.agent}
@@ -231,6 +232,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		WorkDir:      workDir,
 		Agent:        e.agent,
 		Reviewers:    reviewers,
+		ReviewPanel:  reviewPanel,
 		Config:       e.config,
 		DB:           e.db,
 		StepResultID: sr.ID,

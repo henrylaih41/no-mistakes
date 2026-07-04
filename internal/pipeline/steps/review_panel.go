@@ -1,7 +1,9 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -20,11 +22,15 @@ type reviewerReport struct {
 
 // runReviewPanel fans the review prompt out across every reviewer concurrently
 // and merges their reports into a single attributed union. opts carries the
-// shared review prompt/schema/CWD; its OnChunk is forced to nil because
-// StepContext.Log/LogChunk mutate shared state and are not goroutine-safe, so
-// all logging and merging happen serially on this goroutine after FanOut
-// returns. It enforces the fail policy: a reviewer error fails the step unless
-// review.fail_open is set.
+// shared review prompt/schema/CWD. With a single reviewer, streaming is kept
+// because only one fan-out goroutine can call LogChunk while the main goroutine
+// waits; with multiple reviewers, OnChunk is forced to nil because
+// StepContext.Log/LogChunk mutate shared state and are not goroutine-safe. All
+// multi-reviewer logging and merging happens serially on this goroutine after
+// FanOut returns. It enforces the fail policy: a reviewer error fails the step
+// unless review.fail_open is set. Fail-closed panels cancel siblings on the
+// first error because their results will be discarded; fail-open panels wait
+// for every reviewer because every successful report is still useful.
 //
 // Reviewers are READ-ONLY by contract: they inspect the diff and return
 // findings, and never write to the worktree. The shared CWD is therefore
@@ -33,10 +39,21 @@ type reviewerReport struct {
 // not a scenario this code defends against - so shared-worktree concurrency is
 // not a data-safety issue here and should not be flagged as one.
 func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts agent.RunOpts) (Findings, error) {
-	opts.OnChunk = nil
-	results := agent.FanOut(sctx.Ctx, reviewers, opts, sctx.Config.Review.MaxParallel)
+	if len(reviewers) == 1 {
+		opts.OnChunk = sctx.LogChunk
+	} else {
+		opts.OnChunk = nil
+	}
 
-	reports, err := processReviewerResults(results, sctx.Config.Review.FailOpen, sctx.Log, sctx.LogFile)
+	failOpen := sctx.Config.Review.FailOpen
+	var results []agent.FanOutResult
+	if failOpen {
+		results = agent.FanOut(sctx.Ctx, reviewers, opts, sctx.Config.Review.MaxParallel)
+	} else {
+		results = agent.FanOutCancelOnError(sctx.Ctx, reviewers, opts, sctx.Config.Review.MaxParallel)
+	}
+
+	reports, err := processReviewerResults(results, failOpen, sctx.Log, sctx.LogFile)
 	if err != nil {
 		return Findings{}, err
 	}
@@ -71,14 +88,17 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 // user-visible callback; logFile is the file-only audit callback. Both run on
 // the caller's goroutine.
 func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, logFile func(string)) ([]reviewerReport, error) {
+	if !failOpen {
+		if failed := firstReviewerError(results); failed != nil {
+			return nil, fmt.Errorf("review panel: reviewer %q failed: %w", failed.name, failed.err)
+		}
+	}
+
 	reports := make([]reviewerReport, 0, len(results))
 	var dropped []string
 	for idx, res := range results {
 		name := res.Agent.Name()
 		if res.Err != nil {
-			if !failOpen {
-				return nil, fmt.Errorf("review panel: reviewer %q failed: %w", name, res.Err)
-			}
 			dropped = append(dropped, name)
 			log(fmt.Sprintf("WARNING: reviewer %q failed and was DROPPED (review.fail_open=true): %v", name, res.Err))
 			if logFile != nil {
@@ -106,6 +126,32 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 		return nil, fmt.Errorf("review panel: all reviewers failed (%s)", strings.Join(dropped, ", "))
 	}
 	return reports, nil
+}
+
+type reviewerError struct {
+	name string
+	err  error
+}
+
+func firstReviewerError(results []agent.FanOutResult) *reviewerError {
+	var first *reviewerError
+	for _, res := range results {
+		if res.Err == nil {
+			continue
+		}
+		current := &reviewerError{name: res.Agent.Name(), err: res.Err}
+		if first == nil {
+			first = current
+		}
+		// FanOutCancelOnError may make an earlier slot report context.Canceled
+		// after a later reviewer genuinely failed. Prefer the original backend
+		// error so the fail-closed message names the reviewer that doomed the
+		// step.
+		if !errors.Is(res.Err, context.Canceled) {
+			return current
+		}
+	}
+	return first
 }
 
 // combineReviewerFindings merges reviewer reports into a plain attributed union.

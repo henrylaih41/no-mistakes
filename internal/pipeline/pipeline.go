@@ -17,11 +17,13 @@ type StepContext struct {
 	WorkDir string
 	Agent   agent.Agent
 	// Reviewers is the cross-family review panel for this run, a sibling of
-	// Agent: every entry reviews the same diff independently. An empty slice
-	// means the single-agent default - treat it as {Agent}. The executor
-	// always populates it (defaulting to {Agent}) so steps never special-case
-	// the empty case.
-	Reviewers        []agent.Agent
+	// Agent: every entry reviews the same diff independently. The executor
+	// always populates it, defaulting to {Agent} when no panel is configured,
+	// so steps never special-case the empty case.
+	Reviewers []agent.Agent
+	// ReviewPanel is true when SetReviewers received a non-empty list. It is
+	// false when Reviewers holds only the executor's impl-agent default.
+	ReviewPanel      bool
 	Config           *config.Config
 	DB               *db.DB
 	Log              func(string) // discrete log line (newline-terminated, user-visible + file)

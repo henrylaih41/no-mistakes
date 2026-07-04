@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -22,6 +23,19 @@ type FanOutResult struct {
 // preallocated slot, so the results slice needs no additional synchronization
 // beyond the WaitGroup.
 func FanOut(ctx context.Context, agents []Agent, opts RunOpts, maxParallel int) []FanOutResult {
+	return fanOut(ctx, agents, opts, maxParallel, nil)
+}
+
+// FanOutCancelOnError is like FanOut, but cancels remaining work after the
+// first slot records a non-nil Err. The per-slot Result/Err contract is
+// unchanged; siblings that observe the cancellation record their context error.
+func FanOutCancelOnError(ctx context.Context, agents []Agent, opts RunOpts, maxParallel int) []FanOutResult {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	return fanOut(ctx, agents, opts, maxParallel, cancel)
+}
+
+func fanOut(ctx context.Context, agents []Agent, opts RunOpts, maxParallel int, cancelOnError context.CancelFunc) []FanOutResult {
 	results := make([]FanOutResult, len(agents))
 	if len(agents) == 0 {
 		return results
@@ -34,30 +48,44 @@ func FanOut(ctx context.Context, agents []Agent, opts RunOpts, maxParallel int) 
 	}
 
 	var wg sync.WaitGroup
+	var cancelOnce sync.Once
+	recordErr := func(i int, err error) {
+		results[i].Err = err
+		if err != nil && cancelOnError != nil {
+			cancelOnce.Do(cancelOnError)
+		}
+	}
 	for i, ag := range agents {
 		wg.Add(1)
 		go func(i int, ag Agent) {
 			defer wg.Done()
 			results[i].Agent = ag
+			defer func() {
+				if r := recover(); r != nil {
+					// A panic on this child goroutine bypasses the pipeline
+					// goroutine's recover and would kill the shared daemon.
+					recordErr(i, fmt.Errorf("reviewer %s panicked: %v", ag.Name(), r))
+				}
+			}()
 			// Honor cancellation while queued on the semaphore...
 			if sem != nil {
 				select {
 				case sem <- struct{}{}:
 					defer func() { <-sem }()
 				case <-ctx.Done():
-					results[i].Err = ctx.Err()
+					recordErr(i, ctx.Err())
 					return
 				}
 			}
 			// ...and again before invoking Run, so an already-cancelled ctx
 			// short-circuits instead of spawning the agent.
 			if err := ctx.Err(); err != nil {
-				results[i].Err = err
+				recordErr(i, err)
 				return
 			}
 			res, err := ag.Run(ctx, opts)
 			results[i].Result = res
-			results[i].Err = err
+			recordErr(i, err)
 		}(i, ag)
 	}
 	wg.Wait()

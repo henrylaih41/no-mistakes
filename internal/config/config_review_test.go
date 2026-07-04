@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,8 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// okLookPath is a lookPath stub that pretends every binary exists. ResolveReviewers
-// only consults lookPath for rovodev, but tests pass it for completeness.
+// okLookPath is a lookPath stub that pretends every binary exists.
 func okLookPath(bin string) (string, error) { return bin, nil }
 
 func TestLoadGlobal_ReviewParsesUnderStrictKnownFields(t *testing.T) {
@@ -109,6 +109,9 @@ func TestLoadGlobal_ReviewRejectsUnknownFamily(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "gpt5") {
 		t.Errorf("expected error to mention unknown family, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "copilot") {
+		t.Errorf("expected error to list copilot as valid, got: %v", err)
 	}
 }
 
@@ -317,8 +320,45 @@ func TestLoadRepoFromBytes_ReviewValidatesUnknownFamily(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error: repo-level reviewer with unknown family must be rejected")
 	}
+	if !errors.Is(err, ErrRepoConfigInvalid) {
+		t.Fatalf("error = %v, want ErrRepoConfigInvalid", err)
+	}
 	if !strings.Contains(err.Error(), "gpt5") {
 		t.Errorf("expected error to mention unknown family, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "copilot") {
+		t.Errorf("expected error to list copilot as valid, got: %v", err)
+	}
+}
+
+func TestLoadRepoFromBytes_ErrorSentinelOnlyForSemanticValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      string
+		wantMatch bool
+	}{
+		{
+			name:      "semantic validation",
+			data:      "review:\n  reviewers:\n    - agent: gpt5\n",
+			wantMatch: true,
+		},
+		{
+			name:      "yaml parse",
+			data:      "review:\n  reviewers:\n    - agent: [\n",
+			wantMatch: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadRepoFromBytes([]byte(tc.data))
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if got := errors.Is(err, ErrRepoConfigInvalid); got != tc.wantMatch {
+				t.Fatalf("errors.Is(ErrRepoConfigInvalid) = %v, want %v (err: %v)", got, tc.wantMatch, err)
+			}
+		})
 	}
 }
 
@@ -340,6 +380,9 @@ func TestValidateReviewers_RejectsUnknownFamily(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "gpt5") {
 		t.Errorf("expected error to mention unknown family, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "copilot") {
+		t.Errorf("expected error to list copilot as valid, got: %v", err)
 	}
 }
 
@@ -406,6 +449,32 @@ func TestResolveReviewers_ExpandsBareAutoToAgent(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Agent != types.AgentClaude {
 		t.Errorf("resolved = %v, want [claude] (auto expanded to agent)", got)
+	}
+	if !got[0].Auto {
+		t.Errorf("resolved auto marker = false, want true")
+	}
+}
+
+func TestResolveReviewers_AutoMarkerOnlyForAutoExpandedSpecs(t *testing.T) {
+	cfg := &Config{
+		Agent: types.AgentClaude,
+		Review: Review{Reviewers: []ReviewerSpec{
+			{Agent: types.AgentAuto},
+			{Agent: types.AgentCodex},
+		}},
+	}
+	got, err := cfg.ResolveReviewers(context.Background(), okLookPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("resolved = %d reviewers, want 2", len(got))
+	}
+	if got[0].Agent != types.AgentClaude || !got[0].Auto {
+		t.Fatalf("resolved[0] = %+v, want auto-expanded claude with Auto=true", got[0])
+	}
+	if got[1].Agent != types.AgentCodex || got[1].Auto {
+		t.Fatalf("resolved[1] = %+v, want explicit codex with Auto=false", got[1])
 	}
 }
 
@@ -521,6 +590,80 @@ func TestResolveReviewers_EmptyReturnsNil(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("resolved = %v, want nil for empty panel", got)
+	}
+}
+
+func TestResolveReviewers_ChecksReviewerAvailability(t *testing.T) {
+	originalProbe := probeRovoDevSupport
+	probeRovoDevSupport = func(_ context.Context, bin string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() {
+		probeRovoDevSupport = originalProbe
+	})
+
+	tests := []struct {
+		name      string
+		spec      ReviewerSpec
+		lookPath  func(string) (string, error)
+		wantCalls []string
+		wantErr   []string
+	}{
+		{
+			name: "native reviewer missing",
+			spec: ReviewerSpec{Agent: types.AgentCodex},
+			lookPath: func(bin string) (string, error) {
+				return "", os.ErrNotExist
+			},
+			wantCalls: []string{"codex"},
+			wantErr:   []string{"review.reviewers[0]", "codex", "not found in PATH", `"codex"`},
+		},
+		{
+			name: "native reviewer present",
+			spec: ReviewerSpec{Agent: types.AgentCopilot},
+			lookPath: func(bin string) (string, error) {
+				return filepath.Join("/usr/bin", bin), nil
+			},
+			wantCalls: []string{"copilot"},
+		},
+		{
+			name: "acp reviewer skips lookPath",
+			spec: ReviewerSpec{Agent: "acp:gemini"},
+			lookPath: func(bin string) (string, error) {
+				return "", os.ErrNotExist
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				Agent:  types.AgentClaude,
+				Review: Review{Reviewers: []ReviewerSpec{tc.spec}},
+			}
+			var calls []string
+			got, err := cfg.ResolveReviewers(context.Background(), func(bin string) (string, error) {
+				calls = append(calls, bin)
+				return tc.lookPath(bin)
+			})
+			if len(tc.wantErr) > 0 {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				for _, want := range tc.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("expected error to contain %q, got: %v", want, err)
+					}
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			} else if len(got) != 1 || got[0].Agent != tc.spec.Agent {
+				t.Fatalf("resolved = %v, want [%s]", got, tc.spec.Agent)
+			}
+			if !reflect.DeepEqual(calls, tc.wantCalls) {
+				t.Errorf("lookPath calls = %v, want %v", calls, tc.wantCalls)
+			}
+		})
 	}
 }
 

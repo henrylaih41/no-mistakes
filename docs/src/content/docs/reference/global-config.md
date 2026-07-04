@@ -273,6 +273,7 @@ The merged `risk_level` is the highest risk any reviewer reported; summaries and
 The configured pipeline `agent` still applies fixes.
 
 For reviewer specs, `agent: auto` expands to the already resolved pipeline `agent`.
+A reviewer with `agent: auto` inherits the pipeline agent's ordered fallback list; reviewers with an explicitly named family do not fall back.
 Use an explicit reviewer agent name when you want a different family.
 Reviewer `args` use the same reserved-flag checks as `agent_args_override`.
 For `acp:<target>` reviewers, use `acpx_path` and `acp_registry_overrides`; native `args` are ignored by ACP agents.

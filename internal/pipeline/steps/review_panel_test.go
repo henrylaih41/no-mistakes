@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -298,6 +299,24 @@ func TestProcessReviewerResults_FailClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "claude") {
 		t.Errorf("error should name the failed reviewer family, got %q", err)
+	}
+}
+
+func TestProcessReviewerResults_FailClosedPrefersNonCanceledError(t *testing.T) {
+	_, err := processReviewerResults(
+		[]agent.FanOutResult{
+			fanResult("codex", nil, context.Canceled),
+			fanResult("claude", nil, errors.New("backend exploded")),
+		},
+		false, // fail-closed
+		func(string) {},
+		func(string) {},
+	)
+	if err == nil {
+		t.Fatal("expected fail-closed error when a reviewer fails")
+	}
+	if !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "backend exploded") {
+		t.Errorf("error should name the non-canceled reviewer failure, got %q", err)
 	}
 }
 

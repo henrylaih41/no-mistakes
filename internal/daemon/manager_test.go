@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -123,6 +125,193 @@ func TestPushReceivedSkipStepsConfiguresExecutor(t *testing.T) {
 		if step.StepName == types.StepReview && step.Status != types.StepStatusSkipped {
 			t.Fatalf("review status = %s, want %s", step.Status, types.StepStatusSkipped)
 		}
+	}
+}
+
+func TestPushReceivedFailsLoudlyForInvalidTrustedReviewConfig(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+
+	repo, _ := setupTestGitRepo(t, p, d, "invalid-trusted-review-repo")
+	ctx := context.Background()
+	if err := git.AddRemote(ctx, p.RepoDir(repo.ID), "origin", p.RepoDir(repo.ID)); err != nil {
+		t.Fatalf("add self origin to gate repo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"), []byte("review:\n  reviewers:\n    - agent: gpt5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".no-mistakes.yaml")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "invalid trusted review config")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
+	headSHA := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var result ipc.PushReceivedResult
+	err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate: p.RepoDir(repo.ID),
+		Ref:  "refs/heads/main",
+		Old:  "0000000000000000000000000000000000000000",
+		New:  headSHA,
+	}, &result)
+	if err == nil {
+		t.Fatal("expected push_received to fail on invalid trusted config")
+	}
+	for _, want := range []string{"trusted .no-mistakes.yaml on main is invalid", "gpt5"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+
+	runs, err := d.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) == 0 {
+		t.Fatal("expected failed run record")
+	}
+	if runs[0].Status != types.RunFailed {
+		t.Fatalf("run status = %s, want failed", runs[0].Status)
+	}
+	if runs[0].Error == nil || !strings.Contains(*runs[0].Error, "trusted .no-mistakes.yaml on main is invalid") {
+		t.Fatalf("run error = %v, want trusted-config invalid message", runs[0].Error)
+	}
+}
+
+func TestPushReceivedSkipsReviewerPanelResolutionWhenReviewSkipped(t *testing.T) {
+	tests := []struct {
+		name      string
+		skipSteps []types.StepName
+		wantErr   bool
+	}{
+		{
+			name:      "review skipped",
+			skipSteps: []types.StepName{types.StepReview},
+		},
+		{
+			name:    "review not skipped",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			review := &mockPassStep{name: types.StepReview}
+			testStep := &mockPassStep{name: types.StepTest}
+			p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+				return []pipeline.Step{review, testStep}
+			})
+
+			mockClaude := writeMockClaude(t, t.TempDir())
+			missingCodex := filepath.Join(t.TempDir(), "missing-codex")
+			configYAML := "agent: claude\n" +
+				"agent_path_override:\n" +
+				"  claude: " + mockClaude + "\n" +
+				"review:\n" +
+				"  reviewers:\n" +
+				"    - agent: codex\n" +
+				"      path: " + missingCodex + "\n"
+			if err := os.WriteFile(p.ConfigFile(), []byte(configYAML), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, headSHA := setupTestGitRepo(t, p, d, "skip-review-panel-repo")
+			client, err := ipc.Dial(p.Socket())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+
+			var result ipc.PushReceivedResult
+			err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+				Gate:      p.RepoDir("skip-review-panel-repo"),
+				Ref:       "refs/heads/main",
+				Old:       "0000000000000000000000000000000000000000",
+				New:       headSHA,
+				SkipSteps: tc.skipSteps,
+			}, &result)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected unskipped review panel to fail reviewer resolution")
+				}
+				if !strings.Contains(err.Error(), "codex") || !strings.Contains(err.Error(), "not found in PATH") {
+					t.Fatalf("error = %v, want missing codex reviewer", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("push_received with review skipped failed: %v", err)
+			}
+
+			run := waitForRunTerminalState(t, d, result.RunID)
+			if run.Status != types.RunCompleted {
+				t.Fatalf("run status = %q, want %q", run.Status, types.RunCompleted)
+			}
+			if got := review.execCnt.Load(); got != 0 {
+				t.Fatalf("review executed %d times, want 0", got)
+			}
+			if got := testStep.execCnt.Load(); got != 1 {
+				t.Fatalf("test executed %d times, want 1", got)
+			}
+		})
+	}
+}
+
+func TestBuildReviewerAgentAutoUsesFallbackChain(t *testing.T) {
+	mockClaude := writeMockClaude(t, t.TempDir())
+	missingCodex := filepath.Join(t.TempDir(), "missing-codex")
+	cfg := &config.Config{
+		AgentPathOverride: map[string]string{
+			"codex":  missingCodex,
+			"claude": mockClaude,
+		},
+	}
+	agents := []types.AgentName{types.AgentCodex, types.AgentClaude}
+
+	autoReviewer, err := buildReviewerAgent(cfg, agents, config.ReviewerSpec{Agent: types.AgentCodex, Auto: true})
+	if err != nil {
+		t.Fatalf("build auto reviewer: %v", err)
+	}
+	defer autoReviewer.Close()
+
+	var chunks []string
+	result, err := autoReviewer.Run(context.Background(), agent.RunOpts{
+		Prompt:  "review",
+		CWD:     t.TempDir(),
+		OnChunk: func(text string) { chunks = append(chunks, text) },
+	})
+	if err != nil {
+		t.Fatalf("auto reviewer Run() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("auto reviewer Run() returned nil result")
+	}
+	if joined := strings.Join(chunks, "\n"); !strings.Contains(joined, "falling back to claude") {
+		t.Fatalf("fallback log = %q, want fallback to claude", joined)
+	}
+
+	explicitReviewer, err := buildReviewerAgent(cfg, agents, config.ReviewerSpec{Agent: types.AgentCodex})
+	if err != nil {
+		t.Fatalf("build explicit reviewer: %v", err)
+	}
+	defer explicitReviewer.Close()
+
+	chunks = nil
+	_, err = explicitReviewer.Run(context.Background(), agent.RunOpts{
+		Prompt:  "review",
+		CWD:     t.TempDir(),
+		OnChunk: func(text string) { chunks = append(chunks, text) },
+	})
+	if err == nil {
+		t.Fatal("expected explicit codex reviewer to stay pinned and fail")
+	}
+	if joined := strings.Join(chunks, "\n"); strings.Contains(joined, "falling back to claude") {
+		t.Fatalf("explicit reviewer unexpectedly fell back: %q", joined)
 	}
 }
 

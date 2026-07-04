@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -164,14 +165,15 @@ func branchFromRef(ref string) string {
 // here so the caller (EffectiveRepoConfig) fails closed: the pushed branch's
 // commands and agent are dropped and the run proceeds on built-in defaults.
 // None of these are fatal, since the pushed-branch copy is still read for
-// non-executing fields.
-func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) *config.RepoConfig {
+// non-executing fields. A semantically invalid trusted config returns an error
+// so the run fails loudly; unparseable YAML keeps the legacy warn-and-nil path.
+func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) (*config.RepoConfig, error) {
 	if trustedSHA == "" {
 		// No trusted SHA means no freshly-fetched default-branch commit to
 		// read from. Return nil so EffectiveRepoConfig forces empty
 		// commands/agent — the secure default — instead of falling back to a
 		// potentially stale origin/<defaultBranch> ref.
-		return nil
+		return nil, nil
 	}
 	content, err := git.ShowFile(ctx, wtDir, trustedSHA, ".no-mistakes.yaml")
 	if err != nil {
@@ -180,14 +182,53 @@ func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string)
 		// errors are surfaced at warn so a genuinely broken read isn't
 		// silent. Either way trusted is nil → fail closed.
 		slog.Debug("trusted repo config: not present on default branch", "run_id", runID, "sha", trustedSHA, "error", err)
-		return nil
+		return nil, nil
 	}
 	trusted, err := config.LoadRepoFromBytes([]byte(content))
 	if err != nil {
+		if errors.Is(err, config.ErrRepoConfigInvalid) {
+			return nil, err
+		}
 		slog.Warn("trusted repo config: parse failed; commands/agent from pushed branch will be disabled", "run_id", runID, "sha", trustedSHA, "error", err)
-		return nil
+		return nil, nil
 	}
-	return trusted
+	return trusted, nil
+}
+
+func hasSkippedStep(skipSteps []types.StepName, step types.StepName) bool {
+	for _, skip := range skipSteps {
+		if skip == step {
+			return true
+		}
+	}
+	return false
+}
+
+func buildReviewerAgent(cfg *config.Config, agents []types.AgentName, spec config.ReviewerSpec) (agent.Agent, error) {
+	opts := agent.Options{ACPRegistryOverrides: cfg.ACPRegistryOverrides}
+	if spec.Auto && len(agents) > 1 {
+		created := make([]agent.Agent, 0, len(agents))
+		for _, name := range agents {
+			chainSpec := config.ReviewerSpec{Agent: name, Args: spec.Args, Path: spec.Path}
+			next, err := agent.NewWithOptions(name, cfg.ReviewerPath(chainSpec), cfg.ReviewerArgs(chainSpec), opts)
+			if err != nil {
+				for _, built := range created {
+					built.Close()
+				}
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+			created = append(created, agent.WithSteering(next))
+		}
+		return agent.NewFallback(created), nil
+	}
+
+	// Explicit reviewer families intentionally stay pinned to that family. Only
+	// agent: auto inherits the pipeline agent's fallback chain.
+	rev, err := agent.NewWithOptions(spec.Agent, cfg.ReviewerPath(spec), cfg.ReviewerArgs(spec), opts)
+	if err != nil {
+		return nil, err
+	}
+	return agent.WithSteering(rev), nil
 }
 
 // HandlePushReceived processes a push notification from the post-receive hook.
@@ -387,7 +428,13 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// contributor cannot self-enable it from the pushed branch. With no
 	// trusted copy (fetch failed, no default branch, or no file on it) the
 	// opt-in is false and commands/agent are forced empty — fail closed.
-	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
+	trustedRepoCfg, err := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
+	if err != nil {
+		err = fmt.Errorf("trusted .no-mistakes.yaml on %s is invalid: %w", repo.DefaultBranch, err)
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("trusted_repo_config_invalid")
+		return "", err
+	}
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	if allowRepoCommands {
@@ -432,32 +479,32 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}
 		ag = agent.NewFallback(created)
 
-		// Build the cross-family review panel (empty when review.reviewers is
-		// unset, leaving behavior unchanged). Reviewers use the SAME factory and
-		// steering as the impl agent. Any failure here must close what has been
-		// built so far before returning, since the cleanup defer below only runs
-		// once the background goroutine owns the run.
-		reviewerSpecs, revErr := cfg.ResolveReviewers(ctx, exec.LookPath)
-		if revErr != nil {
-			ag.Close()
-			m.db.UpdateRunError(run.ID, revErr.Error())
-			trackStartFailure("resolve_reviewers")
-			return "", revErr
-		}
-		for _, spec := range reviewerSpecs {
-			rev, rErr := agent.NewWithOptions(spec.Agent, cfg.ReviewerPath(spec), cfg.ReviewerArgs(spec), agent.Options{
-				ACPRegistryOverrides: cfg.ACPRegistryOverrides,
-			})
-			if rErr != nil {
-				for _, built := range reviewerAgents {
-					built.Close()
-				}
+		if !hasSkippedStep(skipSteps, types.StepReview) {
+			// Build the cross-family review panel (empty when review.reviewers is
+			// unset, leaving behavior unchanged). Reviewers use the SAME factory and
+			// steering as the impl agent. Any failure here must close what has been
+			// built so far before returning, since the cleanup defer below only runs
+			// once the background goroutine owns the run.
+			reviewerSpecs, revErr := cfg.ResolveReviewers(ctx, exec.LookPath)
+			if revErr != nil {
 				ag.Close()
-				m.db.UpdateRunError(run.ID, fmt.Sprintf("create reviewer agent: %s", rErr))
-				trackStartFailure("create_reviewer_agent")
-				return "", fmt.Errorf("create reviewer agent: %w", rErr)
+				m.db.UpdateRunError(run.ID, revErr.Error())
+				trackStartFailure("resolve_reviewers")
+				return "", revErr
 			}
-			reviewerAgents = append(reviewerAgents, agent.WithSteering(rev))
+			for _, spec := range reviewerSpecs {
+				rev, rErr := buildReviewerAgent(cfg, agents, spec)
+				if rErr != nil {
+					for _, built := range reviewerAgents {
+						built.Close()
+					}
+					ag.Close()
+					m.db.UpdateRunError(run.ID, fmt.Sprintf("create reviewer agent: %s", rErr))
+					trackStartFailure("create_reviewer_agent")
+					return "", fmt.Errorf("create reviewer agent: %w", rErr)
+				}
+				reviewerAgents = append(reviewerAgents, rev)
+			}
 		}
 	}
 

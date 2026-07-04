@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -100,6 +101,50 @@ func TestFanOut_OneAgentErrorIsolated(t *testing.T) {
 		}
 		if results[i].Result == nil {
 			t.Errorf("results[%d].Result = nil, want a result", i)
+		}
+	}
+}
+
+// panickingAgent simulates a backend panic after FanOut has started the slot.
+type panickingAgent struct {
+	name string
+}
+
+func (p *panickingAgent) Name() string { return p.name }
+
+func (p *panickingAgent) Run(context.Context, RunOpts) (*Result, error) {
+	panic("backend exploded")
+}
+
+func (p *panickingAgent) Close() error { return nil }
+
+func TestFanOut_PanicIsCapturedPerSlot(t *testing.T) {
+	agents := []Agent{
+		&fakeAgent{name: "codex"},
+		&panickingAgent{name: "claude"},
+		&fakeAgent{name: "pi"},
+	}
+
+	results := FanOut(context.Background(), agents, RunOpts{}, 0)
+
+	if len(results) != len(agents) {
+		t.Fatalf("got %d results, want %d", len(results), len(agents))
+	}
+	if results[1].Err == nil {
+		t.Fatal("panicking slot Err = nil, want panic captured as error")
+	}
+	if got := results[1].Err.Error(); !strings.Contains(got, "panicked") || !strings.Contains(got, "claude") {
+		t.Errorf("panicking slot Err = %q, want reviewer name and panicked", got)
+	}
+	if results[1].Result != nil {
+		t.Errorf("panicking slot Result = %v, want nil", results[1].Result)
+	}
+	for _, i := range []int{0, 2} {
+		if results[i].Err != nil {
+			t.Errorf("results[%d].Err = %v, want nil", i, results[i].Err)
+		}
+		if results[i].Result == nil || results[i].Result.Text != agents[i].Name() {
+			t.Errorf("results[%d].Result = %v, want sibling result intact", i, results[i].Result)
 		}
 	}
 }

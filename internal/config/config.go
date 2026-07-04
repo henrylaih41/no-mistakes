@@ -183,6 +183,9 @@ type ReviewerSpec struct {
 	Agent types.AgentName `yaml:"agent"`
 	Args  []string        `yaml:"args"`
 	Path  string          `yaml:"path"`
+	// Auto is set by ResolveReviewers when this spec came from agent: auto.
+	// Consumers use it to mirror the pipeline agent's fallback chain.
+	Auto bool `yaml:"-"`
 }
 
 // ReviewRaw is the YAML representation of the multi-reviewer panel. An empty
@@ -608,11 +611,14 @@ func (c *Config) AgentArgsFor(name types.AgentName) []string {
 // specs. It mirrors ResolveAgent: each spec's agent must be a concrete native
 // family or acp:<target>. A bare "auto" reviewer cannot itself probe the
 // system, so it is expanded to the already-resolved single agent (c.Agent) when
-// one exists and rejected otherwise. rovodev reviewers are validated with
-// probeRovoDevSupport (reusing the same lookPath the single-agent resolution
-// uses). Identical specs (same agent, path, args) are de-duplicated so a panel
-// never runs the same reviewer twice. The lookPath function should behave like
-// exec.LookPath. Returns nil when no reviewers are configured.
+// one exists and rejected otherwise. Auto-expanded specs are marked with Auto,
+// but de-duplication still keys on the expanded head agent/path/args so an auto
+// reviewer de-dups against an explicit reviewer of that head family. Native
+// reviewer binaries are checked with lookPath, and rovodev reviewers are
+// additionally validated with probeRovoDevSupport. Identical specs (same agent,
+// path, args) are de-duplicated so a panel never runs the same reviewer twice.
+// The lookPath function should behave like exec.LookPath. Returns nil when no
+// reviewers are configured.
 func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (string, error)) ([]ReviewerSpec, error) {
 	if len(c.Review.Reviewers) == 0 {
 		return nil, nil
@@ -625,6 +631,7 @@ func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (st
 				return nil, fmt.Errorf("review.reviewers[%d]: agent %q cannot be auto-resolved; set 'agent' to a concrete value or name the reviewer family explicitly", i, types.AgentAuto)
 			}
 			spec.Agent = c.Agent
+			spec.Auto = true
 		}
 		// Validate against the concrete resolved family before the spec reaches
 		// the real reviewer command. ResolveReviewers is the authoritative
@@ -636,74 +643,60 @@ func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (st
 		if err := validateReviewerSpec(i, spec); err != nil {
 			return nil, err
 		}
-		if spec.Agent == types.AgentRovoDev {
-			bin := c.ReviewerPath(spec)
-			resolvedBin, err := lookPath(bin)
-			if err != nil {
-				return nil, fmt.Errorf("review.reviewers[%d]: resolve rovodev from %q: %w", i, bin, err)
-			}
-			ok, probeErr := probeRovoDevSupport(ctx, resolvedBin)
-			if probeErr != nil {
-				return nil, probeErr
-			}
-			if !ok {
-				return nil, fmt.Errorf("review.reviewers[%d]: %q does not support the rovodev subcommand", i, resolvedBin)
-			}
-		}
 		// Dedup on the EFFECTIVE reviewer (after auto expansion and the
 		// ReviewerPath / ReviewerArgs fallbacks), so a spec that inherits its
 		// path/args from agent_path_override / agent_args_override collides with
 		// an explicit spec that resolves to the same binary and args.
-		key := reviewerDedupKey(ReviewerSpec{
+		effective := ReviewerSpec{
 			Agent: spec.Agent,
 			Path:  c.ReviewerPath(spec),
 			Args:  c.ReviewerArgs(spec),
-		})
+		}
+		key := reviewerDedupKey(effective)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
+		if isNativeAgent(spec.Agent) {
+			bin := effective.Path
+			resolvedBin, err := lookPath(bin)
+			if err != nil {
+				if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+					return nil, fmt.Errorf("review.reviewers[%d]: %s not found in PATH (looked for %q): %w", i, spec.Agent, bin, err)
+				}
+				return nil, fmt.Errorf("review.reviewers[%d]: resolve %s from %q: %w", i, spec.Agent, bin, err)
+			}
+			if spec.Agent == types.AgentRovoDev {
+				ok, probeErr := probeRovoDevSupport(ctx, resolvedBin)
+				if probeErr != nil {
+					return nil, probeErr
+				}
+				if !ok {
+					return nil, fmt.Errorf("review.reviewers[%d]: %q does not support the rovodev subcommand", i, resolvedBin)
+				}
+			}
+		}
 		resolved = append(resolved, spec)
 	}
 	return resolved, nil
 }
 
 // ReviewerPath returns the binary path for a reviewer spec. A per-spec Path
-// wins; otherwise it falls back to agent_path_override keyed by the agent name,
-// then the default binary name (or acpx for acp: targets) - mirroring
-// AgentPath.
+// wins; otherwise it delegates to AgentPathFor.
 func (c *Config) ReviewerPath(spec ReviewerSpec) string {
 	if spec.Path != "" {
 		return spec.Path
 	}
-	if isACPAgent(spec.Agent) {
-		if c.ACPXPath != "" {
-			return c.ACPXPath
-		}
-		return "acpx"
-	}
-	if c.AgentPathOverride != nil {
-		if p, ok := c.AgentPathOverride[string(spec.Agent)]; ok {
-			return p
-		}
-	}
-	if b, ok := defaultBinary[spec.Agent]; ok {
-		return b
-	}
-	return string(spec.Agent)
+	return c.AgentPathFor(spec.Agent)
 }
 
 // ReviewerArgs returns the extra native CLI args for a reviewer spec. Per-spec
-// Args win; otherwise they fall back to agent_args_override keyed by the agent
-// name - mirroring AgentArgs.
+// Args win; otherwise it delegates to AgentArgsFor.
 func (c *Config) ReviewerArgs(spec ReviewerSpec) []string {
 	if len(spec.Args) > 0 {
 		return spec.Args
 	}
-	if c.AgentArgsOverride == nil {
-		return nil
-	}
-	return c.AgentArgsOverride[string(spec.Agent)]
+	return c.AgentArgsFor(spec.Agent)
 }
 
 // agentArgsOverrideAgents lists native agent names accepted as keys in
@@ -818,7 +811,7 @@ func validateReviewerSpec(i int, spec ReviewerSpec) error {
 		return fmt.Errorf("invalid review.reviewers[%d]: missing agent", i)
 	}
 	if spec.Agent != types.AgentAuto && !isACPAgent(spec.Agent) && !isNativeAgent(spec.Agent) {
-		return fmt.Errorf("invalid review.reviewers[%d]: unknown agent %q (valid: auto, claude, codex, rovodev, opencode, pi, acp:<target>)", i, name)
+		return fmt.Errorf("invalid review.reviewers[%d]: unknown agent %q (valid: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target>)", i, name)
 	}
 	for j, arg := range spec.Args {
 		if strings.TrimSpace(arg) == "" {
@@ -983,6 +976,10 @@ func LoadRepo(dir string) (*RepoConfig, error) {
 	return parseRepoConfig(data)
 }
 
+// ErrRepoConfigInvalid marks trusted repo config that parsed successfully but
+// failed semantic validation. YAML parse errors are not wrapped with this error.
+var ErrRepoConfigInvalid = errors.New("repo config invalid")
+
 // LoadRepoFromBytes parses per-repo config from raw YAML bytes. It is the
 // trusted-config entry point: callers that read .no-mistakes.yaml from a
 // specific git ref (e.g. the default branch) use this to avoid honoring a
@@ -997,7 +994,7 @@ func LoadRepoFromBytes(data []byte) (*RepoConfig, error) {
 	}
 	if cfg.Review != nil {
 		if err := validateReviewers(cfg.Review.Reviewers); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %v", ErrRepoConfigInvalid, err)
 		}
 	}
 	return cfg, nil
@@ -1023,6 +1020,7 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // EffectiveRepoConfig returns the repo config that should drive the pipeline
 // given a pushed-branch copy and the trusted default-branch copy.
 //
+// The code-executing selection fields — Commands (run verbatim via sh -c on
 // the daemon host), Agent/Agents (select which processes launch with the
 // maintainer's credentials, including fallback lists and acp: targets), and
 // Review (the review panel, which likewise selects which reviewer binaries
