@@ -1,0 +1,1 @@
+Deploy smoke marker for v1.32.1-48-g68c4ef3.
