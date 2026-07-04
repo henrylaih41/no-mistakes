@@ -402,6 +402,24 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
+
+	// Track whether the background goroutine takes ownership of worktree cleanup.
+	// Registered immediately after WorktreeAdd succeeds so any setup failure past
+	// this point (identity copy, config load, agent build) removes the worktree
+	// with actor/reason attribution instead of leaking it without a trail.
+	bgOwnsWorktree := false
+	defer func() {
+		if !bgOwnsWorktree {
+			_ = cleanupRunWorktree(context.Background(), gateDir, wtDir, worktreeCleanupLog{
+				Actor:  worktreeCleanupActorRunManager,
+				Reason: worktreeCleanupReasonSetupFailed,
+				RepoID: repo.ID,
+				RunID:  run.ID,
+				Path:   wtDir,
+			})
+		}
+	}()
+
 	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
 		trackStartFailure("configure_worktree_identity")
@@ -443,17 +461,6 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			trustedSHA = sha
 		}
 	}
-
-	// Track whether the background goroutine takes ownership of worktree cleanup.
-	// If setup fails before the goroutine launches, we must clean up here.
-	bgOwnsWorktree := false
-	defer func() {
-		if !bgOwnsWorktree {
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
-			}
-		}
-	}()
 
 	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
 	if err != nil {
@@ -631,6 +638,12 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 					slog.Error("failed to update run after panic", "run_id", run.ID, "error", dbErr)
 				}
 			}
+			// Read the cancellation cause before cancel(nil) below: cancel(nil)
+			// sets context.Cause(runCtx) to context.Canceled, which would
+			// misattribute a normally-finished run as cancelled. A genuine
+			// cancellation (daemon shutdown, user abort, superseded) has already
+			// recorded its non-nil cause by the time the finalizer runs.
+			cleanupReason, cleanupCause := classifyRunCleanup(context.Cause(runCtx))
 			cancel(nil)
 			ag.Close()
 			// Close every reviewer panel agent (no-op when none configured).
@@ -640,9 +653,15 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
 			// Clean up worktree.
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
-			}
+			_ = cleanupRunWorktree(context.Background(), gateDir, wtDir, worktreeCleanupLog{
+				Actor:     worktreeCleanupActorRunManager,
+				Reason:    cleanupReason,
+				RepoID:    repo.ID,
+				RunID:     run.ID,
+				Path:      wtDir,
+				RunStatus: string(run.Status),
+				Cause:     cleanupCause,
+			})
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)

@@ -1,11 +1,66 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestRunDaemonProcessLogsExitBoundary(t *testing.T) {
+	tests := []struct {
+		name      string
+		runErr    error
+		wantCode  int
+		wantLevel string
+		wantAttrs []string
+	}{
+		{
+			name:      "success logs exit_code 0",
+			runErr:    nil,
+			wantCode:  0,
+			wantLevel: "level=INFO",
+			wantAttrs: []string{`reason="daemon run returned"`, "exit_code=0"},
+		},
+		{
+			name:      "run error logs exit_code 1",
+			runErr:    errors.New("boom"),
+			wantCode:  1,
+			wantLevel: "level=ERROR",
+			wantAttrs: []string{`reason="daemon run error"`, "exit_code=1", `error=boom`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			old := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(old)
+
+			oldRun := daemonRun
+			daemonRun = func() error { return tt.runErr }
+			defer func() { daemonRun = oldRun }()
+
+			code := runDaemonProcess("")
+			if code != tt.wantCode {
+				t.Fatalf("code = %d, want %d", code, tt.wantCode)
+			}
+
+			got := logs.String()
+			wants := append([]string{`msg="daemon process exiting"`, tt.wantLevel}, tt.wantAttrs...)
+			for _, want := range wants {
+				if !strings.Contains(got, want) {
+					t.Fatalf("exit log missing %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
 
 func TestCLILogWriterReturnsDiscardWhenLogsDirMissing(t *testing.T) {
 	nmHome := t.TempDir()
