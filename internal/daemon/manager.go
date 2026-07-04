@@ -449,9 +449,13 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	bgOwnsWorktree := false
 	defer func() {
 		if !bgOwnsWorktree {
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
-			}
+			_ = cleanupRunWorktree(context.Background(), gateDir, wtDir, worktreeCleanupLog{
+				Actor:  worktreeCleanupActorRunManager,
+				Reason: worktreeCleanupReasonSetupFailed,
+				RepoID: repo.ID,
+				RunID:  run.ID,
+				Path:   wtDir,
+			})
 		}
 	}()
 
@@ -640,9 +644,23 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
 			// Clean up worktree.
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
+			cleanupReason := worktreeCleanupReasonRunFinished
+			cleanupCause := ""
+			if cause := context.Cause(runCtx); cause != nil {
+				cleanupCause = cause.Error()
 			}
+			if cleanupCause != "" {
+				cleanupReason = "run_cancelled"
+			}
+			_ = cleanupRunWorktree(context.Background(), gateDir, wtDir, worktreeCleanupLog{
+				Actor:     worktreeCleanupActorRunManager,
+				Reason:    cleanupReason,
+				RepoID:    repo.ID,
+				RunID:     run.ID,
+				Path:      wtDir,
+				RunStatus: string(run.Status),
+				Cause:     cleanupCause,
+			})
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)

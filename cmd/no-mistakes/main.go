@@ -25,17 +25,7 @@ func run() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	} else if ok {
-		if root != "" {
-			if err := os.Setenv("NM_HOME", root); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return 1
-			}
-		}
-		if err := daemon.Run(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		return 0
+		return runDaemonProcess(root)
 	}
 
 	if handled, err := update.MaybeHandleBackgroundCheck(os.Args[1:]); handled {
@@ -59,6 +49,28 @@ func run() int {
 	}()
 
 	return cli.Execute()
+}
+
+func runDaemonProcess(root string) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("daemon process exiting", "reason", "panic", "panic", r)
+			panic(r)
+		}
+	}()
+	if root != "" {
+		if err := os.Setenv("NM_HOME", root); err != nil {
+			slog.Error("daemon process exiting", "reason", "set NM_HOME failed", "error", err)
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
+	if err := daemon.Run(); err != nil {
+		slog.Error("daemon process exiting", "reason", "daemon run error", "error", err)
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
 }
 
 func daemonRunRootFromArgs(args []string) (string, bool, error) {

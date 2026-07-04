@@ -168,6 +168,54 @@ func TestCompleteStepWithStatus(t *testing.T) {
 	}
 }
 
+func TestCompleteStepWithStatusClearsRecoveredError(t *testing.T) {
+	tests := []struct {
+		name   string
+		status types.StepStatus
+	}{
+		{name: "completed", status: types.StepStatusCompleted},
+		{name: "skipped", status: types.StepStatusSkipped},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+			run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+			step, _ := d.InsertStepResult(run.ID, types.StepTest)
+
+			if err := d.StartStep(step.ID); err != nil {
+				t.Fatalf("start step: %v", err)
+			}
+			if _, err := d.RecoverStaleRuns("daemon crashed during execution"); err != nil {
+				t.Fatalf("recover stale runs: %v", err)
+			}
+
+			recovered, err := d.GetStepResult(step.ID)
+			if err != nil {
+				t.Fatalf("get recovered step: %v", err)
+			}
+			if recovered.Error == nil || *recovered.Error != "daemon crashed during execution" {
+				t.Fatalf("recovered error = %v, want daemon crash marker", recovered.Error)
+			}
+
+			if err := d.CompleteStepWithStatus(step.ID, tt.status, 0, 42, "/logs/run-1/test.log"); err != nil {
+				t.Fatalf("complete step: %v", err)
+			}
+			got, err := d.GetStepResult(step.ID)
+			if err != nil {
+				t.Fatalf("get completed step: %v", err)
+			}
+			if got.Status != tt.status {
+				t.Fatalf("status = %q, want %q", got.Status, tt.status)
+			}
+			if got.Error != nil {
+				t.Fatalf("completed step retained stale error %q", *got.Error)
+			}
+		})
+	}
+}
+
 func TestUpdateStepStatusWithDuration(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

@@ -146,7 +146,15 @@ func RunWithResources(p *paths.Paths, d *db.DB) error {
 
 // RunWithOptions starts the daemon with optional overrides.
 // stepFactory overrides the default pipeline steps (for testing).
-func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
+func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) (retErr error) {
+	exitState := newDaemonExitState()
+	defer func() {
+		if r := recover(); r != nil {
+			logDaemonExit(exitState.get(), retErr, r)
+			panic(r)
+		}
+		logDaemonExit(exitState.get(), retErr, nil)
+	}()
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 		defer cancel()
@@ -171,6 +179,7 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 	var shutdownOnce sync.Once
 	doShutdown := func(reason string) {
 		shutdownOnce.Do(func() {
+			exitState.set(reason)
 			slog.Info("shutting down", "reason", reason)
 			mgr.Shutdown()
 			cancel()
@@ -184,9 +193,11 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 	pidPath := p.PIDFile()
 	pidRecord, err := currentDaemonPIDRecord(processStartTime, func() time.Time { return time.Now().UTC() })
 	if err != nil {
+		exitState.set("build pid file")
 		return fmt.Errorf("build pid file: %w", err)
 	}
 	if err := writeDaemonPIDFile(pidPath, pidRecord); err != nil {
+		exitState.set("write pid file")
 		return fmt.Errorf("write pid file: %w", err)
 	}
 	defer func() {
@@ -204,7 +215,7 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 	go func() {
 		select {
 		case sig := <-sigCh:
-			doShutdown(sig.String())
+			doShutdown("signal: " + sig.String())
 		case <-ctx.Done():
 		}
 	}()
@@ -213,6 +224,7 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 	slog.Info("daemon starting", "socket", socketPath, "pid", os.Getpid())
 
 	if err := srv.Serve(socketPath); err != nil {
+		exitState.set("serve error")
 		return fmt.Errorf("serve: %w", err)
 	}
 	doShutdown("listener closed")
@@ -315,13 +327,20 @@ func recoverOnStartup(d *db.DB, p *paths.Paths) {
 				continue
 			}
 			wtPath := filepath.Join(repoPath, runEntry.Name())
-			if err := git.WorktreeRemove(ctx, gateDir, wtPath); err != nil {
-				slog.Warn("git worktree remove failed, falling back to os.RemoveAll", "path", wtPath, "error", err)
+			meta := worktreeCleanupLog{
+				Actor:  worktreeCleanupActorRecovery,
+				Reason: worktreeCleanupReasonStartupStale,
+				RepoID: repoEntry.Name(),
+				RunID:  runEntry.Name(),
+				Path:   wtPath,
+			}
+			if err := cleanupRunWorktree(ctx, gateDir, wtPath, meta); err != nil {
+				slog.Warn("worktree cleanup fallback starting", append(meta.attrs(), "error", err)...)
 				if err := os.RemoveAll(wtPath); err != nil {
-					slog.Warn("failed to remove orphaned worktree", "path", wtPath, "error", err)
+					slog.Warn("worktree cleanup fallback failed", append(meta.attrs(), "error", err)...)
+				} else {
+					slog.Info("worktree cleanup fallback completed", meta.attrs()...)
 				}
-			} else {
-				slog.Info("removed orphaned worktree", "path", wtPath)
 			}
 		}
 		// Remove empty repo dir.
