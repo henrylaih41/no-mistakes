@@ -161,6 +161,45 @@ func TestRecoverOnStartupLogsOrphanWorktreeActorAndReason(t *testing.T) {
 	}
 }
 
+func TestClassifyRunCleanup_FinishedVsCancelled(t *testing.T) {
+	t.Run("normal finish reads cause before self-cancel", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		// Mirror the finalizer ordering: read the cause first, then self-cancel.
+		reason, cause := classifyRunCleanup(context.Cause(ctx))
+		cancel(nil)
+		if reason != worktreeCleanupReasonRunFinished {
+			t.Fatalf("reason = %q, want %q", reason, worktreeCleanupReasonRunFinished)
+		}
+		if cause != "" {
+			t.Fatalf("cause = %q, want empty", cause)
+		}
+	})
+
+	t.Run("genuine cancellation preserves cause", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(errors.New("aborted by user"))
+		reason, cause := classifyRunCleanup(context.Cause(ctx))
+		if reason != worktreeCleanupReasonRunCancelled {
+			t.Fatalf("reason = %q, want %q", reason, worktreeCleanupReasonRunCancelled)
+		}
+		if cause != "aborted by user" {
+			t.Fatalf("cause = %q, want %q", cause, "aborted by user")
+		}
+	})
+
+	t.Run("reading cause after self-cancel misclassifies", func(t *testing.T) {
+		// Documents why the finalizer must read the cause before cancel(nil):
+		// reading after self-cancel reports context.Canceled and would flag a
+		// finished run as cancelled.
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(nil)
+		reason, _ := classifyRunCleanup(context.Cause(ctx))
+		if reason != worktreeCleanupReasonRunCancelled {
+			t.Fatalf("reason = %q, want %q (self-cancel then read must misclassify)", reason, worktreeCleanupReasonRunCancelled)
+		}
+	})
+}
+
 func captureLifecycleLogs(dst *bytes.Buffer) func() {
 	old := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(dst, &slog.HandlerOptions{Level: slog.LevelDebug})))

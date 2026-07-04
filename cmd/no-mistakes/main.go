@@ -16,6 +16,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/update"
 )
 
+var daemonRun = daemon.Run
+
 func main() {
 	os.Exit(run())
 }
@@ -52,21 +54,28 @@ func run() int {
 }
 
 func runDaemonProcess(root string) (code int) {
+	reason := "daemon run returned"
+	var exitErr error
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("daemon process exiting", "reason", "panic", "panic", r)
 			panic(r)
 		}
+		if code == 0 {
+			slog.Info("daemon process exiting", "reason", reason, "exit_code", code)
+			return
+		}
+		slog.Error("daemon process exiting", "reason", reason, "exit_code", code, "error", exitErr)
 	}()
 	if root != "" {
 		if err := os.Setenv("NM_HOME", root); err != nil {
-			slog.Error("daemon process exiting", "reason", "set NM_HOME failed", "error", err)
+			reason, exitErr = "set NM_HOME failed", err
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 	}
-	if err := daemon.Run(); err != nil {
-		slog.Error("daemon process exiting", "reason", "daemon run error", "error", err)
+	if err := daemonRun(); err != nil {
+		reason, exitErr = "daemon run error", err
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}

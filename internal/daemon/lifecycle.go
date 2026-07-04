@@ -13,10 +13,23 @@ const (
 	worktreeCleanupActorRecovery      = "daemon_recovery"
 	worktreeCleanupReasonSetupFailed  = "setup_failed"
 	worktreeCleanupReasonRunFinished  = "run_finished"
+	worktreeCleanupReasonRunCancelled = "run_cancelled"
 	worktreeCleanupReasonStartupStale = "startup_orphan"
 )
 
 var removeGitWorktree = git.WorktreeRemove
+
+// classifyRunCleanup maps a run context's cancellation cause to the worktree
+// cleanup reason and a human-readable cause string. The cause MUST be read
+// before the run finalizer cancels its own context with cancel(nil): after
+// cancel(nil), context.Cause reports context.Canceled and a normally-finished
+// run would be misattributed as cancelled.
+func classifyRunCleanup(cause error) (reason, causeStr string) {
+	if cause != nil {
+		return worktreeCleanupReasonRunCancelled, cause.Error()
+	}
+	return worktreeCleanupReasonRunFinished, ""
+}
 
 type worktreeCleanupLog struct {
 	Actor     string
