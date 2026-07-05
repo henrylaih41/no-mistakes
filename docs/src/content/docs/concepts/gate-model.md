@@ -143,7 +143,7 @@ branch, marking the remaining steps as skipped.
 
 A step can attach an auto-resolver to an approval gate so it clears without user action once the external condition that forced the pause resolves on its own - for example the CI idle-timeout or Devin manual-verify gate when the PR is merged or closed out-of-band.
 
-While the executor is paused at an approval or fix-review gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
+While the executor is paused at an approval, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
 That timestamp is observability only and does not alter approval behavior.
 
 ### IPC
@@ -158,7 +158,9 @@ rounds, and derived intent summaries. Step rounds record each execution attempt
 IDs, whether the selection came from the user or auto-fix filtering, the merged
 finding payload actually sent to the fix agent for that round, and the one-line
 fix summary for fix rounds. That merged payload can include per-finding user
-notes and user-authored findings from the TUI or AXI interface. Intent stores
+notes and user-authored findings from the TUI or AXI interface. A review round
+that overrode the `review.max_fix_rounds` cap also records the master triage
+reason that authorized it. Intent stores
 the summary, source, session ID, and match score on each run when transcript
 matching is used, plus cached summaries for matching transcript sessions. An
 agent-supplied AXI intent is stored directly on the run. Raw transcript text is

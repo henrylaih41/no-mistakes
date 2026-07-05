@@ -182,7 +182,8 @@ Legacy alias: `auto_fix.babysit`.
 ### review
 
 Optional repo-level cross-family review panel.
-The schema matches global `review` config: `reviewers`, optional per-reviewer `agent` / `args` / `path`, `max_parallel`, and `fail_open`.
+The schema matches global `review` config: `reviewers`, optional per-reviewer `agent` / `args` / `path`, `max_parallel`, `fail_open`, and `max_fix_rounds`.
+An absent `max_fix_rounds` inside an explicit repo `review` block still inherits the global cap; set `max_fix_rounds: 0` to restore unlimited review fix rounds for this repo.
 
 ```yaml
 review:
@@ -202,7 +203,7 @@ review:
   reviewers: []
 ```
 
-Because reviewers select extra agent processes to launch with maintainer credentials, repo-level `review` is treated like `commands` and `agent`: by default it is read only from the trusted default-branch copy of `.no-mistakes.yaml`.
+Because reviewers select extra agent processes to launch with maintainer credentials and `max_fix_rounds` controls review fix-round policy, repo-level `review` is treated like `commands` and `agent`: by default it is read only from the trusted default-branch copy of `.no-mistakes.yaml`.
 A review panel pushed only on a feature branch is ignored unless `allow_repo_commands: true` is already set on the trusted default branch.
 
 ### review_loop
