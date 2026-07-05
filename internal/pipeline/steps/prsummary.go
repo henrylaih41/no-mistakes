@@ -47,7 +47,7 @@ func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRo
 		if shouldOmitPipelineStep(sr) {
 			continue
 		}
-		stepRounds := rounds[sr.ID]
+		stepRounds := renderableRounds(rounds[sr.ID])
 		line, detail := buildStepEntry(sr, stepRounds)
 		if line != "" && detail != "" {
 			detailBlocks = append(detailBlocks, detail)
@@ -91,7 +91,7 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 			continue
 		}
 
-		stepRounds := rounds[sr.ID]
+		stepRounds := renderableRounds(rounds[sr.ID])
 		line, _ := buildStepEntry(sr, stepRounds)
 		if line == "" {
 			return ""
@@ -921,7 +921,7 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 
 		src := finalFindings
 		if src == nil && !hasUnreadableFinal {
-			stepRounds := rounds[sr.ID]
+			stepRounds := renderableRounds(rounds[sr.ID])
 			if len(stepRounds) > 0 {
 				last := stepRounds[len(stepRounds)-1]
 				if last.FindingsJSON != nil {
@@ -964,6 +964,22 @@ func riskEmoji(level string) string {
 	default:
 		return "ℹ️"
 	}
+}
+
+// renderableRounds drops agent provider/transient retry attribution rows. They
+// carry no findings and represent an infrastructure retry, not a real execution
+// round, so the findings narrative and run counting must exclude them; otherwise
+// a transient retry reads as a synthetic "no issues found" pass and inflates the
+// run count.
+func renderableRounds(rounds []*db.StepRound) []*db.StepRound {
+	filtered := make([]*db.StepRound, 0, len(rounds))
+	for _, r := range rounds {
+		if r.IsAgentRetry() {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return filtered
 }
 
 func roundsHaveFindings(rounds []*db.StepRound) bool {

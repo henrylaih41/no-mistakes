@@ -93,10 +93,10 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 		return nil
 	}
 	if step.Status == types.StepStatusAwaitingRetry {
-		if step.AgentAutoRetries > 0 {
+		if step.AgentAutoRetries > 0 || m.yoloRetried[step.StepName] {
 			return nil
 		}
-		m.yoloApproved[step.StepName] = true
+		m.yoloRetried[step.StepName] = true
 		return m.respondCmd(types.ActionRetry, true)
 	}
 	if step.Status != types.StepStatusFixReview && !m.yoloFixed[step.StepName] && m.stepHasActionableFindings(step.StepName) {

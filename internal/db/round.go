@@ -48,6 +48,15 @@ func (r *StepRound) IsFixRound() bool {
 	return r.Trigger == "auto_fix" || r.Trigger == "user_fix"
 }
 
+// IsAgentRetry reports whether this round is an agent provider/transient retry
+// attribution row rather than a real execution round. These rows carry no
+// findings and exist only to bound and attribute the --yes auto-retry budget,
+// so findings-narrative rendering and run/round counting must exclude them
+// instead of treating them as a "no issues found" pass.
+func (r *StepRound) IsAgentRetry() bool {
+	return r.Trigger == RoundTriggerAgentAutoRetry || r.Trigger == RoundTriggerAgentManualRetry
+}
+
 // StepFixSummaries returns one entry per fix round for a step, in round order:
 // the agent's one-line fix summary, or "" when the round recorded none.
 func (d *DB) StepFixSummaries(stepResultID string) ([]string, error) {
