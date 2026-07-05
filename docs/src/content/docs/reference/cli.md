@@ -106,8 +106,11 @@ Reattaching to an in-flight run does not add or replace its design context.
 Use it when the PR base repo is not Devin-applicable or the run should rely on normal CI checks only; it does not skip the `ci` step, so GitHub checks, merge, and close monitoring continue.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
+`--yes` does not override a review step parked at `awaiting_triage`; it returns that gate for master triage instead.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
+When `review.max_fix_rounds` is reached, review gates render `status: awaiting_triage`.
+Residual findings stay visible; a plain `axi respond --action fix` is refused, and another fix round requires explicit master triage with `--fix-override --override-reason`.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step is still monitoring an open PR and checks are green, `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge.
@@ -126,6 +129,7 @@ Answer the current approval gate and continue until the next gate, CI-ready deci
 no-mistakes axi respond --action approve
 no-mistakes axi respond --action fix --findings F1,F2 --instructions "optional guidance"
 no-mistakes axi respond --action fix --add-finding '{"description":"...","action":"auto-fix"}'
+no-mistakes axi respond --action fix --fix-override --override-reason "master triage: merge-blocking" --findings F1
 no-mistakes axi respond --action skip
 ```
 
@@ -136,9 +140,12 @@ no-mistakes axi respond --action skip
 | `--findings` | `string` | (none) | Comma-separated finding IDs for `--action fix` |
 | `--instructions` | `string` | (none) | Guidance applied to selected findings |
 | `--add-finding` | `string` | (none) | JSON finding object to add and fix |
+| `--fix-override` | `bool` | `false` | Allow one more review fix round after `awaiting_triage`; valid only with `--action fix` |
+| `--override-reason` | `string` | (none) | Required non-empty master triage reason for `--fix-override`; persisted on the triggering round |
 | `-y`, `--yes` | `bool` | `false` | Auto-resolve every subsequent gate until a decision point or outcome |
 
 After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix` and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when CI is green but the PR still needs a human merge.
+It also stops at `awaiting_triage`; it never supplies `--fix-override` implicitly.
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome.
 If it returns another `gate:`, answer that gate; do not idle-wait for the run to move forward by itself.
 The same successful-output reporting instructions apply to `axi respond` results.
@@ -156,7 +163,7 @@ no-mistakes axi status --run <id>
 |---|---|---|---|
 | `--run` | `string` | resolved run | Inspect a specific run ID |
 
-When the resolved run is parked at an `awaiting_approval` or `fix_review` gate, its top-level `run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
+When the resolved run is parked at an `awaiting_approval`, `fix_review`, or `awaiting_triage` gate, its top-level `run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
 The field disappears after `axi respond`, on cancel, and on terminal outcomes; use it to distinguish a run waiting for the driving agent from one actively running, fixing, or watching CI.
 
 ## no-mistakes axi logs

@@ -73,7 +73,12 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 	}
 
 	switch selectionSourceValue(r.SelectionSource) {
-	case db.RoundSelectionSourceUser:
+	case db.RoundSelectionSourceUser, db.RoundSelectionSourceUserOverride:
+		if r.FixOverrideReason != nil {
+			if reason := sanitizePromptText(*r.FixOverrideReason); reason != "" {
+				fmt.Fprintf(&b, "\nfix_override_reason: %q", reason)
+			}
+		}
 		if selected != nil {
 			b.WriteString("\nuser_chose_to_fix:")
 			for _, line := range selected {

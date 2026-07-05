@@ -150,6 +150,37 @@ func TestRoundHistoryPromptSection_IncludesSourceAndUserInstructions(t *testing.
 	}
 }
 
+func TestRoundHistoryPromptSection_RendersOverrideSelectionAndReason(t *testing.T) {
+	sctx, stepID := newRoundHistoryContext(t)
+
+	round1 := `{"findings":[{"id":"review-1","severity":"error","file":"a.go","line":10,"description":"merge blocker","action":"ask-user"},{"id":"review-2","severity":"warning","description":"follow-up only","action":"ask-user"}],"summary":"2"}`
+	r1, err := sctx.DB.InsertStepRound(stepID, 1, "initial", &round1, nil, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := `["review-1"]`
+	if err := sctx.DB.SetStepRoundSelection(r1.ID, &selected, db.RoundSelectionSourceUserOverride); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetStepRoundFixOverrideReason(r1.ID, "master ruled review-1 merge-blocking"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := roundHistoryPromptSection(sctx)
+	wants := []string{
+		`fix_override_reason: "master ruled review-1 merge-blocking"`,
+		`user_chose_to_fix:`,
+		`"description":"merge blocker"`,
+		`user_chose_to_ignore:`,
+		`"description":"follow-up only"`,
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("expected override history to contain %q, got:\n%s", w, got)
+		}
+	}
+}
+
 func TestRoundHistoryPromptSection_SanitizesInjectionAttempts(t *testing.T) {
 	sctx, stepID := newRoundHistoryContext(t)
 

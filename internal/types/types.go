@@ -113,6 +113,7 @@ const (
 	StepStatusAwaitingApproval StepStatus = "awaiting_approval"
 	StepStatusFixing           StepStatus = "fixing"
 	StepStatusFixReview        StepStatus = "fix_review"
+	StepStatusAwaitingTriage   StepStatus = "awaiting_triage"
 	StepStatusCompleted        StepStatus = "completed"
 	StepStatusSkipped          StepStatus = "skipped"
 	StepStatusFailed           StepStatus = "failed"

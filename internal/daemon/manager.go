@@ -150,34 +150,41 @@ func branchFromRef(ref string) string {
 // fetch + resolve the ref could point at a commit a previous run left behind.
 //
 // trustedSHA is empty when the default branch is unknown, the fetch failed,
-// or the ref did not resolve — every one of those failure modes returns nil
-// here so the caller (EffectiveRepoConfig) fails closed: the pushed branch's
-// commands and agent are dropped and the run proceeds on built-in defaults.
-// None of these are fatal, since the pushed-branch copy is still read for
-// non-executing fields.
-func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) *config.RepoConfig {
+// or the ref did not resolve — every one of those failure modes returns
+// (nil, nil) here so the caller (EffectiveRepoConfig) fails closed: the pushed
+// branch's commands and agent are dropped and the run proceeds on built-in
+// defaults. An absent .no-mistakes.yaml on the default branch is likewise
+// (nil, nil): the common "repo has no trusted commands" case is not fatal,
+// since the pushed-branch copy is still read for non-executing fields.
+//
+// A .no-mistakes.yaml that IS present on the default branch but fails to parse
+// or validate (e.g. review.max_fix_rounds < 0) returns a non-nil error so the
+// caller fails the run loudly. That is a maintainer error on the trusted
+// default branch, not the untrusted pushed branch; silently swallowing it to
+// nil would normalize an invalid trusted cap to the global/default and drop
+// the maintainer's commands/agent without anyone noticing.
+func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) (*config.RepoConfig, error) {
 	if trustedSHA == "" {
 		// No trusted SHA means no freshly-fetched default-branch commit to
 		// read from. Return nil so EffectiveRepoConfig forces empty
 		// commands/agent — the secure default — instead of falling back to a
 		// potentially stale origin/<defaultBranch> ref.
-		return nil
+		return nil, nil
 	}
 	content, err := git.ShowFile(ctx, wtDir, trustedSHA, ".no-mistakes.yaml")
 	if err != nil {
 		// Path absent on the default branch is the common "repo has no
-		// trusted commands" case; log at debug so it isn't noisy. Other
-		// errors are surfaced at warn so a genuinely broken read isn't
-		// silent. Either way trusted is nil → fail closed.
+		// trusted commands" case; log at debug so it isn't noisy. Treat a
+		// missing/unreadable file as no trusted config → fail closed.
 		slog.Debug("trusted repo config: not present on default branch", "run_id", runID, "sha", trustedSHA, "error", err)
-		return nil
+		return nil, nil
 	}
 	trusted, err := config.LoadRepoFromBytes([]byte(content))
 	if err != nil {
-		slog.Warn("trusted repo config: parse failed; commands/agent from pushed branch will be disabled", "run_id", runID, "sha", trustedSHA, "error", err)
-		return nil
+		slog.Warn("trusted repo config invalid on default branch; failing run", "run_id", runID, "sha", trustedSHA, "error", err)
+		return nil, fmt.Errorf("trusted repo config invalid on default branch: %w", err)
 	}
-	return trusted
+	return trusted, nil
 }
 
 // trustedRouteRefPrefix namespaces the per-worktree ref the trusted
@@ -488,9 +495,19 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// contributor cannot self-enable it from the pushed branch. With no
 	// trusted copy (fetch failed, no default branch, or no file on it) the
 	// opt-in is false and commands/agent are forced empty — fail closed.
-	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
+	trustedRepoCfg, err := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("validate repo config: %s", err))
+		trackStartFailure("validate_repo_config")
+		return "", fmt.Errorf("validate repo config: %w", err)
+	}
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
+	if err := config.ValidateEffectiveRepoConfig(effectiveRepoCfg); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("validate repo config: %s", err))
+		trackStartFailure("validate_repo_config")
+		return "", fmt.Errorf("validate repo config: %w", err)
+	}
 	if allowRepoCommands {
 		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/agent from pushed branch", "run_id", run.ID, "branch", branch)
 	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Agent != effectiveRepoCfg.Agent {
@@ -729,12 +746,12 @@ func telemetryFailedStepName(database *db.DB, runID string) string {
 
 // HandleRespond routes a user approval action to the executor for the given run.
 func (m *RunManager) HandleRespond(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
-	return m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil)
+	return m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, "")
 }
 
 // HandleRespondWithOverrides is like HandleRespond but also forwards user
 // instructions and user-authored findings to the executor.
-func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding) error {
+func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, fixOverrideReason string) error {
 	m.mu.Lock()
 	exec, ok := m.executors[runID]
 	m.mu.Unlock()
@@ -743,7 +760,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 		return fmt.Errorf("no active executor for run %s", runID)
 	}
 
-	return exec.RespondWithOverrides(step, action, findingIDs, instructions, addedFindings)
+	return exec.RespondWithOverrideReason(step, action, findingIDs, instructions, addedFindings, fixOverrideReason)
 }
 
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent

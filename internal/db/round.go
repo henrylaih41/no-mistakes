@@ -3,8 +3,9 @@ package db
 import "fmt"
 
 const (
-	RoundSelectionSourceUser    = "user"
-	RoundSelectionSourceAutoFix = "auto_fix"
+	RoundSelectionSourceUser         = "user"
+	RoundSelectionSourceAutoFix      = "auto_fix"
+	RoundSelectionSourceUserOverride = "user_override"
 )
 
 // StepRound represents one execution round within a pipeline step.
@@ -27,6 +28,9 @@ type StepRound struct {
 	// deliberately left unselected.
 	SelectedFindingIDs *string
 	SelectionSource    *string
+	// FixOverrideReason records the master/triage rationale that authorized a
+	// fix round after the review max_fix_rounds cap was already consumed.
+	FixOverrideReason *string
 	// FixSummary, when non-nil, is the agent's one-line commit summary for
 	// the fix attempt performed during this round. It is only set when the
 	// round itself was a fix round (trigger=="auto_fix").
@@ -76,8 +80,8 @@ func (d *DB) InsertStepRound(stepResultID string, round int, trigger string, fin
 		CreatedAt:    now(),
 	}
 	_, err := d.sql.Exec(
-		`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, findings_json, user_findings_json, selected_finding_ids, selection_source, fix_summary, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.StepResultID, r.Round, r.Trigger, r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs, r.SelectionSource, r.FixSummary, r.DurationMS, r.CreatedAt,
+		`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, findings_json, user_findings_json, selected_finding_ids, selection_source, fix_override_reason, fix_summary, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.StepResultID, r.Round, r.Trigger, r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs, r.SelectionSource, r.FixOverrideReason, r.FixSummary, r.DurationMS, r.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert step round: %w", err)
@@ -109,6 +113,18 @@ func (d *DB) SetStepRoundSelectedFindingIDs(id string, selectedFindingIDs *strin
 	return d.SetStepRoundSelection(id, selectedFindingIDs, RoundSelectionSourceUser)
 }
 
+// SetStepRoundFixOverrideReason records the explicit triage reason that
+// authorized one fix round after the review max_fix_rounds cap was reached.
+func (d *DB) SetStepRoundFixOverrideReason(id string, reason string) error {
+	if _, err := d.sql.Exec(
+		`UPDATE step_rounds SET fix_override_reason = ? WHERE id = ?`,
+		reason, id,
+	); err != nil {
+		return fmt.Errorf("set step round fix override reason: %w", err)
+	}
+	return nil
+}
+
 // SetStepRoundUserFindings records the merged finding list (with user
 // instructions attached and user-added findings appended) that was
 // dispatched to the fix agent for the round. Passing nil clears the column.
@@ -125,7 +141,7 @@ func (d *DB) SetStepRoundUserFindings(id string, userFindingsJSON *string) error
 // GetRoundsByStep returns all rounds for a step result, ordered by round number.
 func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	rows, err := d.sql.Query(
-		`SELECT id, step_result_id, round, trigger_type, findings_json, user_findings_json, selected_finding_ids, selection_source, fix_summary, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
+		`SELECT id, step_result_id, round, trigger_type, findings_json, user_findings_json, selected_finding_ids, selection_source, fix_override_reason, fix_summary, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
 		stepResultID,
 	)
 	if err != nil {
@@ -135,10 +151,27 @@ func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	var rounds []*StepRound
 	for rows.Next() {
 		r := &StepRound{}
-		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.FindingsJSON, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary, &r.DurationMS, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.FindingsJSON, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixOverrideReason, &r.FixSummary, &r.DurationMS, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan step round: %w", err)
 		}
 		rounds = append(rounds, r)
 	}
 	return rounds, rows.Err()
+}
+
+// CountStepFixRounds returns the number of persisted fix attempts for a step.
+// It derives the count from step_rounds so review cap enforcement survives
+// daemon and agent restarts.
+func (d *DB) CountStepFixRounds(stepResultID string) (int, error) {
+	rounds, err := d.GetRoundsByStep(stepResultID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, r := range rounds {
+		if r.IsFixRound() {
+			count++
+		}
+	}
+	return count, nil
 }

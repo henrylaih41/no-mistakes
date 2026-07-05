@@ -156,6 +156,17 @@ func TestGateResolution(t *testing.T) {
 	}
 }
 
+func TestGateAutoResolutionStopsAtAwaitingTriage(t *testing.T) {
+	gate := stepView{
+		Name:         "review",
+		Status:       string(types.StepStatusAwaitingTriage),
+		FindingsJSON: `{"findings":[{"id":"review-1","severity":"error","description":"still here","action":"auto-fix"}],"summary":"1"}`,
+	}
+	if gateAllowsAutoResolution(gate) {
+		t.Fatal("awaiting_triage gate must not be auto-resolved by --yes")
+	}
+}
+
 func TestRenderDriveResult_ChecksPassed(t *testing.T) {
 	run := &ipc.RunInfo{
 		ID:      "run-1",

@@ -21,6 +21,9 @@ func (m Model) awaitingActionState() (showSelectionActions bool, allowFix bool, 
 	if len(items) == 0 {
 		return false, false, 0, 0
 	}
+	if step.Status == types.StepStatusAwaitingTriage {
+		return false, false, 0, len(items)
+	}
 	totalCount = len(items)
 	selected, ok := m.findingSelections[step.StepName]
 	if !ok {

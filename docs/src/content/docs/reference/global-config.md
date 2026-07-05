@@ -51,6 +51,7 @@ review:
       path: /Users/you/bin/claude-review
   max_parallel: 2
   fail_open: false
+  max_fix_rounds: 0
 
 review_loop:
   enabled: false
@@ -270,6 +271,7 @@ When reviewers are configured, no-mistakes sends the same review prompt to each 
 | `review.reviewers[].path` | `string` | Inherits `agent_path_override.<agent>` or default binary | Binary path for this reviewer |
 | `review.max_parallel` | `int` | `0` | Maximum reviewers to run at once; `0` means all reviewers at once |
 | `review.fail_open` | `bool` | `false` | When `false`, any reviewer error fails the review step; when `true`, failed reviewers are dropped if at least one reviewer succeeds |
+| `review.max_fix_rounds` | `int` | `0` | Maximum review fix/re-review rounds before parking at `awaiting_triage`; `0` means unlimited |
 
 Each reviewer returns its own findings. In the merged gate, finding IDs are namespaced by reviewer and each finding's `source` is set to the reviewer name, so the TUI, AXI output, and fix prompt can show who reported it.
 The merged `risk_level` is the highest risk any reviewer reported; summaries and rationales are labeled by reviewer.
@@ -283,6 +285,13 @@ Identical resolved reviewers are de-duplicated.
 
 Per-repo config can override the global review block wholesale.
 An absent repo `review` block inherits the global panel; an explicit repo block with `reviewers: []` disables the inherited panel and reverts to the single-agent default.
+For `review.max_fix_rounds`, an absent field inside an explicit repo `review` block still inherits the global cap; set `max_fix_rounds: 0` explicitly to restore unlimited review fix rounds for that repo.
+`review.max_fix_rounds` counts all persisted review fix rounds from `step_rounds`, both automatic review fixes and user-approved `axi respond --action fix` rounds.
+When the cap is reached, the review step parks at `awaiting_triage` with residual findings intact.
+A normal fix response is refused; another fix round requires `axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <ids>`, and the reason is persisted on the round.
+
+Repo-level `review` is code-executing config because it selects extra agent processes and controls review fix-round policy.
+Like repo `commands`, `agent`, and `review_loop`, it is read from the trusted default-branch `.no-mistakes.yaml` unless `allow_repo_commands: true` is already set there.
 
 ### review_loop
 

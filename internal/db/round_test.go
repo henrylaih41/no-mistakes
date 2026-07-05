@@ -169,6 +169,51 @@ func TestStepFixSummariesNoFixRounds(t *testing.T) {
 	}
 }
 
+func TestCountStepFixRounds(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+
+	d.InsertStepRound(step.ID, 1, "initial", nil, nil, 100)
+	d.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 100)
+	d.InsertStepRound(step.ID, 3, "user_fix", nil, nil, 100)
+
+	got, err := d.CountStepFixRounds(step.ID)
+	if err != nil {
+		t.Fatalf("count fix rounds: %v", err)
+	}
+	if got != 2 {
+		t.Errorf("fix round count = %d, want 2", got)
+	}
+}
+
+func TestSetStepRoundFixOverrideReason(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"x"}],"summary":"1"}`
+	r, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 50)
+	if err != nil {
+		t.Fatalf("insert round: %v", err)
+	}
+
+	reason := "master triage: residual is merge-blocking"
+	if err := d.SetStepRoundFixOverrideReason(r.ID, reason); err != nil {
+		t.Fatalf("set override reason: %v", err)
+	}
+
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatalf("get rounds: %v", err)
+	}
+	if rounds[0].FixOverrideReason == nil || *rounds[0].FixOverrideReason != reason {
+		t.Errorf("fix_override_reason = %v, want %q", rounds[0].FixOverrideReason, reason)
+	}
+}
+
 func TestStepRoundCascadeDelete(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

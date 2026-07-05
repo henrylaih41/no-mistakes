@@ -24,10 +24,11 @@ import (
 type EventFunc func(ipc.Event)
 
 type approvalResponse struct {
-	action        types.ApprovalAction
-	findingIDs    []string
-	instructions  map[string]string
-	addedFindings []types.Finding
+	action            types.ApprovalAction
+	findingIDs        []string
+	instructions      map[string]string
+	addedFindings     []types.Finding
+	fixOverrideReason string
 }
 
 const defaultApprovalAutoResolveInterval = 30 * time.Second
@@ -44,10 +45,13 @@ type Executor struct {
 
 	onEvent EventFunc
 
-	mu          sync.Mutex
-	approvalCh  chan approvalResponse // buffered channel for approval responses
-	waiting     bool                  // true when blocked on approval
-	waitingStep types.StepName        // which step is currently awaiting approval
+	mu                   sync.Mutex
+	approvalCh           chan approvalResponse // buffered channel for approval responses
+	waiting              bool                  // true when blocked on approval
+	waitingStep          types.StepName        // which step is currently awaiting approval
+	waitingAtFixRoundCap bool                  // true when the review step is parked for triage at max_fix_rounds
+	waitingMaxFixRounds  int
+	waitingFixRoundCount int
 }
 
 // SetReviewers configures the cross-family review panel agents. It is set after
@@ -97,6 +101,15 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 // instructions and user-authored findings. Both are merged into the round's
 // findings on a fix action before the fix agent runs.
 func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding) error {
+	return e.RespondWithOverrideReason(step, action, findingIDs, instructions, addedFindings, "")
+}
+
+// RespondWithOverrideReason is like RespondWithOverrides but also carries the
+// explicit master/triage reason for allowing one more review fix round after
+// review.max_fix_rounds has already been consumed.
+func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, fixOverrideReason string) error {
+	fixOverrideReason = strings.TrimSpace(fixOverrideReason)
+
 	e.mu.Lock()
 	if !e.waiting {
 		e.mu.Unlock()
@@ -106,14 +119,32 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
+	if fixOverrideReason != "" && action != types.ActionFix {
+		e.mu.Unlock()
+		return fmt.Errorf("fix override reason is only valid with --action fix")
+	}
+	if action == types.ActionFix {
+		if e.waitingAtFixRoundCap {
+			if fixOverrideReason == "" {
+				max := e.waitingMaxFixRounds
+				count := e.waitingFixRoundCount
+				e.mu.Unlock()
+				return fmt.Errorf("review max_fix_rounds cap reached (%d consumed, cap %d); step is awaiting_triage for master triage; use --fix-override --override-reason <reason> only after an explicit triage ruling", count, max)
+			}
+		} else if fixOverrideReason != "" {
+			e.mu.Unlock()
+			return fmt.Errorf("--fix-override is only valid while review is awaiting_triage after max_fix_rounds is reached")
+		}
+	}
 	e.waiting = false
 	e.mu.Unlock()
 
 	e.approvalCh <- approvalResponse{
-		action:        action,
-		findingIDs:    findingIDs,
-		instructions:  instructions,
-		addedFindings: addedFindings,
+		action:            action,
+		findingIDs:        findingIDs,
+		instructions:      instructions,
+		addedFindings:     addedFindings,
+		fixOverrideReason: fixOverrideReason,
 	}
 	return nil
 }
@@ -338,13 +369,18 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			e.emitRunEvent(ipc.EventRunUpdated, run, repo)
 		}
 
+		reviewCapReached, reviewFixRoundCount, reviewMaxFixRounds, capErr := e.reviewFixRoundCapReached(stepName, sr.ID)
+		if capErr != nil {
+			return false, fmt.Errorf("step %s: enforce review max_fix_rounds: %w", stepName, capErr)
+		}
+
 		// Check if auto-fix should be attempted.
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
 		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
 			fixableFindings := autoFixableFindingsJSON(outcome.Findings)
-			if fixableFindings != "" {
+			if fixableFindings != "" && !reviewCapReached {
 				autoFixAttempts++
 				telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
 				slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
@@ -365,6 +401,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				sctx.PreviousFindings = fixableFindings
 				nextTrigger = "auto_fix"
 				continue
+			} else if fixableFindings != "" && reviewCapReached {
+				slog.Info("review fix-round cap reached; parking for triage", "step", stepName, "fix_rounds", reviewFixRoundCount, "max_fix_rounds", reviewMaxFixRounds)
 			}
 		}
 
@@ -380,17 +418,22 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Freeze execution timer before entering approval wait.
 		executionMS += time.Since(phaseStart).Milliseconds()
 
-		// Determine approval status: fix_review after a fix cycle, awaiting_approval otherwise
+		// Determine approval status: awaiting_triage after review.max_fix_rounds
+		// is consumed, fix_review after a fix cycle, awaiting_approval otherwise.
 		approvalStatus := types.StepStatusAwaitingApproval
 		var diffText string
 		if sctx.Fixing {
-			approvalStatus = types.StepStatusFixReview
 			// Compute working tree diff to show what the agent changed
 			if d, err := git.DiffHead(ctx, workDir); err != nil {
 				slog.Warn("failed to compute diff for fix review", "error", err)
 			} else if d != "" {
 				diffText = d
 			}
+		}
+		if reviewCapReached {
+			approvalStatus = types.StepStatusAwaitingTriage
+		} else if sctx.Fixing {
+			approvalStatus = types.StepStatusFixReview
 		}
 
 		// Mark executor as ready to receive approval before updating DB or
@@ -399,6 +442,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.mu.Lock()
 		e.waiting = true
 		e.waitingStep = stepName
+		e.waitingAtFixRoundCap = reviewCapReached
+		e.waitingFixRoundCount = reviewFixRoundCount
+		e.waitingMaxFixRounds = reviewMaxFixRounds
 		e.mu.Unlock()
 
 		// Surface the park as a pollable, run-level signal so a supervisor can
@@ -436,6 +482,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			"action":     string(response.action),
 			"fix_review": sctx.Fixing,
 		}
+		if response.fixOverrideReason != "" {
+			approvalFields["fix_override"] = true
+		}
 		if agentName := e.telemetryAgentName(); agentName != "" {
 			approvalFields["agent"] = agentName
 		}
@@ -467,7 +516,34 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return false, fmt.Errorf("step %s: aborted by user", stepName)
 
 		case types.ActionFix:
-			telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(outcome.Findings, response.findingIDs), 0))
+			// An override fix round runs after the review max_fix_rounds cap was
+			// already consumed, so it must be attributable to a triage ruling
+			// before it starts (approved rider / ruling #11). Persist the reason
+			// first and refuse the extra round if it cannot be recorded, rather
+			// than launching an unattributable cap-exceeding fix. currentRoundID
+			// is empty only when the round row failed to insert above; that is
+			// just as unattributable, so it is fatal too.
+			if response.fixOverrideReason != "" {
+				var persistErr error
+				if currentRoundID == "" {
+					persistErr = fmt.Errorf("step %s: cannot persist fix override reason (no round record); refusing unattributed override fix round", stepName)
+				} else if dbErr := e.db.SetStepRoundFixOverrideReason(currentRoundID, response.fixOverrideReason); dbErr != nil {
+					persistErr = fmt.Errorf("step %s: persist fix override reason: %w", stepName, dbErr)
+				}
+				if persistErr != nil {
+					if dbErr := e.db.FailStep(sr.ID, persistErr.Error(), executionMS); dbErr != nil {
+						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+					}
+					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", persistErr.Error(), &executionMS)
+					return false, persistErr
+				}
+				slog.Info("review fix override accepted", "step", stepName, "round", roundNum, "max_fix_rounds", reviewMaxFixRounds, "reason", response.fixOverrideReason)
+			}
+			fixFields := e.fixTelemetryFields("user", stepName, selectedFindingCount(outcome.Findings, response.findingIDs), 0)
+			if response.fixOverrideReason != "" {
+				fixFields["override"] = true
+			}
+			telemetry.Track("fix", fixFields)
 			// Fix - mark step as fixing, resume execution timer, re-execute.
 			phaseStart = time.Now()
 			if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusFixing); dbErr != nil {
@@ -481,7 +557,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if currentRoundID != "" {
 				allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, mergedFindings)
 				if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
-					if dbErr := e.db.SetStepRoundSelection(currentRoundID, &idsJSON, db.RoundSelectionSourceUser); dbErr != nil {
+					selectionSource := db.RoundSelectionSourceUser
+					if response.fixOverrideReason != "" {
+						selectionSource = db.RoundSelectionSourceUserOverride
+					}
+					if dbErr := e.db.SetStepRoundSelection(currentRoundID, &idsJSON, selectionSource); dbErr != nil {
 						slog.Warn("failed to record selected finding ids", "step", stepName, "round", roundNum, "error", dbErr)
 					}
 				}
@@ -522,6 +602,24 @@ func roundInsertID(_ string, inserted *db.StepRound, err error) string {
 	return inserted.ID
 }
 
+func (e *Executor) reviewFixRoundCapReached(stepName types.StepName, stepResultID string) (bool, int, int, error) {
+	if stepName != types.StepReview || e.config == nil {
+		return false, 0, 0, nil
+	}
+	max := e.config.Review.MaxFixRounds
+	if max < 0 {
+		return false, 0, max, fmt.Errorf("invalid review.max_fix_rounds: %d (must be >= 0)", max)
+	}
+	if max == 0 {
+		return false, 0, max, nil
+	}
+	count, err := e.db.CountStepFixRounds(stepResultID)
+	if err != nil {
+		return false, 0, max, err
+	}
+	return count >= max, count, max, nil
+}
+
 // waitForApproval blocks until a user action arrives, an external resolver
 // clears the parked gate, or context is cancelled.
 // The caller must set e.waiting and e.waitingStep before calling this method.
@@ -530,6 +628,9 @@ func (e *Executor) waitForApproval(ctx context.Context, stepName types.StepName,
 		e.mu.Lock()
 		e.waiting = false
 		e.waitingStep = ""
+		e.waitingAtFixRoundCap = false
+		e.waitingFixRoundCount = 0
+		e.waitingMaxFixRounds = 0
 		e.mu.Unlock()
 		// Drain any stale response that arrived after context cancellation
 		select {
@@ -689,7 +790,7 @@ func shouldTrackStepTelemetry(eventType ipc.EventType, status string) bool {
 		return false
 	}
 	switch types.StepStatus(status) {
-	case types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusFailed:
+	case types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusAwaitingTriage, types.StepStatusFailed:
 		return true
 	default:
 		return false

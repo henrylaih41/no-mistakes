@@ -15,6 +15,8 @@ import (
 // only consults lookPath for rovodev, but tests pass it for completeness.
 func okLookPath(bin string) (string, error) { return bin, nil }
 
+func intPtr(v int) *int { return &v }
+
 func TestLoadGlobal_ReviewParsesUnderStrictKnownFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -29,6 +31,7 @@ review:
       path: /opt/claude
   max_parallel: 2
   fail_open: true
+  max_fix_rounds: 3
 `
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
@@ -58,6 +61,9 @@ review:
 	}
 	if cfg.Review.FailOpen == nil || !*cfg.Review.FailOpen {
 		t.Errorf("fail_open = %v, want true", cfg.Review.FailOpen)
+	}
+	if cfg.Review.MaxFixRounds == nil || *cfg.Review.MaxFixRounds != 3 {
+		t.Errorf("max_fix_rounds = %v, want 3", cfg.Review.MaxFixRounds)
 	}
 }
 
@@ -90,6 +96,24 @@ func TestLoadGlobal_ReviewUnknownReviewerKeyTripsKnownFields(t *testing.T) {
 	}
 	if _, err := LoadGlobal(path); err == nil {
 		t.Fatal("expected error: unknown reviewer key must trip KnownFields(true)")
+	}
+}
+
+func TestLoadGlobal_ReviewRejectsNegativeMaxFixRounds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `review:
+  max_fix_rounds: -1
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadGlobal(path)
+	if err == nil {
+		t.Fatal("expected error for negative max_fix_rounds")
+	}
+	if !strings.Contains(err.Error(), "review.max_fix_rounds") {
+		t.Errorf("expected error to mention review.max_fix_rounds, got: %v", err)
 	}
 }
 
@@ -131,9 +155,10 @@ func TestMerge_ReviewFromGlobal(t *testing.T) {
 	global := &GlobalConfig{
 		Agent: types.AgentClaude,
 		Review: ReviewRaw{
-			Reviewers:   []ReviewerSpec{{Agent: types.AgentCodex}},
-			MaxParallel: 3,
-			FailOpen:    &failOpen,
+			Reviewers:    []ReviewerSpec{{Agent: types.AgentCodex}},
+			MaxParallel:  3,
+			MaxFixRounds: intPtr(2),
+			FailOpen:     &failOpen,
 		},
 	}
 	repo := &RepoConfig{}
@@ -149,20 +174,25 @@ func TestMerge_ReviewFromGlobal(t *testing.T) {
 	if !cfg.Review.FailOpen {
 		t.Errorf("fail_open = false, want true from global")
 	}
+	if cfg.Review.MaxFixRounds != 2 {
+		t.Errorf("max_fix_rounds = %d, want 2 from global", cfg.Review.MaxFixRounds)
+	}
 }
 
 func TestMerge_ReviewRepoOverridesGlobal(t *testing.T) {
 	global := &GlobalConfig{
 		Agent: types.AgentClaude,
 		Review: ReviewRaw{
-			Reviewers:   []ReviewerSpec{{Agent: types.AgentCodex}},
-			MaxParallel: 1,
+			Reviewers:    []ReviewerSpec{{Agent: types.AgentCodex}},
+			MaxParallel:  1,
+			MaxFixRounds: intPtr(1),
 		},
 	}
 	repo := &RepoConfig{
 		Review: &ReviewRaw{
-			Reviewers:   []ReviewerSpec{{Agent: types.AgentClaude}, {Agent: types.AgentPi}},
-			MaxParallel: 5,
+			Reviewers:    []ReviewerSpec{{Agent: types.AgentClaude}, {Agent: types.AgentPi}},
+			MaxParallel:  5,
+			MaxFixRounds: intPtr(3),
 		},
 	}
 
@@ -176,6 +206,69 @@ func TestMerge_ReviewRepoOverridesGlobal(t *testing.T) {
 	}
 	if cfg.Review.MaxParallel != 5 {
 		t.Errorf("max_parallel = %d, want 5 from repo", cfg.Review.MaxParallel)
+	}
+	if cfg.Review.MaxFixRounds != 3 {
+		t.Errorf("max_fix_rounds = %d, want 3 from repo", cfg.Review.MaxFixRounds)
+	}
+}
+
+func TestMerge_RepoReviewInheritsGlobalMaxFixRoundsWhenAbsent(t *testing.T) {
+	global := &GlobalConfig{
+		Agent: types.AgentClaude,
+		Review: ReviewRaw{
+			Reviewers:    []ReviewerSpec{{Agent: types.AgentCodex}},
+			MaxFixRounds: intPtr(3),
+		},
+	}
+	repo := &RepoConfig{
+		Review: &ReviewRaw{
+			Reviewers: []ReviewerSpec{{Agent: types.AgentClaude}},
+		},
+	}
+
+	cfg := Merge(global, repo)
+
+	if cfg.Review.MaxFixRounds != 3 {
+		t.Errorf("max_fix_rounds = %d, want inherited global 3", cfg.Review.MaxFixRounds)
+	}
+	if len(cfg.Review.Reviewers) != 1 || cfg.Review.Reviewers[0].Agent != types.AgentClaude {
+		t.Errorf("reviewers = %v, want repo panel [claude]", cfg.Review.Reviewers)
+	}
+}
+
+func TestMerge_RepoReviewExplicitZeroDisablesGlobalMaxFixRounds(t *testing.T) {
+	global := &GlobalConfig{
+		Agent: types.AgentClaude,
+		Review: ReviewRaw{
+			MaxFixRounds: intPtr(3),
+		},
+	}
+	repo := &RepoConfig{
+		Review: &ReviewRaw{
+			MaxFixRounds: intPtr(0),
+		},
+	}
+
+	cfg := Merge(global, repo)
+
+	if cfg.Review.MaxFixRounds != 0 {
+		t.Errorf("max_fix_rounds = %d, want explicit repo 0", cfg.Review.MaxFixRounds)
+	}
+}
+
+func TestValidateEffectiveRepoConfigRejectsNegativeReviewMaxFixRounds(t *testing.T) {
+	cfg := &RepoConfig{
+		Review: &ReviewRaw{
+			MaxFixRounds: intPtr(-1),
+		},
+	}
+
+	err := ValidateEffectiveRepoConfig(cfg)
+	if err == nil {
+		t.Fatal("expected negative review.max_fix_rounds to be rejected after effective config selection")
+	}
+	if !strings.Contains(err.Error(), "review.max_fix_rounds") {
+		t.Errorf("error = %v, want review.max_fix_rounds", err)
 	}
 }
 
@@ -222,12 +315,14 @@ func TestMerge_RepoAbsentReviewInheritsGlobalPanel(t *testing.T) {
 func TestEffectiveRepoConfig_StripsPushedReview(t *testing.T) {
 	pushed := &RepoConfig{
 		Review: &ReviewRaw{
-			Reviewers: []ReviewerSpec{{Agent: types.AgentCodex, Path: "/tmp/evil"}},
+			Reviewers:    []ReviewerSpec{{Agent: types.AgentCodex, Path: "/tmp/evil"}},
+			MaxFixRounds: intPtr(99),
 		},
 	}
 	trusted := &RepoConfig{
 		Review: &ReviewRaw{
-			Reviewers: []ReviewerSpec{{Agent: types.AgentClaude}},
+			Reviewers:    []ReviewerSpec{{Agent: types.AgentClaude}},
+			MaxFixRounds: intPtr(3),
 		},
 	}
 
@@ -238,6 +333,9 @@ func TestEffectiveRepoConfig_StripsPushedReview(t *testing.T) {
 	}
 	if got.Review.Reviewers[0].Path != "" {
 		t.Errorf("review path = %q, want trusted (empty), not pushed /tmp/evil", got.Review.Reviewers[0].Path)
+	}
+	if got.Review.MaxFixRounds == nil || *got.Review.MaxFixRounds != 3 {
+		t.Errorf("review max_fix_rounds = %v, want trusted 3, not pushed 99", got.Review.MaxFixRounds)
 	}
 	// The pushed config must not be mutated.
 	if pushed.Review.Reviewers[0].Path != "/tmp/evil" {

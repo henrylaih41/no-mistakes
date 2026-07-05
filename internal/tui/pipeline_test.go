@@ -352,6 +352,14 @@ func TestAwaitingStep(t *testing.T) {
 	if got == nil || got.StepName != types.StepTest {
 		t.Error("expected test step in fix_review")
 	}
+
+	// Awaiting triage also counts as a parked gate.
+	run.Steps[1].Status = types.StepStatusCompleted
+	run.Steps[2].Status = types.StepStatusAwaitingTriage
+	got = awaitingStep(run.Steps)
+	if got == nil || got.StepName != types.StepLint {
+		t.Error("expected lint step in awaiting_triage")
+	}
 }
 
 func TestModel_ApplyEvent_StepStarted(t *testing.T) {
