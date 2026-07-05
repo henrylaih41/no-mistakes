@@ -63,11 +63,13 @@ type fixRow struct {
 // stepView is a render-ready view of a single pipeline step, decoupled from
 // whether it came from the daemon (ipc) or the local database.
 type stepView struct {
-	Name         string
-	Status       string
-	DurationMS   int64
-	FindingsJSON string
-	FixSummaries []string
+	Name             string
+	Status           string
+	DurationMS       int64
+	FindingsJSON     string
+	Error            string
+	AgentAutoRetries int
+	FixSummaries     []string
 }
 
 // runView is a render-ready view of a pipeline run.
@@ -96,12 +98,15 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		rv.PRURL = *r.PRURL
 	}
 	for _, s := range r.Steps {
-		sv := stepView{Name: string(s.StepName), Status: string(s.Status), FixSummaries: s.FixSummaries}
+		sv := stepView{Name: string(s.StepName), Status: string(s.Status), AgentAutoRetries: s.AgentAutoRetries, FixSummaries: s.FixSummaries}
 		if s.DurationMS != nil {
 			sv.DurationMS = *s.DurationMS
 		}
 		if s.FindingsJSON != nil {
 			sv.FindingsJSON = *s.FindingsJSON
+		}
+		if s.Error != nil {
+			sv.Error = *s.Error
 		}
 		rv.Steps = append(rv.Steps, sv)
 	}
@@ -109,6 +114,10 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 }
 
 func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
+	return runViewFromDBWithCounts(nil, r, steps)
+}
+
+func runViewFromDBWithCounts(d *db.DB, r *db.Run, steps []*db.StepResult) runView {
 	rv := runView{
 		ID:                 r.ID,
 		Branch:             r.Branch,
@@ -121,11 +130,19 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 	}
 	for _, s := range steps {
 		sv := stepView{Name: string(s.StepName), Status: string(s.Status)}
+		if d != nil {
+			if retries, err := d.CountStepAgentAutoRetries(s.ID); err == nil {
+				sv.AgentAutoRetries = retries
+			}
+		}
 		if s.DurationMS != nil {
 			sv.DurationMS = *s.DurationMS
 		}
 		if s.FindingsJSON != nil {
 			sv.FindingsJSON = *s.FindingsJSON
+		}
+		if s.Error != nil {
+			sv.Error = *s.Error
 		}
 		rv.Steps = append(rv.Steps, sv)
 	}
@@ -136,7 +153,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 // At most one step awaits at a time, so the first match is the active gate.
 func (rv runView) awaitingStep() (stepView, bool) {
 	for _, s := range rv.Steps {
-		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview) || s.Status == string(types.StepStatusAwaitingTriage) {
+		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusAwaitingRetry) || s.Status == string(types.StepStatusFixReview) || s.Status == string(types.StepStatusAwaitingTriage) {
 			return s, true
 		}
 	}
@@ -292,6 +309,21 @@ func gateFields(gate stepView) []toon.Field {
 	gfields := []toon.Field{
 		{Key: "step", Value: gate.Name},
 		{Key: "status", Value: gate.Status},
+	}
+	if gate.Status == string(types.StepStatusAwaitingRetry) {
+		if gate.Error != "" {
+			gfields = append(gfields, toon.Field{Key: "reason", Value: gate.Error})
+		}
+		gfields = append(gfields, toon.Field{Key: "auto_retries", Value: gate.AgentAutoRetries})
+		help := []string{
+			"Run `no-mistakes axi respond --action retry` to retry this agent step without creating a review fix round",
+			fmt.Sprintf("Run `no-mistakes axi logs --step %s --full` to read the full step log", gate.Name),
+			"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
+		}
+		return []toon.Field{
+			{Key: "gate", Value: toon.NewObject(gfields...)},
+			{Key: "help", Value: help},
+		}
 	}
 	if parsed.Summary != "" {
 		gfields = append(gfields, toon.Field{Key: "summary", Value: parsed.Summary})

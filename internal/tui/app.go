@@ -84,7 +84,7 @@ func NewModel(socketPath string, client *ipc.Client, run *ipc.RunInfo) Model {
 	for _, s := range steps {
 		if s.FindingsJSON != nil && *s.FindingsJSON != "" {
 			m.stepFindings[s.StepName] = *s.FindingsJSON
-			if s.Status == types.StepStatusAwaitingApproval || s.Status == types.StepStatusFixReview || s.Status == types.StepStatusAwaitingTriage {
+			if s.Status == types.StepStatusAwaitingApproval || s.Status == types.StepStatusAwaitingRetry || s.Status == types.StepStatusFixReview || s.Status == types.StepStatusAwaitingTriage {
 				m.resetFindingSelection(s.StepName)
 			}
 		}
@@ -275,7 +275,7 @@ func (m Model) terminalTitle() string {
 				return "✓ Checks passed" + suffix
 			}
 			return icon + " " + stepLabel(s.StepName) + suffix
-		case types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusAwaitingTriage:
+		case types.StepStatusAwaitingApproval, types.StepStatusAwaitingRetry, types.StepStatusFixReview, types.StepStatusAwaitingTriage:
 			return icon + " " + stepLabel(s.StepName) + suffix
 		}
 	}

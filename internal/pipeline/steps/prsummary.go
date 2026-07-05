@@ -803,6 +803,8 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound) (statusLine, deta
 		return buildDetail(fmt.Sprintf("⏳ **%s** - running", name))
 	case types.StepStatusAwaitingApproval:
 		return buildDetail(fmt.Sprintf("⏸️ **%s** - awaiting approval", name))
+	case types.StepStatusAwaitingRetry:
+		return buildDetail(fmt.Sprintf("⏸️ **%s** - awaiting agent retry", name))
 	case types.StepStatusFixing:
 		return buildDetail(fmt.Sprintf("🔄 **%s** - auto-fixing", name))
 	case types.StepStatusFixReview:
@@ -1151,6 +1153,8 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult) {
 		b.WriteString("Step is currently running.\n\n")
 	case types.StepStatusAwaitingApproval:
 		b.WriteString("Waiting for user approval.\n\n")
+	case types.StepStatusAwaitingRetry:
+		b.WriteString("Waiting for an agent provider/transient retry response.\n\n")
 	case types.StepStatusFixing:
 		b.WriteString("Agent is currently applying fixes.\n\n")
 	case types.StepStatusFixReview:

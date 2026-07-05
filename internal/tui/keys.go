@@ -217,6 +217,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.respondCmd(types.ActionApprove)
 	case "f":
 		return m, m.respondCmd(types.ActionFix)
+	case "u":
+		return m, m.respondCmd(types.ActionRetry)
 	case "s":
 		return m, m.respondCmd(types.ActionSkip)
 	case "o":

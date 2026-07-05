@@ -478,6 +478,8 @@ func TestRecoverStaleRunsMarksStepsFailed(t *testing.T) {
 	d.StartStep(runningStep.ID)
 	awaitingStep, _ := d.InsertStepResult(run.ID, types.StepTest)
 	d.UpdateStepStatus(awaitingStep.ID, types.StepStatusAwaitingApproval)
+	retryStep, _ := d.InsertStepResult(run.ID, types.StepCI)
+	d.UpdateStepStatus(retryStep.ID, types.StepStatusAwaitingRetry)
 	fixingStep, _ := d.InsertStepResult(run.ID, types.StepLint)
 	d.UpdateStepStatus(fixingStep.ID, types.StepStatusFixing)
 	triageStep, _ := d.InsertStepResult(run.ID, types.StepDocument)
@@ -491,7 +493,8 @@ func TestRecoverStaleRunsMarksStepsFailed(t *testing.T) {
 		t.Fatalf("recover stale runs: %v", err)
 	}
 
-	// Running, awaiting_approval, fixing, and awaiting_triage should be failed.
+	// Running, awaiting_approval, awaiting_agent_retry, fixing, and
+	// awaiting_triage should be failed.
 	for _, tc := range []struct {
 		id   string
 		name string
@@ -499,6 +502,7 @@ func TestRecoverStaleRunsMarksStepsFailed(t *testing.T) {
 	}{
 		{runningStep.ID, "running", types.StepStatusFailed},
 		{awaitingStep.ID, "awaiting", types.StepStatusFailed},
+		{retryStep.ID, "retry", types.StepStatusFailed},
 		{fixingStep.ID, "fixing", types.StepStatusFailed},
 		{triageStep.ID, "triage", types.StepStatusFailed},
 		{completedStep.ID, "completed", types.StepStatusCompleted},

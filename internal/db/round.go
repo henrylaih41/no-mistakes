@@ -6,6 +6,9 @@ const (
 	RoundSelectionSourceUser         = "user"
 	RoundSelectionSourceAutoFix      = "auto_fix"
 	RoundSelectionSourceUserOverride = "user_override"
+
+	RoundTriggerAgentAutoRetry   = "agent_auto_retry"
+	RoundTriggerAgentManualRetry = "agent_manual_retry"
 )
 
 // StepRound represents one execution round within a pipeline step.
@@ -170,6 +173,24 @@ func (d *DB) CountStepFixRounds(stepResultID string) (int, error) {
 	count := 0
 	for _, r := range rounds {
 		if r.IsFixRound() {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// CountStepAgentAutoRetries returns how many retry responses came from the
+// --yes auto-resume path. It intentionally counts only agent_auto_retry rounds,
+// so manual retries remain unbounded human actions and review fix caps stay
+// independent.
+func (d *DB) CountStepAgentAutoRetries(stepResultID string) (int, error) {
+	rounds, err := d.GetRoundsByStep(stepResultID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, r := range rounds {
+		if r.Trigger == RoundTriggerAgentAutoRetry {
 			count++
 		}
 	}

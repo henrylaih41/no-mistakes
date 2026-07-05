@@ -285,12 +285,12 @@ func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
 	}
 	defer tx.Rollback()
 
-	// Fail stale steps first (running, awaiting_approval, fixing, fix_review,
-	// awaiting_triage).
+	// Fail stale steps first (running, awaiting_approval, awaiting_agent_retry,
+	// fixing, fix_review, awaiting_triage).
 	_, err = tx.Exec(
-		`UPDATE step_results SET status = ?, error = ?, completed_at = ? WHERE status IN (?, ?, ?, ?, ?)`,
+		`UPDATE step_results SET status = ?, error = ?, completed_at = ? WHERE status IN (?, ?, ?, ?, ?, ?)`,
 		types.StepStatusFailed, errMsg, ts,
-		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview, types.StepStatusAwaitingTriage,
+		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusAwaitingRetry, types.StepStatusFixing, types.StepStatusFixReview, types.StepStatusAwaitingTriage,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("recover stale steps: %w", err)

@@ -132,6 +132,10 @@ type RespondParams struct {
 	FindingIDs    []string             `json:"finding_ids,omitempty"`
 	Instructions  map[string]string    `json:"instructions,omitempty"`
 	AddedFindings []types.Finding      `json:"added_findings,omitempty"`
+	// AutoRetry is set by --yes when it resumes an awaiting_agent_retry park.
+	// The executor persists it separately from manual retries so repeated
+	// driver invocations can keep the auto-resume bound per step.
+	AutoRetry bool `json:"auto_retry,omitempty"`
 	// FixOverrideReason is required when a review gate has reached
 	// review.max_fix_rounds and the driver explicitly authorizes one more fix
 	// round. It is persisted on the step_rounds row whose findings triggered
@@ -233,6 +237,7 @@ type StepResultInfo struct {
 	FindingsJSON     *string          `json:"findings_json,omitempty"`
 	ReportedFindings int              `json:"reported_findings,omitempty"`
 	FixedFindings    int              `json:"fixed_findings,omitempty"`
+	AgentAutoRetries int              `json:"agent_auto_retries,omitempty"`
 	// FixSummaries holds one entry per fix round the pipeline ran for this
 	// step, in round order: the agent's one-line fix summary, or "" when the
 	// round recorded none. Agent surfaces use it to report applied fixes.
