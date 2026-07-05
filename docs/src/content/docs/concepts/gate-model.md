@@ -55,7 +55,7 @@ That is a core design choice, not an implementation detail.
 3. The gate repo's `post-receive` hook notifies the daemon.
 4. The daemon creates a detached worktree for this run.
 5. The pipeline runs in order: `intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci`.
-6. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip.
+6. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip; a step parked at `awaiting_agent_retry` after an exhausted transient agent/provider failure resumes with `--action retry`.
    Use `no-mistakes axi abort` only when you mean to cancel the whole run.
    AXI run objects show `awaiting_agent: parked <duration>` while a non-terminal run is parked at that gate, so a supervising agent can distinguish a waiting run from active work in one status read.
 7. After local checks pass, the push step forwards the branch to the configured push target only after verifying that the update will not discard unincorporated commits already on that target, and the PR step creates or updates the pull request.
@@ -143,7 +143,7 @@ branch, marking the remaining steps as skipped.
 
 A step can attach an auto-resolver to an approval gate so it clears without user action once the external condition that forced the pause resolves on its own - for example the CI idle-timeout or Devin manual-verify gate when the PR is merged or closed out-of-band.
 
-While the executor is paused at an approval, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
+While the executor is paused at an approval, agent-retry, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
 That timestamp is observability only and does not alter approval behavior.
 
 ### IPC
