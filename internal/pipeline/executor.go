@@ -516,6 +516,29 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return false, fmt.Errorf("step %s: aborted by user", stepName)
 
 		case types.ActionFix:
+			// An override fix round runs after the review max_fix_rounds cap was
+			// already consumed, so it must be attributable to a triage ruling
+			// before it starts (approved rider / ruling #11). Persist the reason
+			// first and refuse the extra round if it cannot be recorded, rather
+			// than launching an unattributable cap-exceeding fix. currentRoundID
+			// is empty only when the round row failed to insert above; that is
+			// just as unattributable, so it is fatal too.
+			if response.fixOverrideReason != "" {
+				var persistErr error
+				if currentRoundID == "" {
+					persistErr = fmt.Errorf("step %s: cannot persist fix override reason (no round record); refusing unattributed override fix round", stepName)
+				} else if dbErr := e.db.SetStepRoundFixOverrideReason(currentRoundID, response.fixOverrideReason); dbErr != nil {
+					persistErr = fmt.Errorf("step %s: persist fix override reason: %w", stepName, dbErr)
+				}
+				if persistErr != nil {
+					if dbErr := e.db.FailStep(sr.ID, persistErr.Error(), executionMS); dbErr != nil {
+						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+					}
+					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", persistErr.Error(), &executionMS)
+					return false, persistErr
+				}
+				slog.Info("review fix override accepted", "step", stepName, "round", roundNum, "max_fix_rounds", reviewMaxFixRounds, "reason", response.fixOverrideReason)
+			}
 			fixFields := e.fixTelemetryFields("user", stepName, selectedFindingCount(outcome.Findings, response.findingIDs), 0)
 			if response.fixOverrideReason != "" {
 				fixFields["override"] = true
@@ -541,12 +564,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 					if dbErr := e.db.SetStepRoundSelection(currentRoundID, &idsJSON, selectionSource); dbErr != nil {
 						slog.Warn("failed to record selected finding ids", "step", stepName, "round", roundNum, "error", dbErr)
 					}
-				}
-				if response.fixOverrideReason != "" {
-					if dbErr := e.db.SetStepRoundFixOverrideReason(currentRoundID, response.fixOverrideReason); dbErr != nil {
-						slog.Warn("failed to record fix override reason", "step", stepName, "round", roundNum, "error", dbErr)
-					}
-					slog.Info("review fix override accepted", "step", stepName, "round", roundNum, "max_fix_rounds", reviewMaxFixRounds, "reason", response.fixOverrideReason)
 				}
 				if mergedFindings != "" && mergedFindings != selectedFindings {
 					merged := mergedFindings

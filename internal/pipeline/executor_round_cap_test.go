@@ -154,6 +154,70 @@ func TestExecutor_ReviewMaxFixRoundsOverrideRequiresReasonAndPersistsIt(t *testi
 	}
 }
 
+// TestExecutor_ReviewMaxFixRoundsOverrideRefusedWhenReasonCannotPersist is the
+// regression test for review item NM23-002: an override fix round must be
+// attributable, so if the triage reason cannot be persisted the extra
+// cap-exceeding round must not run - Execute fails loudly instead.
+func TestExecutor_ReviewMaxFixRoundsOverrideRefusedWhenReasonCannotPersist(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			callCount++
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      reviewCapFinding,
+			}, nil
+		},
+	}
+
+	cfg := &config.Config{Review: config.Review{MaxFixRounds: 1}}
+	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, workDir)
+	}()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+		t.Fatalf("first fix should be allowed: %v", err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingTriage)
+
+	// Force the override-reason persistence to fail by closing the DB. The
+	// override respond only touches in-memory executor state, so it still
+	// dispatches; the executor then cannot record the reason and must refuse
+	// the cap-exceeding round rather than run it unattributed.
+	if err := database.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	reason := "master triage: residual finding is merge-blocking"
+	if err := exec.RespondWithOverrideReason(types.StepReview, types.ActionFix, []string{"review-1"}, nil, nil, reason); err != nil {
+		t.Fatalf("respond with override: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected Execute to fail when the override reason cannot be persisted")
+		}
+		if !strings.Contains(err.Error(), "persist fix override reason") {
+			t.Fatalf("error = %v, want it to name the failed override-reason persistence", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+
+	if callCount != 2 {
+		t.Fatalf("call count = %d, want 2 (initial + one fix); the override round must not run", callCount)
+	}
+}
+
 func TestExecutor_ReviewMaxFixRoundsZeroPreservesUnboundedFixes(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

@@ -70,7 +70,11 @@ func newAxiRunCmd() *cobra.Command {
 			"--yes it blocks until the first approval gate, CI-ready point, or final outcome and\n" +
 			"prints it. With --yes it auto-resolves every gate (fixing actionable\n" +
 			"findings - including ask-user findings, with no escalation - then\n" +
-			"accepting the result) until a decision point or outcome.\n\n" +
+			"accepting the result) until a decision point or outcome. --yes still\n" +
+			"stops at an awaiting_triage gate when review reaches max_fix_rounds: it\n" +
+			"never supplies the override implicitly. Report the residual findings for\n" +
+			"master triage, then respond with --action fix --fix-override\n" +
+			"--override-reason only after a merge-blocking ruling.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
@@ -101,7 +105,7 @@ func newAxiRunCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome; still stops at awaiting_triage")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringArrayVar(&designContextFiles, "design-context", nil, "path to a design-context text file to inject into review and fix prompts (repeatable)")
