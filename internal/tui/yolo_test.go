@@ -288,6 +288,62 @@ func TestModel_Yolo_ApprovesExistingFixReviewWithoutPriorFix(t *testing.T) {
 	}
 }
 
+func TestModel_ManualRetryKeyIsNotAttributedAsAutoRetry(t *testing.T) {
+	sock, client, snapshot := captureRespond(t)
+
+	run := testRun()
+	run.Steps[0].Status = types.StepStatusAwaitingRetry
+	m := NewModel(sock, client, run)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	_ = updated
+	if cmd == nil {
+		t.Fatal("expected a retry command from the manual 'u' key")
+	}
+	if msg := cmd(); msg != nil {
+		t.Fatalf("expected nil msg, got %#v", msg)
+	}
+
+	calls := snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 respond call, got %d", len(calls))
+	}
+	if calls[0].Action != types.ActionRetry {
+		t.Fatalf("action = %s, want %s", calls[0].Action, types.ActionRetry)
+	}
+	if calls[0].AutoRetry {
+		t.Fatalf("manual retry must not set AutoRetry; it would be misattributed as agent_auto_retry and consume the bounded auto budget")
+	}
+}
+
+func TestModel_Yolo_RetryAwaitingRetryIsAutoRetry(t *testing.T) {
+	sock, client, snapshot := captureRespond(t)
+
+	run := testRun()
+	run.Steps[0].Status = types.StepStatusAwaitingRetry
+	m := NewModel(sock, client, run)
+	m.yoloMode = true
+
+	cmd := m.maybeAutoApproveCmd()
+	if cmd == nil {
+		t.Fatal("expected yolo to auto-resume an awaiting_agent_retry park")
+	}
+	if msg := cmd(); msg != nil {
+		t.Fatalf("expected nil msg, got %#v", msg)
+	}
+
+	calls := snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 respond call, got %d", len(calls))
+	}
+	if calls[0].Action != types.ActionRetry {
+		t.Fatalf("action = %s, want %s", calls[0].Action, types.ActionRetry)
+	}
+	if !calls[0].AutoRetry {
+		t.Fatalf("yolo auto-resume must set AutoRetry so the executor charges the bounded per-step auto budget")
+	}
+}
+
 func TestModel_Yolo_DoesNotAutoApproveTwiceForSameStep(t *testing.T) {
 	run := testRun()
 	run.Steps[0].Status = types.StepStatusAwaitingApproval
