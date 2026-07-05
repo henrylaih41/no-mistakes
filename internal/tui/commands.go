@@ -92,16 +92,28 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if step.Status == types.StepStatusAwaitingTriage {
 		return nil
 	}
+	if step.Status == types.StepStatusAwaitingRetry {
+		if step.AgentAutoRetries > 0 || m.yoloRetried[step.StepName] {
+			return nil
+		}
+		m.yoloRetried[step.StepName] = true
+		return m.respondCmd(types.ActionRetry, true)
+	}
 	if step.Status != types.StepStatusFixReview && !m.yoloFixed[step.StepName] && m.stepHasActionableFindings(step.StepName) {
 		m.yoloFixed[step.StepName] = true
 		m.resetFindingSelection(step.StepName)
-		return m.respondCmd(types.ActionFix)
+		return m.respondCmd(types.ActionFix, false)
 	}
 	m.yoloApproved[step.StepName] = true
-	return m.respondCmd(types.ActionApprove)
+	return m.respondCmd(types.ActionApprove, false)
 }
 
-func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
+// respondCmd sends an approval response for the awaiting step. autoRetry marks
+// an awaiting_agent_retry resume as coming from the yolo/auto path so the
+// executor charges it against the bounded per-step auto-retry budget; manual
+// key-driven retries must pass false so they are attributed as manual and are
+// never rejected once the auto budget is consumed.
+func (m Model) respondCmd(action types.ApprovalAction, autoRetry bool) tea.Cmd {
 	step := awaitingStep(m.steps)
 	if step == nil {
 		return nil
@@ -115,9 +127,10 @@ func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
 	}
 	return func() tea.Msg {
 		params := &ipc.RespondParams{
-			RunID:  m.runID,
-			Step:   step.StepName,
-			Action: action,
+			RunID:     m.runID,
+			Step:      step.StepName,
+			Action:    action,
+			AutoRetry: autoRetry && action == types.ActionRetry,
 		}
 		if action == types.ActionFix {
 			ids := m.selectedFindingIDs(step.StepName)

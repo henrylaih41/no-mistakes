@@ -6,6 +6,9 @@ const (
 	RoundSelectionSourceUser         = "user"
 	RoundSelectionSourceAutoFix      = "auto_fix"
 	RoundSelectionSourceUserOverride = "user_override"
+
+	RoundTriggerAgentAutoRetry   = "agent_auto_retry"
+	RoundTriggerAgentManualRetry = "agent_manual_retry"
 )
 
 // StepRound represents one execution round within a pipeline step.
@@ -43,6 +46,15 @@ type StepRound struct {
 // rounds count: they were fix rounds dispatched by an explicit user selection.
 func (r *StepRound) IsFixRound() bool {
 	return r.Trigger == "auto_fix" || r.Trigger == "user_fix"
+}
+
+// IsAgentRetry reports whether this round is an agent provider/transient retry
+// attribution row rather than a real execution round. These rows carry no
+// findings and exist only to bound and attribute the --yes auto-retry budget,
+// so findings-narrative rendering and run/round counting must exclude them
+// instead of treating them as a "no issues found" pass.
+func (r *StepRound) IsAgentRetry() bool {
+	return r.Trigger == RoundTriggerAgentAutoRetry || r.Trigger == RoundTriggerAgentManualRetry
 }
 
 // StepFixSummaries returns one entry per fix round for a step, in round order:
@@ -170,6 +182,24 @@ func (d *DB) CountStepFixRounds(stepResultID string) (int, error) {
 	count := 0
 	for _, r := range rounds {
 		if r.IsFixRound() {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// CountStepAgentAutoRetries returns how many retry responses came from the
+// --yes auto-resume path. It intentionally counts only agent_auto_retry rounds,
+// so manual retries remain unbounded human actions and review fix caps stay
+// independent.
+func (d *DB) CountStepAgentAutoRetries(stepResultID string) (int, error) {
+	rounds, err := d.GetRoundsByStep(stepResultID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, r := range rounds {
+		if r.Trigger == RoundTriggerAgentAutoRetry {
 			count++
 		}
 	}

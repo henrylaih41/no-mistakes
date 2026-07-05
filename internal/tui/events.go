@@ -94,7 +94,7 @@ func (m *Model) applyEvent(event ipc.Event) {
 			// from a previous step hiding these findings.
 			m.showDiff = false
 			m.diffOffset = 0
-			if event.Status != nil && (types.StepStatus(*event.Status) == types.StepStatusAwaitingApproval || types.StepStatus(*event.Status) == types.StepStatusFixReview || types.StepStatus(*event.Status) == types.StepStatusAwaitingTriage) {
+			if event.Status != nil && (types.StepStatus(*event.Status) == types.StepStatusAwaitingApproval || types.StepStatus(*event.Status) == types.StepStatusAwaitingRetry || types.StepStatus(*event.Status) == types.StepStatusFixReview || types.StepStatus(*event.Status) == types.StepStatusAwaitingTriage) {
 				delete(m.findingInstructions, *event.StepName)
 				delete(m.addedFindings, *event.StepName)
 				m.resetFindingSelection(*event.StepName)
@@ -211,7 +211,7 @@ func (m Model) stepsWithRunningElapsed() []ipc.StepResultInfo {
 		}
 		switch steps[i].Status {
 		case types.StepStatusRunning, types.StepStatusFixing,
-			types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusAwaitingTriage:
+			types.StepStatusAwaitingApproval, types.StepStatusAwaitingRetry, types.StepStatusFixReview, types.StepStatusAwaitingTriage:
 			if startTime, ok := m.stepStartTimes[steps[i].StepName]; ok {
 				elapsed := int64(time.Since(startTime).Milliseconds())
 				steps[i].DurationMS = &elapsed

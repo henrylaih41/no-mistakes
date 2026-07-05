@@ -2,8 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -165,6 +171,107 @@ func TestGateAutoResolutionStopsAtAwaitingTriage(t *testing.T) {
 	if gateAllowsAutoResolution(gate) {
 		t.Fatal("awaiting_triage gate must not be auto-resolved by --yes")
 	}
+}
+
+func TestDriveRunYesAutoRetriesAgentTransientOnceThenParks(t *testing.T) {
+	srv := ipc.NewServer()
+	var mu sync.Mutex
+	responded := false
+	returnedRunning := false
+	autoRetrySeen := false
+
+	srv.Handle(ipc.MethodGetRun, func(context.Context, json.RawMessage) (interface{}, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		status := types.StepStatusAwaitingRetry
+		autoRetries := 0
+		if responded {
+			if !returnedRunning {
+				returnedRunning = true
+				status = types.StepStatusRunning
+			} else {
+				autoRetries = 1
+			}
+		}
+		return &ipc.GetRunResult{Run: &ipc.RunInfo{
+			ID:      "run-1",
+			Branch:  "feature/x",
+			Status:  types.RunRunning,
+			HeadSHA: "abcdef1234567890",
+			Steps: []ipc.StepResultInfo{{
+				StepName:         types.StepTest,
+				Status:           status,
+				AgentAutoRetries: autoRetries,
+			}},
+		}}, nil
+	})
+	srv.Handle(ipc.MethodRespond, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
+		var params ipc.RespondParams
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, err
+		}
+		if params.Action != types.ActionRetry {
+			t.Fatalf("respond action = %s, want retry", params.Action)
+		}
+		if !params.AutoRetry {
+			t.Fatal("auto retry response did not carry persisted auto attribution")
+		}
+		mu.Lock()
+		responded = true
+		autoRetrySeen = true
+		mu.Unlock()
+		return &ipc.RespondResult{OK: true}, nil
+	})
+
+	socketPath := fmt.Sprintf("/tmp/nm29-drive-%d.sock", time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- srv.Serve(socketPath) }()
+	client := dialIPCTestClient(t, socketPath)
+	defer func() {
+		_ = client.Close()
+		srv.Close()
+		select {
+		case err := <-serverErr:
+			if err != nil {
+				t.Fatalf("server error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("server did not stop")
+		}
+	}()
+
+	var progress bytes.Buffer
+	run, ciReady, err := driveRun(context.Background(), &progress, client, "run-1", true, nil)
+	if err != nil {
+		t.Fatalf("driveRun error: %v", err)
+	}
+	if ciReady {
+		t.Fatal("ciReady = true, want false")
+	}
+	if !autoRetrySeen {
+		t.Fatal("expected one auto retry response")
+	}
+	if len(run.Steps) != 1 || run.Steps[0].Status != types.StepStatusAwaitingRetry {
+		t.Fatalf("final step = %+v, want awaiting_agent_retry", run.Steps)
+	}
+	if run.Steps[0].AgentAutoRetries != 1 {
+		t.Fatalf("final auto retry count = %d, want 1", run.Steps[0].AgentAutoRetries)
+	}
+}
+
+func dialIPCTestClient(t *testing.T, socketPath string) *ipc.Client {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		client, err := ipc.Dial(socketPath)
+		if err == nil {
+			return client
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("dial ipc test server at %s timed out", socketPath)
+	return nil
 }
 
 func TestRenderDriveResult_ChecksPassed(t *testing.T) {

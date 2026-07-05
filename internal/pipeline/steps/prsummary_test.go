@@ -216,6 +216,45 @@ func TestBuildTestingSummary_IncludesRecordedTestDetails(t *testing.T) {
 	}
 }
 
+func TestBuildPipelineSummary_AgentRetryRoundIsNotSyntheticPass(t *testing.T) {
+	t.Parallel()
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {
+			{Round: 1, Trigger: db.RoundTriggerAgentAutoRetry},
+			{Round: 2, Trigger: "initial"},
+		},
+	}
+
+	md, _ := BuildPipelineSummary(steps, rounds)
+
+	if got := strings.Count(md, "✅ No issues found."); got != 1 {
+		t.Fatalf("a transient retry attribution round must not read as a synthetic pass; expected exactly one 'No issues found.' from the single real round, got %d in:\n%s", got, md)
+	}
+}
+
+func TestBuildTestingSummary_ExcludesAgentRetryRoundsFromRunCount(t *testing.T) {
+	t.Parallel()
+	findings := "{\"findings\":[],\"summary\":\"\",\"testing_summary\":\"All tests passed.\"}"
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {
+			{Round: 1, Trigger: db.RoundTriggerAgentAutoRetry, DurationMS: 0},
+			{Round: 2, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300},
+		},
+	}
+
+	md := BuildTestingSummary(steps, rounds)
+
+	if !strings.Contains(md, "- Outcome: ✅ passed across 1 run (300ms)") {
+		t.Fatalf("a transient retry attribution round must not count as a test run, got:\n%s", md)
+	}
+}
+
 func TestBuildTestingSummaryForPR_OmitsRecordedTestDetails(t *testing.T) {
 	t.Parallel()
 	findings := "{\"findings\":[],\"summary\":\"\",\"testing_summary\":\"Validated the CLI doctor path and config loading; both passed.\",\"tested\":[\"`go test ./internal/cli -run '^TestDoctorBasic$' -count=1`\",\"`make e2e`\"]}"

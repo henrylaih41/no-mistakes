@@ -156,6 +156,7 @@ Agents can also call `no-mistakes axi` directly:
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi status
 no-mistakes axi respond --action approve
+no-mistakes axi respond --action retry
 no-mistakes axi logs --step review --full
 no-mistakes axi abort
 no-mistakes axi abort --run <id>
@@ -172,10 +173,14 @@ When an agent starts a new run, `--intent` is required and should describe what 
 Agents should prefer a few complete sentences over a terse summary, capturing user decisions, tradeoffs, constraints, ruled-out approaches, and explicit requests that would not be obvious from the diff alone.
 If the repo is on the default branch or has uncommitted changes, direct `axi run` returns a structured error with the command the agent should run instead of silently creating a branch or commit.
 Approval gates are exposed as `gate:` objects with finding IDs, severities, sources, files, actions, descriptions, and help commands for `no-mistakes axi respond`.
-While a non-terminal run is parked at an `awaiting_approval`, `fix_review`, or `awaiting_triage` gate, the run object also includes `awaiting_agent: parked <duration>`.
+While a non-terminal run is parked at an `awaiting_approval`, `awaiting_agent_retry`, `fix_review`, or `awaiting_triage` gate, the run object also includes `awaiting_agent: parked <duration>`.
 Use that field in `axi status` output to tell in one read that the run is waiting for the driving agent to send `axi respond`, not actively running, fixing, or watching CI.
 It is observability only: it does not auto-resume the run, change gate resolution, or make `--yes` the default.
 A long-running `axi run` or `axi respond` call is working, not stalled, and an agent may background it if its harness needs to, but the run never advances past a gate on its own, so the agent must read every return and respond at each `gate:`, looping until an `outcome:`, and never idle-wait for the run to move forward by itself.
+If the gate status is `awaiting_agent_retry`, the agent invocation exhausted bounded retries for a transient provider/runtime failure.
+There are no findings to fix: respond with `no-mistakes axi respond --action retry` to retry that same step.
+This retry does not create a review fix round and does not count against `review.max_fix_rounds`.
+Under `--yes`, no-mistakes auto-retries this parked transient at most once per step, with that auto retry persisted on the run; a second consecutive transient remains parked for an explicit retry decision.
 An agent should resolve `action: auto-fix` findings on its own judgment, ignore `action: no-op` findings when approving, and stop on `action: ask-user` findings unless it is running with explicit `--yes` consent.
 Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed.
 If review reaches `review.max_fix_rounds`, it parks as `awaiting_triage`.

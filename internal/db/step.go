@@ -133,6 +133,20 @@ func (d *DB) FailStep(id string, errMsg string, durationMS int64) error {
 	return nil
 }
 
+// ParkStep marks a step as parked at a non-terminal gate with an explicit
+// reason. completed_at stays NULL so recovery can still distinguish it from a
+// finished step.
+func (d *DB) ParkStep(id string, status types.StepStatus, errMsg string, durationMS int64) error {
+	_, err := d.sql.Exec(
+		`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = NULL WHERE id = ?`,
+		status, errMsg, durationMS, id,
+	)
+	if err != nil {
+		return fmt.Errorf("park step: %w", err)
+	}
+	return nil
+}
+
 // SetStepDuration sets the execution-only duration on a step result.
 func (d *DB) SetStepDuration(id string, durationMS int64) error {
 	_, err := d.sql.Exec(`UPDATE step_results SET duration_ms = ? WHERE id = ?`, durationMS, id)

@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -73,11 +74,18 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, logFile func(string)) ([]reviewerReport, error) {
 	reports := make([]reviewerReport, 0, len(results))
 	var dropped []string
+	var firstTransient *agent.TransientError
 	for idx, res := range results {
 		name := res.Agent.Name()
 		if res.Err != nil {
 			if !failOpen {
 				return nil, fmt.Errorf("review panel: reviewer %q failed: %w", name, res.Err)
+			}
+			if firstTransient == nil {
+				var transient *agent.TransientError
+				if errors.As(res.Err, &transient) {
+					firstTransient = transient
+				}
 			}
 			dropped = append(dropped, name)
 			log(fmt.Sprintf("WARNING: reviewer %q failed and was DROPPED (review.fail_open=true): %v", name, res.Err))
@@ -103,6 +111,9 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 		}
 	}
 	if len(reports) == 0 {
+		if firstTransient != nil {
+			return nil, fmt.Errorf("review panel: all reviewers failed (%s): %w", strings.Join(dropped, ", "), firstTransient)
+		}
 		return nil, fmt.Errorf("review panel: all reviewers failed (%s)", strings.Join(dropped, ", "))
 	}
 	return reports, nil
