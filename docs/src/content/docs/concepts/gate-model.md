@@ -58,6 +58,7 @@ That is a core design choice, not an implementation detail.
 6. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip; a step parked at `awaiting_agent_retry` after an exhausted transient agent/provider failure resumes with `--action retry`.
    Use `no-mistakes axi abort` only when you mean to cancel the whole run.
    AXI run objects show `awaiting_agent: parked <duration>` while a non-terminal run is parked at that gate, so a supervising agent can distinguish a waiting run from active work in one status read.
+   While a step is actively running or fixing, AXI run objects can also show `active_steps` with the active duration, latest activity, native agent PID, and current execution or fix round.
 7. After local checks pass, the push step forwards the branch to the configured push target only after verifying that the update will not discard unincorporated commits already on that target, and the PR step creates or updates the pull request.
    For GitHub fork routing, the push target is the fork and the PR base repository is the parent from `origin`.
 8. The CI step keeps watching the open PR until it is merged, closed, or its configured idle timeout elapses with no base-branch movement, and can auto-fix failures or merge conflicts when supported.
@@ -152,6 +153,8 @@ A step can attach an auto-resolver to an approval gate so it clears without user
 
 While the executor is paused at an approval, agent-retry, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
 That timestamp is observability only and does not alter approval behavior.
+While a step is running or fixing, the executor also records the latest meaningful step activity from log lines and native subprocess lifecycle events.
+AXI renders that activity in `active_steps`, including a quiet prefix when no activity has arrived for longer than the configured `step_quiet_warning`.
 
 ### IPC
 
@@ -164,7 +167,9 @@ rounds, and derived intent summaries. Step rounds record each execution attempt
 (initial, auto-fix) with its own findings and duration, plus selected finding
 IDs, whether the selection came from the user or auto-fix filtering, the merged
 finding payload actually sent to the fix agent for that round, and the one-line
-fix summary for fix rounds. That merged payload can include per-finding user
+fix summary for fix rounds. Step results also store the last active timestamp,
+last activity text, native agent PID while a subprocess is active, and the
+effective auto-fix limit used by AXI status. That merged payload can include per-finding user
 notes and user-authored findings from the TUI or AXI interface. A review round
 that overrode the `review.max_fix_rounds` cap also records the master triage
 reason that authorized it. Intent stores

@@ -44,6 +44,11 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "runs", "review_loop_disabled") {
 		t.Fatal("runs.review_loop_disabled column missing from fresh schema")
 	}
+	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid"} {
+		if !hasColumn(t, d, "step_results", column) {
+			t.Fatalf("step_results.%s column missing from fresh schema", column)
+		}
+	}
 }
 
 func TestOpenCreatesStepRoundsTable(t *testing.T) {
@@ -165,6 +170,49 @@ func TestOpenMigratesReposForkURLColumn(t *testing.T) {
 	}
 	if updated.ForkURL != "git@github.com:fork/repo.git" {
 		t.Fatalf("fork url after update = %q, want fork URL", updated.ForkURL)
+	}
+}
+
+func TestOpenMigratesStepActivityColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+
+	legacyDB, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	if _, err := legacyDB.Exec(`
+		CREATE TABLE step_results (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			step_name TEXT NOT NULL,
+			step_order INTEGER NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			exit_code INTEGER,
+			duration_ms INTEGER,
+			log_path TEXT,
+			findings_json TEXT,
+			error TEXT,
+			started_at INTEGER,
+			completed_at INTEGER
+		);
+	`); err != nil {
+		legacyDB.Close()
+		t.Fatalf("create legacy step_results table: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	d, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open migrated db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid"} {
+		if !hasColumn(t, d, "step_results", column) {
+			t.Fatalf("expected migrated column %q", column)
+		}
 	}
 }
 

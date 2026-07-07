@@ -187,6 +187,9 @@ Approval gates are exposed as `gate:` objects with finding IDs, severities, sour
 While a non-terminal run is parked at an `awaiting_approval`, `awaiting_agent_retry`, `fix_review`, or `awaiting_triage` gate, the run object also includes `awaiting_agent: parked <duration>`.
 Use that field in `axi status` output to tell in one read that the run is waiting for the driving agent to send `axi respond`, not actively running, fixing, or watching CI.
 It is observability only: it does not auto-resume the run, change gate resolution, or make `--yes` the default.
+While a step is actively `running` or `fixing`, `axi status` also includes `active_steps` with `active_for`, `last_activity`, native `agent_pid` when a subprocess agent is running, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
+If `last_activity` is prefixed with `quiet`, no step-log or native-agent lifecycle activity has arrived for longer than `step_quiet_warning`.
+Treat that as a liveness clue for investigation, not as permission to cancel, rerun, or edit the worktree yourself.
 A long-running `axi run` or `axi respond` call is working, not stalled, and an agent may background it if its harness needs to, but the run never advances past a gate on its own, so the agent must read every return and respond at each `gate:`, looping until an `outcome:`, and never idle-wait for the run to move forward by itself.
 If the gate status is `awaiting_agent_retry`, the agent invocation exhausted bounded retries for a transient provider/runtime failure.
 There are no findings to fix: respond with `no-mistakes axi respond --action retry` to retry that same step.
@@ -266,6 +269,7 @@ All agents implement the same interface. Each invocation receives:
 - **Environment** - the daemon environment plus non-interactive Git overrides (`GIT_EDITOR=true`, `GIT_SEQUENCE_EDITOR=true`, and `GIT_TERMINAL_PROMPT=0`) so agent-invoked Git commands do not hang on editors or credential prompts
 - **JSONSchema** - optional structured output schema for typed responses
 - **OnChunk** - callback for streaming text output to the TUI
+- **OnLifecycle** - callback for native subprocess start, exit, and retry activity that is recorded in step logs and AXI active-step status
 
 Each invocation returns:
 
@@ -275,9 +279,10 @@ Each invocation returns:
 
 One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, and acpx) are invocation-scoped.
 After no-mistakes starts one, it terminates any remaining child processes when the invocation exits, fails, or is cancelled, so agent-spawned test workers, build watchers, and dev servers do not survive the step.
+Step logs record their process lifecycle, including start and exit lines with the PID, and AXI status exposes that PID while the subprocess is still active.
 Persistent server agents (Rovo Dev and OpenCode) use their managed server lifecycle instead.
 
-Transient API and network failures are retried up to three times with exponential backoff. Retry messages are streamed through the same `OnChunk` path shown in the TUI.
+Transient API and network failures are retried up to three times with exponential backoff. Retry messages are recorded as lifecycle activity for native subprocess agents, falling back to the streaming text path for direct callers that do not supply `OnLifecycle`.
 
 ## Intent extraction
 

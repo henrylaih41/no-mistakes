@@ -119,7 +119,7 @@ func newAxiRunCmd() *cobra.Command {
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent string, designContextFiles []string, reviewLoopDisabled bool) error {
 	ctx := cmd.Context()
-	env, err := openAxiEnv(true)
+	env, err := openAxiRunEnv()
 	if err != nil {
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
@@ -141,6 +141,9 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 
 	runID := activeRunID(env, branch, headSHA)
 	if runID == "" {
+		if err := configErrorForFreshAxiRun(env, runID); err != nil {
+			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+		}
 		// Intent is mandatory when starting a run: the agent driving this knows
 		// the change's intent, so we take it directly instead of inferring it
 		// from transcripts. Reattaching to an in-flight run does not need it.
@@ -172,6 +175,13 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
 	return renderDriveResult(cmd, run, ciReady)
+}
+
+func configErrorForFreshAxiRun(env *axiEnv, runID string) error {
+	if runID != "" {
+		return nil
+	}
+	return env.globalConfigErr
 }
 
 // activeRunID returns the ID of a non-terminal run for branch and head, or "" if none.
@@ -675,7 +685,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 			"Run `no-mistakes axi respond --action fix --fix-override --override-reason \"<master triage reason>\" --findings <ids>`")
 	}
 
-	env, err := openAxiEnv(true)
+	env, err := openAxiDaemonEnv()
 	if err != nil {
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
@@ -817,7 +827,7 @@ func runAxiAbort(cmd *cobra.Command, runID string) error {
 	}
 
 	ctx := cmd.Context()
-	env, err := openAxiEnv(true)
+	env, err := openAxiDaemonEnv()
 	if err != nil {
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
