@@ -450,10 +450,15 @@ log_level: info
 #   grok: /Users/you/.local/bin/grok
 
 # Extra native agent CLI flags (optional, global only)
+# Codex service_tier controls speed/priority; model_reasoning_effort controls reasoning depth.
 # agent_args_override:
 #   codex:
 #     - -m
 #     - gpt-5.4
+#     - -c
+#     - service_tier="priority"
+#     - -c
+#     - model_reasoning_effort="low"
 #   grok:
 #     - --reasoning-effort
 #     - high

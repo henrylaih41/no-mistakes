@@ -21,7 +21,10 @@ agent_args_override:
   codex:
     - -m
     - gpt-5.4
-    - --full-auto
+    - -c
+    - service_tier="priority"
+    - -c
+    - model_reasoning_effort="low"
   rovodev:
     - --profile
     - work
@@ -45,7 +48,7 @@ agent_args_override:
 
 	cases := map[string][]string{
 		"claude":   {"--permission-mode", "acceptEdits"},
-		"codex":    {"-m", "gpt-5.4", "--full-auto"},
+		"codex":    {"-m", "gpt-5.4", "-c", `service_tier="priority"`, "-c", `model_reasoning_effort="low"`},
 		"rovodev":  {"--profile", "work"},
 		"opencode": {"--model", "gpt-5"},
 		"grok":     {"-m", "grok-code-fast-1", "--reasoning-effort", "high"},

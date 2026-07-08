@@ -78,6 +78,10 @@ agent_args_override:
     - -m
     - gpt-5.4
     - --full-auto
+    - -c
+    - service_tier="priority"
+    - -c
+    - model_reasoning_effort="low"
   grok:
     - -m
     - grok-code-fast-1
@@ -217,6 +221,8 @@ See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full fi
 - ACP agents are opt-in with `agent: acp:<target>` and are not considered by `agent: auto`.
 - `agent_path_override`, `agent_args_override`, `acpx_path`, and `acp_registry_overrides` are global-only fields.
 - `ci_timeout`, `step_quiet_warning`, and `log_level` are global-only fields.
+- For Codex-backed pipeline agents, `service_tier` controls the speed or priority lane and `model_reasoning_effort` controls reasoning depth. Set both through `agent_args_override.codex` with separate `-c` entries.
+- no-mistakes reloads global config while setting up each run. To adjust Codex behavior for the next run, edit `~/.no-mistakes/config.yaml` before starting it. For repeatable profiles such as fast or deep, use separately initialized `NM_HOME` roots; `NM_HOME` moves all no-mistakes state, not just config.
 - `auto_fix` from the repo config overlays global auto_fix. Fields not set in the repo config fall through to the global default.
 - `review` from the repo config overrides the global review panel wholesale when present. If it is absent, the repo inherits the global panel; if it is present with `reviewers: []`, the repo disables the inherited panel and uses the single configured agent.
 - `review_loop` from the repo config overlays the global review loop field by field. Fields not set in the repo config fall through to the global default.
