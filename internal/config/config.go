@@ -15,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/devin"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -578,6 +579,7 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, bin, "rovodev", "--help")
+	winproc.Harden(cmd)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return true, nil
