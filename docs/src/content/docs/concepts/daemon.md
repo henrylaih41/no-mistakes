@@ -71,12 +71,6 @@ A second daemon started against the same root fails with "a no-mistakes daemon i
 The OS releases the lock automatically when the owning process exits or crashes, even on SIGKILL, so unlike the PID file the lock can never go stale.
 As an independent safety layer, the daemon also refuses to bind the Unix socket while something is still answering on it; only a provably stale socket file (nothing listening) is removed and rebound.
 
-Only one live daemon can own an `NM_HOME` at a time.
-At startup - before crash recovery runs and before the socket is bound - the daemon takes an exclusive OS file lock on `~/.no-mistakes/daemon.lock` and holds it for the life of the process.
-A second daemon started against the same root fails with "a no-mistakes daemon is already running for this NM_HOME" (with the holder's PID and start time when available) instead of stealing the first daemon's socket and running crash recovery against its live runs.
-The OS releases the lock automatically when the owning process exits or crashes, even on SIGKILL, so unlike the PID file the lock can never go stale.
-As an independent safety layer, the daemon also refuses to bind the Unix socket while something is still answering on it; only a provably stale socket file (nothing listening) is removed and rebound.
-
 ## What it does
 
 When a push arrives via the post-receive hook:
@@ -106,21 +100,25 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
+On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon stopped while they were active):
 
-- Marks those runs as `failed` with the message "daemon crashed during execution"
+- Resumes a run only when it has one fully recorded `awaiting_approval` or `fix_review` gate, a matching worktree and head, an unambiguous branch owner, a valid step plan, and compatible saved review-session metadata
+- Marks every other stale active run as `failed` with the message "daemon crashed during execution" rather than guessing how to resume it
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed
 - Refreshes legacy no-mistakes-managed `post-receive` hooks, installs missing managed hooks, and leaves custom hooks untouched
 - Reapplies per-worktree gate hook-path isolation to existing bare repos when Git supports `config --worktree`, so shared `core.hookspath` writes cannot disable `post-receive`
 - Enables Git push-option support on existing gate repos so per-push options like `no-mistakes.skip=...` keep working after upgrades
-- Clears any parked-awaiting-agent marker so a recovered failed run is not shown as still waiting for `axi respond`
+- Clears any parked-awaiting-agent marker on a run it fails, preserving the elapsed wait in that run's parked-time total
 
 ## Logging
 
 Daemon logs go to `~/.no-mistakes/logs/daemon.log`. The setup wizard captures managed agent-server output in `~/.no-mistakes/logs/wizard-agent.log`. Each pipeline step also writes to its own log at `~/.no-mistakes/logs/<runID>/<step>.log`, and fatal step errors are appended there so the step log includes the failure reason even when the detail comes from command stderr. `daemon stop`, `daemon restart`, and `update` invocations are logged separately to `~/.no-mistakes/logs/cli.log` with the caller's PID, parent PID, and parent command line.
 
 Lifecycle edges are logged too. The daemon records why it exits — a clean listener close, an explicit stop request, an OS signal, a fatal startup or run error, or a panic — and it logs every managed worktree cleanup with the responsible actor and reason, whether a finishing or cancelled run, a failed run setup, or startup orphan recovery. That way no daemon exit or worktree removal happens without a trail in `daemon.log`.
+
+Approval-gate entry, exit, and terminal-cleanup transactions also write structured records to `daemon.log`.
+Each record identifies the transition and phase, daemon PID, canonical state root, database path and stable file identity, run and step, target status, awaiting marker, affected-row counts, and elapsed time; failures retain the same identity fields plus the database error.
 
 Set the log level in global config:
 
