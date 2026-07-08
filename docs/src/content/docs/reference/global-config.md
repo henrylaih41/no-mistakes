@@ -39,6 +39,8 @@ ci_timeout: "168h"
 
 step_quiet_warning: "10m"
 
+daemon_connect_timeout: "3s"
+
 log_level: info
 
 auto_fix:
@@ -112,20 +114,20 @@ The list is filtered to entries available to the daemon at run startup, and the 
 
 Path to the user-installed `acpx` binary used for `agent: acp:<target>`.
 
-| | |
-|---|---|
-| Type | `string` |
-| Default | `acpx` |
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | `acpx`   |
 
 ### acp_registry_overrides
 
 Map an ACP target name to a raw ACP agent command.
 When `agent: acp:<target>` matches an override key, no-mistakes runs `acpx --agent <command>` instead of `acpx <target>`.
 
-| | |
-|---|---|
-| Type | `map[string]string` |
-| Default | Empty |
+|         |                     |
+| ------- | ------------------- |
+| Type    | `map[string]string` |
+| Default | Empty               |
 
 Example:
 
@@ -141,18 +143,18 @@ Custom binary paths for native agents.
 When set, `no-mistakes` uses this path instead of looking up the binary on `PATH`.
 ACP agents use `acpx_path` instead.
 
-| | |
-|---|---|
-| Type | `map[string]string` |
+|         |                                   |
+| ------- | --------------------------------- |
+| Type    | `map[string]string`               |
 | Default | Empty (uses default binary names) |
 
 Default native binary names when no override is set:
 
-| Agent | Binary |
-|---|---|
-| `claude` | `claude` |
-| `codex` | `codex` |
-| `rovodev` | `acli` |
+| Agent      | Binary     |
+| ---------- | ---------- |
+| `claude`   | `claude`   |
+| `codex`    | `codex`    |
+| `rovodev`  | `acli`     |
 | `opencode` | `opencode` |
 | `pi` | `pi` |
 | `copilot` | `copilot` |
@@ -227,10 +229,10 @@ agent_args_override:
 
 How long the CI step monitors an open PR, including provider CI status and on GitHub, GitLab, or Azure DevOps PR mergeability, before giving up.
 
-| | |
-|---|---|
-| Type | `string` (Go duration, or an unlimited keyword) |
-| Default | `168h` (7 days) |
+|         |                                                 |
+| ------- | ----------------------------------------------- |
+| Type    | `string` (Go duration, or an unlimited keyword) |
+| Default | `168h` (7 days)                                 |
 
 Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 
@@ -247,10 +249,10 @@ Legacy alias: `babysit_timeout`.
 
 How long a running or fixing step can go without recorded step-log or native-agent lifecycle activity before AXI status marks the step as quiet.
 
-| | |
-|---|---|
-| Type | `string` (Go duration) |
-| Default | `10m` |
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `10m`                  |
 
 Accepts any positive Go `time.ParseDuration` string: `30s`, `5m`, `1h`, etc.
 Non-positive values are ignored and keep the default.
@@ -260,15 +262,26 @@ It does not cancel the step, change auto-fix behavior, or mark the run failed.
 AXI renders the quiet signal in the `active_steps` table as part of `last_activity`, for example `quiet 12m3s ago: codex started pid=4242`.
 For older active runs that do not yet have activity rows, AXI falls back to the step log file's modification time.
 
+### daemon_connect_timeout
+
+Maximum time a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `3s`                   |
+
+Accepts any positive Go `time.ParseDuration` string. Overridable per-invocation with the `NM_DAEMON_CONNECT_TIMEOUT` environment variable; see [Environment Variables](/no-mistakes/reference/environment/#nm_daemon_connect_timeout).
+
 ### log_level
 
 Daemon log verbosity.
 
-| | |
-|---|---|
-| Type | `string` |
-| Values | `debug`, `info`, `warn`, `error` |
-| Default | `info` |
+|         |                                  |
+| ------- | -------------------------------- |
+| Type    | `string`                         |
+| Values  | `debug`, `info`, `warn`, `error` |
+| Default | `info`                           |
 
 ### auto_fix
 
@@ -276,18 +289,18 @@ Maximum follow-up auto-fix attempts per step. Set a step to `0` to disable the f
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
 For empty `commands.lint`, the agent still attempts safe fixes during the initial lint pass; unresolved lint findings then pause for approval instead of starting another automatic fix loop.
 
-| | |
-|---|---|
+|      |          |
+| ---- | -------- |
 | Type | `object` |
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `auto_fix.rebase` | `int` | `3` | Rebase conflict auto-fix attempts |
-| `auto_fix.review` | `int` | `0` | Review finding auto-fix attempts |
-| `auto_fix.test` | `int` | `3` | Test failure auto-fix attempts |
-| `auto_fix.document` | `int` | `3` | Not used by the automatic document pass |
-| `auto_fix.lint` | `int` | `3` | Lint issue auto-fix attempts |
-| `auto_fix.ci` | `int` | `3` | CI auto-fix attempts for CI failures, plus GitHub, GitLab, and Azure DevOps merge conflicts |
+| Field               | Type  | Default | Description                                                                                 |
+| ------------------- | ----- | ------- | ------------------------------------------------------------------------------------------- |
+| `auto_fix.rebase`   | `int` | `3`     | Rebase conflict auto-fix attempts                                                           |
+| `auto_fix.review`   | `int` | `0`     | Review finding auto-fix attempts                                                            |
+| `auto_fix.test`     | `int` | `3`     | Test failure auto-fix attempts                                                              |
+| `auto_fix.document` | `int` | `3`     | Not used by the automatic document pass                                                     |
+| `auto_fix.lint`     | `int` | `3`     | Lint issue auto-fix attempts                                                                |
+| `auto_fix.ci`       | `int` | `3`     | CI auto-fix attempts for CI failures, plus GitHub, GitLab, and Azure DevOps merge conflicts |
 
 Legacy alias: `auto_fix.babysit`.
 
@@ -369,16 +382,16 @@ Per-repo config overlays the global review loop field by field; fields not set i
 Transcript-based user-intent extraction settings.
 When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, pass that summary to rebase, review, test, document, lint, CI auto-fix, and PR prompts, and include it in generated PR descriptions.
 
-| | |
-|---|---|
+|      |          |
+| ---- | -------- |
 | Type | `object` |
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `intent.enabled` | `bool` | `true` | Enable transcript-based intent extraction |
-| `intent.threshold` | `float` | `0.2` | Minimum raw match score for selecting a transcript session |
-| `intent.slack_days` | `int` | `3` | Extra days to look back before the change window |
-| `intent.disabled_readers` | `string[]` | Empty | Transcript readers to disable |
+| Field                     | Type       | Default | Description                                                |
+| ------------------------- | ---------- | ------- | ---------------------------------------------------------- |
+| `intent.enabled`          | `bool`     | `true`  | Enable transcript-based intent extraction                  |
+| `intent.threshold`        | `float`    | `0.2`   | Minimum raw match score for selecting a transcript session |
+| `intent.slack_days`       | `int`      | `3`     | Extra days to look back before the change window           |
+| `intent.disabled_readers` | `string[]` | Empty   | Transcript readers to disable                              |
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
 
@@ -395,14 +408,14 @@ Otherwise, accepted candidates are ranked by confidence, which combines the raw 
 Test-step evidence storage settings.
 By default, evidence artifacts stay in a temporary directory keyed by run ID and are referenced by local path.
 
-| | |
-|---|---|
+|      |          |
+| ---- | -------- |
 | Type | `object` |
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `test.evidence.store_in_repo` | `bool` | `false` | Commit and push test evidence artifacts from inside the repo worktree |
-| `test.evidence.dir` | `string` | `.no-mistakes/evidence` | Repo-relative parent directory used when `store_in_repo` is true |
+| Field                         | Type     | Default                 | Description                                                           |
+| ----------------------------- | -------- | ----------------------- | --------------------------------------------------------------------- |
+| `test.evidence.store_in_repo` | `bool`   | `false`                 | Commit and push test evidence artifacts from inside the repo worktree |
+| `test.evidence.dir`           | `string` | `.no-mistakes/evidence` | Repo-relative parent directory used when `store_in_repo` is true      |
 
 When `store_in_repo` is true, the test step writes evidence under `<dir>/<branch-slug>` and the push step stages files from that directory before committing agent changes.
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
@@ -412,4 +425,4 @@ These are global defaults. Per-repo config can override either field.
 
 ## Environment variables
 
-See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, Bitbucket Cloud credentials, the `DEVIN_API_KEY` and `DEVIN_REVIEW_API_KEY` review-loop tokens, and update-check suppression.
+See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, `NM_DAEMON_CONNECT_TIMEOUT`, Bitbucket Cloud credentials, the `DEVIN_API_KEY` and `DEVIN_REVIEW_API_KEY` review-loop tokens, and update-check suppression.
