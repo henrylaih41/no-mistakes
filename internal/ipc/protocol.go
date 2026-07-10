@@ -68,6 +68,7 @@ func (e *RPCError) Error() string { return e.Message }
 // SELECTS a route stored in the local gate database by name; it can never
 // supply a base or fork URL.
 type PushReceivedParams struct {
+	// Gate is the absolute path to the gate bare repo.
 	Gate               string           `json:"gate"`
 	Ref                string           `json:"ref"`
 	Old                string           `json:"old"`
