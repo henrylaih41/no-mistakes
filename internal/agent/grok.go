@@ -66,10 +66,11 @@ func (a *grokAgent) buildArgs(prompt string, schema json.RawMessage) []string {
 	args = append(args,
 		"--permission-mode", "bypassPermissions",
 		"-p", prompt,
-		"--output-format", "plain",
 	)
 	if len(schema) > 0 {
 		args = append(args, "--json-schema", string(schema))
+	} else {
+		args = append(args, "--output-format", "plain")
 	}
 	return args
 }

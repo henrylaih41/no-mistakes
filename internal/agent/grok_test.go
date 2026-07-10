@@ -10,14 +10,26 @@ import (
 	"testing"
 )
 
-func TestGrokAgentBuildArgs(t *testing.T) {
+func TestGrokAgentBuildArgsWithJSONSchema(t *testing.T) {
 	a := &grokAgent{bin: "grok"}
 	got := a.buildArgs("review this", json.RawMessage(`{"type":"object"}`))
 	want := []string{
 		"--permission-mode", "bypassPermissions",
 		"-p", "review this",
-		"--output-format", "plain",
 		"--json-schema", `{"type":"object"}`,
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
+}
+
+func TestGrokAgentBuildArgsWithPlainOutput(t *testing.T) {
+	a := &grokAgent{bin: "grok"}
+	got := a.buildArgs("review this", nil)
+	want := []string{
+		"--permission-mode", "bypassPermissions",
+		"-p", "review this",
+		"--output-format", "plain",
 	}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("args = %q, want %q", got, want)
