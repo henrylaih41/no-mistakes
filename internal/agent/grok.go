@@ -57,9 +57,9 @@ func (a *grokAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	return finalizeTextResult("grok", text, opts.JSONSchema, TokenUsage{})
 }
 
-// buildArgs constructs the managed Grok CLI invocation. User model and
-// reasoning overrides are prepended, while prompt, output, schema, permission,
-// and cwd control remain reserved by config validation.
+// buildArgs constructs the managed Grok CLI invocation. Permitted user CLI
+// overrides are prepended, while prompt, output, schema, permission, and cwd
+// control remain reserved by config validation.
 func (a *grokAgent) buildArgs(prompt string, schema json.RawMessage) []string {
 	args := make([]string, 0, len(a.extraArgs)+8)
 	args = append(args, a.extraArgs...)

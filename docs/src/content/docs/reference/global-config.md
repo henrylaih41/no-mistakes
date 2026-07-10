@@ -29,6 +29,11 @@ agent_args_override:
     - -m
     - gpt-5.4
     - --full-auto
+  grok:
+    - -m
+    - grok-code-fast-1
+    - --reasoning-effort
+    - high
 
 ci_timeout: "168h"
 
@@ -201,6 +206,11 @@ agent_args_override:
   pi:
     - --provider
     - google
+  grok:
+    - -m
+    - grok-code-fast-1
+    - --reasoning-effort
+    - high
 ```
 
 ### ci_timeout

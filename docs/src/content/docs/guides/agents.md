@@ -130,7 +130,7 @@ Use `/no-mistakes <task>` to have the agent first do the task, commit only that 
 In both modes, it resolves low-risk findings on its own and stops to relay anything that needs your decision.
 
 `no-mistakes init` installs that skill at user level: `~/.claude/skills/no-mistakes/SKILL.md` for Claude Code and `~/.agents/skills/no-mistakes/SKILL.md` for Codex, OpenCode, Rovo Dev, and Pi.
-One install makes the skill available to every supported agent in every repo, without committing tool-generated files to any repo.
+One install makes the skill available to those skill-aware agents in every repo, without committing tool-generated files to any repo.
 If your home directory consolidates `.claude` and `.agents` with symlinks, `init` follows the links and keeps the skill reachable from both logical paths.
 Re-run `no-mistakes init` after an upgrade to refresh that skill, including overwriting stale `SKILL.md` content from an older binary.
 Older versions vendored the skill into each initialized repo's `.claude/skills` and `.agents/skills`; those copies are no longer needed, and `init` prints a notice when it finds one so you can remove it.
@@ -320,7 +320,7 @@ Spawns a `grok` subprocess for each invocation with `--permission-mode bypassPer
 When structured output is requested, no-mistakes adds Grok's native `--json-schema` flag, omits `--output-format`, and validates the returned JSON before using it.
 `agent_args_override.grok` and reviewer-local `args` can select options such as `-m` and `--reasoning-effort`.
 The managed prompt, output, schema, permission, and cwd flags are reserved so those overrides cannot redirect or weaken the pipeline invocation.
-Grok does not report token usage in these response modes, so no-mistakes records zero tokens and cost accounting undercounts Grok invocations.
+These response modes do not expose token usage to the adapter, so no-mistakes records zero token counts for Grok invocations.
 
 ## ACP via acpx
 
@@ -340,7 +340,7 @@ Structured output is handled by appending the requested JSON schema to the promp
 
 ## Checking agent availability
 
-Run `no-mistakes doctor` to see which native agent binaries are installed and available:
+Run `no-mistakes doctor` to see which default native agent binary names are present on its `PATH`:
 
 ```
 $ no-mistakes doctor
@@ -359,6 +359,9 @@ $ no-mistakes doctor
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
+
+`doctor` checks binary presence only: it does not apply `agent_path_override` or execute capability probes.
+By contrast, `agent: auto` also requires `acli rovodev --help` to succeed for Rovo Dev and `grok --version` to succeed for Grok.
 
 For `agent: acp:<target>`, make sure `acpx` is installed on `PATH` or set `acpx_path` in global config.
 `no-mistakes doctor` does not validate ACP targets.

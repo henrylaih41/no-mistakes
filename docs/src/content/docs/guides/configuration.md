@@ -76,6 +76,11 @@ agent_args_override:
     - -m
     - gpt-5.4
     - --full-auto
+  grok:
+    - -m
+    - grok-code-fast-1
+    - --reasoning-effort
+    - high
 
 # How long the CI step monitors an open PR (provider CI status plus GitHub/GitLab
 # mergeability) with no base-branch movement before giving up. Each base-branch
