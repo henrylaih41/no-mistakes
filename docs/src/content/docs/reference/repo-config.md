@@ -66,10 +66,10 @@ Override the default agent for this repo and its setup-wizard suggestions.
 | | |
 |---|---|
 | Type | `string` |
-| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `acp:<target>` |
+| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok`, `acp:<target>` |
 | Default | Inherits from global config |
 
-`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, then `copilot`.
+`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `grok` (when `grok --version` succeeds).
 `acp:<target>` uses the user-installed `acpx` binary configured in global config.
 ACP agents are opt-in and are not considered by `agent: auto`.
 

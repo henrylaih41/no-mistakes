@@ -52,7 +52,7 @@ Everything else can usually wait.
 
 # Default agent for all repos and setup-wizard suggestions.
 # "auto" picks the first available native agent on PATH.
-agent: auto  # auto | claude | codex | rovodev | opencode | pi | copilot | acp:<target>
+agent: auto  # auto | claude | codex | rovodev | opencode | pi | copilot | grok | acp:<target>
 
 # Optional acpx path and target command overrides for agent: acp:<target>.
 acpx_path: acpx
@@ -67,6 +67,7 @@ agent_path_override:
   opencode: /usr/local/bin/opencode
   pi: /usr/local/bin/pi
   copilot: /usr/local/bin/copilot
+  grok: /Users/you/.local/bin/grok
 
 # Optional extra CLI flags per native agent.
 # This is global-only.
@@ -75,6 +76,11 @@ agent_args_override:
     - -m
     - gpt-5.4
     - --full-auto
+  grok:
+    - -m
+    - grok-code-fast-1
+    - --reasoning-effort
+    - high
 
 # How long the CI step monitors an open PR (provider CI status plus GitHub/GitLab
 # mergeability) with no base-branch movement before giving up. Each base-branch
@@ -194,7 +200,7 @@ See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full fi
 ## Precedence
 
 - Repo `agent` overrides global `agent`.
-- Global `agent: auto` resolves by checking `claude`, `codex`, `opencode`, `acli` for `rovodev`, `pi`, then `copilot` on `PATH`.
+- Global `agent: auto` resolves by checking `claude`, `codex`, `opencode`, `acli` for `rovodev`, `pi`, `copilot`, then `grok` on `PATH`; Grok is selected only when `grok --version` succeeds.
 - ACP agents are opt-in with `agent: acp:<target>` and are not considered by `agent: auto`.
 - `agent_path_override`, `agent_args_override`, `acpx_path`, and `acp_registry_overrides` are global-only fields.
 - `auto_fix` from the repo config overlays global auto_fix. Fields not set in the repo config fall through to the global default.

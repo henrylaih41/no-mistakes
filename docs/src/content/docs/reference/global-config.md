@@ -22,12 +22,18 @@ agent_path_override:
   opencode: /usr/local/bin/opencode
   pi: /usr/local/bin/pi
   copilot: /usr/local/bin/copilot
+  grok: /Users/you/.local/bin/grok
 
 agent_args_override:
   codex:
     - -m
     - gpt-5.4
     - --full-auto
+  grok:
+    - -m
+    - grok-code-fast-1
+    - --reasoning-effort
+    - high
 
 ci_timeout: "168h"
 
@@ -85,10 +91,10 @@ Default agent for all repos and setup-wizard suggestions. Can be overridden per-
 | | |
 |---|---|
 | Type | `string` |
-| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `acp:<target>` |
+| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok`, `acp:<target>` |
 | Default | `auto` |
 
-`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, then `copilot`.
+`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `grok` (when `grok --version` succeeds).
 `acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`.
 ACP agents are opt-in and are not considered by `agent: auto`.
 
@@ -140,6 +146,7 @@ Default native binary names when no override is set:
 | `opencode` | `opencode` |
 | `pi` | `pi` |
 | `copilot` | `copilot` |
+| `grok` | `grok` |
 
 ### agent_args_override
 
@@ -149,7 +156,7 @@ Use this to set model selection, reasoning effort, permission mode, or any other
 | | |
 |---|---|
 | Type | `map[string][]string` |
-| Keys | `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot` |
+| Keys | `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok` |
 | Default | Empty (no extra flags) |
 
 User-supplied flags are inserted ahead of no-mistakes' managed flags, so your choices usually take precedence. A few flags are reserved because no-mistakes depends on them to communicate with the agent - setting any of these returns a config error on load:
@@ -162,6 +169,7 @@ User-supplied flags are inserted ahead of no-mistakes' managed flags, so your ch
 | `opencode` | `serve`, `--hostname`, `--port`, `--print-logs` |
 | `pi` | `--mode`, `--no-session` |
 | `copilot` | `-p`, `--prompt`, `--output-format`, `--no-color` |
+| `grok` | `-p`, `--single`, `--prompt-file`, `--prompt-json`, `--output-format`, `--json-schema`, `--permission-mode`, `--always-approve`, `--cwd` |
 
 For structured `codex` runs, no-mistakes also appends its own `--output-schema <tempfile>` after your overrides. Treat that flag as managed even though config validation does not currently reject it.
 
@@ -169,6 +177,7 @@ Smart defaults:
 
 - For `claude`, supplying `--permission-mode` (or `--dangerously-skip-permissions`) suppresses the default `--dangerously-skip-permissions`.
 - For `codex`, supplying `--ask-for-approval`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox` suppresses the default `--dangerously-bypass-approvals-and-sandbox`.
+- For `grok`, no-mistakes always manages single-turn prompting, schema/output, worktree cwd, and `bypassPermissions`; use `agent_args_override.grok` for options such as `-m` and `--reasoning-effort`.
 
 Reviewers declared in `review.reviewers` inherit `agent_args_override` by agent name unless the reviewer sets its own `args`.
 
@@ -197,6 +206,11 @@ agent_args_override:
   pi:
     - --provider
     - google
+  grok:
+    - -m
+    - grok-code-fast-1
+    - --reasoning-effort
+    - high
 ```
 
 ### ci_timeout
@@ -266,7 +280,7 @@ When reviewers are configured, no-mistakes sends the same review prompt to each 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `review.reviewers` | `Reviewer[]` | Empty | Reviewers to run for the panel |
-| `review.reviewers[].agent` | `string` | Required | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, or `acp:<target>` |
+| `review.reviewers[].agent` | `string` | Required | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok`, or `acp:<target>` |
 | `review.reviewers[].args` | `string[]` | Inherits `agent_args_override.<agent>` | Extra native-agent CLI flags for this reviewer |
 | `review.reviewers[].path` | `string` | Inherits `agent_path_override.<agent>` or default binary | Binary path for this reviewer |
 | `review.max_parallel` | `int` | `0` | Maximum reviewers to run at once; `0` means all reviewers at once |

@@ -41,6 +41,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
+| Grok Build | `grok` | Subprocess per invocation, plain or schema-constrained output |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
 ## Setting the agent
@@ -129,7 +130,7 @@ Use `/no-mistakes <task>` to have the agent first do the task, commit only that 
 In both modes, it resolves low-risk findings on its own and stops to relay anything that needs your decision.
 
 `no-mistakes init` installs that skill at user level: `~/.claude/skills/no-mistakes/SKILL.md` for Claude Code and `~/.agents/skills/no-mistakes/SKILL.md` for Codex, OpenCode, Rovo Dev, and Pi.
-One install makes the skill available to every supported agent in every repo, without committing tool-generated files to any repo.
+One install makes the skill available to those skill-aware agents in every repo, without committing tool-generated files to any repo.
 If your home directory consolidates `.claude` and `.agents` with symlinks, `init` follows the links and keeps the skill reachable from both logical paths.
 Re-run `no-mistakes init` after an upgrade to refresh that skill, including overwriting stale `SKILL.md` content from an older binary.
 Older versions vendored the skill into each initialized repo's `.claude/skills` and `.agents/skills`; those copies are no longer needed, and `init` prints a notice when it finds one so you can remove it.
@@ -203,6 +204,7 @@ By default, `no-mistakes` resolves `agent: auto` by checking for supported nativ
 4. `acli` with `rovodev` support
 5. `pi`
 6. `copilot`
+7. `grok` when `grok --version` succeeds
 
 The default binary names are:
 
@@ -214,6 +216,7 @@ The default binary names are:
 | `opencode` | `opencode` |
 | `pi` | `pi` |
 | `copilot` | `copilot` |
+| `grok` | `grok` |
 | `acp:<target>` | `acpx` |
 
 When the daemon is running through a managed service, that `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories. If login-shell resolution fails, the daemon logs a warning and uses a degraded fallback `PATH` that may omit version-manager shim directories. On Windows it reuses the current process environment instead of reloading a login shell. If native agent discovery still does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and use an explicit `agent_path_override`.
@@ -228,6 +231,7 @@ agent_path_override:
   opencode: /usr/local/bin/opencode
   pi: /usr/local/bin/pi
   copilot: /usr/local/bin/copilot
+  grok: /Users/you/.local/bin/grok
 ```
 
 For ACP targets, set `acpx_path` instead of `agent_path_override`:
@@ -269,6 +273,7 @@ Transcript readers collect user and assistant text messages but exclude tool cal
 They read Claude Code transcripts from `~/.claude/projects`, Codex metadata from `~/.codex/state_*.sqlite` plus referenced rollout files, OpenCode messages from `$XDG_DATA_HOME/opencode/opencode.db` or `~/.local/share/opencode/opencode.db`, Rovo Dev sessions from `~/.rovodev/sessions`, Pi transcripts from `~/.pi/agent/sessions`, and GitHub Copilot CLI sessions from `~/.copilot/session-state`.
 Sessions are eligible when they come from the same working directory or an equivalent Git checkout with the same common Git directory or normalized remote URL.
 ACP transcripts are not currently read for intent extraction.
+Grok transcripts are also not currently read for intent extraction; Grok can still run every agent-backed pipeline step when intent is supplied explicitly or inferred from another supported transcript source.
 When deterministic matching leaves multiple plausible sessions, no-mistakes may ask the configured pipeline agent to choose among them using the matching file paths and sanitized transcript packet files.
 The selected transcript text is then sent to the configured pipeline agent for summarization during the `intent` step, so intent extraction may incur additional agent or API invocations.
 Before disambiguation or summarization, no-mistakes excludes tool output, redacts likely secrets, strips common prompt-control markers, and clamps long transcripts while preserving the beginning and end.
@@ -309,6 +314,14 @@ Any `agent_args_override.copilot` flags are inserted before no-mistakes' managed
 Reads JSONL events from stdout, streaming incremental `assistant.message_delta` text to the TUI and capturing the final `assistant.message` content.
 The Copilot CLI has no output-schema flag, so when structured output is requested no-mistakes injects the JSON schema into the prompt and validates the final text response with the same JSON fence and bare-object fallback used by Pi and Rovo Dev.
 
+## Grok Build
+
+Spawns a `grok` subprocess for each invocation with `--permission-mode bypassPermissions -p <prompt>` and the run worktree as its cwd, adding `--output-format plain` when structured output is not requested.
+When structured output is requested, no-mistakes adds Grok's native `--json-schema` flag, omits `--output-format`, and validates the returned JSON before using it.
+`agent_args_override.grok` and reviewer-local `args` can select options such as `-m` and `--reasoning-effort`.
+The managed prompt, output, schema, permission, and cwd flags are reserved so those overrides cannot redirect or weaken the pipeline invocation.
+These response modes do not expose token usage to the adapter, so no-mistakes records zero token counts for Grok invocations.
+
 ## ACP via acpx
 
 ACP support is optional and requires a separately installed `acpx` binary.
@@ -327,7 +340,7 @@ Structured output is handled by appending the requested JSON schema to the promp
 
 ## Checking agent availability
 
-Run `no-mistakes doctor` to see which native agent binaries are installed and available:
+Run `no-mistakes doctor` to see which default native agent binary names are present on its `PATH`:
 
 ```
 $ no-mistakes doctor
@@ -342,9 +355,13 @@ $ no-mistakes doctor
   – opencode (not found)
   – pi (not found)
   – copilot (not found)
+  – grok (not found)
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
+
+`doctor` checks binary presence only: it does not apply `agent_path_override` or execute capability probes.
+By contrast, `agent: auto` also requires `acli rovodev --help` to succeed for Rovo Dev and `grok --version` to succeed for Grok.
 
 For `agent: acp:<target>`, make sure `acpx` is installed on `PATH` or set `acpx_path` in global config.
 `no-mistakes doctor` does not validate ACP targets.

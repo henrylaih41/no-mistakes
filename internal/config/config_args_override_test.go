@@ -28,6 +28,11 @@ agent_args_override:
   opencode:
     - --model
     - gpt-5
+  grok:
+    - -m
+    - grok-code-fast-1
+    - --reasoning-effort
+    - high
 `
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
@@ -43,6 +48,7 @@ agent_args_override:
 		"codex":    {"-m", "gpt-5.4", "--full-auto"},
 		"rovodev":  {"--profile", "work"},
 		"opencode": {"--model", "gpt-5"},
+		"grok":     {"-m", "grok-code-fast-1", "--reasoning-effort", "high"},
 	}
 	for agent, want := range cases {
 		got := cfg.AgentArgsOverride[agent]
@@ -95,6 +101,18 @@ func TestLoadGlobal_AgentArgsOverride_ReservedArgsRejected(t *testing.T) {
 		{"opencode", "--hostname"},
 		{"opencode", "--port"},
 		{"opencode", "--print-logs"},
+		{"grok", "-p"},
+		{"grok", "--single"},
+		{"grok", "--prompt-file"},
+		{"grok", "--prompt-json"},
+		{"grok", "--output-format"},
+		{"grok", "--output-format=json"},
+		{"grok", "--json-schema"},
+		{"grok", "--permission-mode"},
+		{"grok", "--permission-mode=plan"},
+		{"grok", "--always-approve"},
+		{"grok", "--cwd"},
+		{"grok", "--cwd=/tmp"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.agent+"_"+tt.arg, func(t *testing.T) {
