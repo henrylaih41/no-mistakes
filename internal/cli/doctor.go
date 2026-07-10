@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -108,6 +109,7 @@ func newDoctorCmd() *cobra.Command {
 					{"pi", "pi"},
 					{"copilot", "copilot"},
 					{"grok", "grok"},
+					{"acpx", "acpx"},
 				}
 				fmt.Fprintln(w)
 				fmt.Fprintf(w, "  %s\n", sCyan.Render("Agents"))
@@ -117,6 +119,25 @@ func newDoctorCmd() *cobra.Command {
 						warn(label, "not found")
 					} else {
 						ok(label, path)
+					}
+				}
+
+				if p == nil {
+					fail("gate validation", "unavailable: data directory could not be resolved")
+					allOK = false
+				} else {
+					globalCfg, err := config.LoadGlobal(p.ConfigFile())
+					if err != nil {
+						fail("gate validation", fmt.Sprintf("unavailable: load config (%v)", err))
+						allOK = false
+					} else {
+						cfg := config.Merge(globalCfg, &config.RepoConfig{})
+						if err := cfg.ResolveAgent(cmd.Context(), exec.LookPath); err != nil {
+							fail("gate validation", err.Error())
+							allOK = false
+						} else {
+							ok("gate validation", fmt.Sprintf("%s is runnable", cfg.Agent))
+						}
 					}
 				}
 

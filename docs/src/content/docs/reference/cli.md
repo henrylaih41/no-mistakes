@@ -59,6 +59,7 @@ Skill installation is best-effort: if the skill write fails, init reports it and
 Agent eXperience Interface for non-interactive agents.
 Most agent workflows use the installed `/no-mistakes` skill, which drives this command surface underneath.
 It prints TOON to stdout, prints progress to stderr, and uses structured stdout errors with exit code `1` for operational failures and `2` for bad usage.
+The calling agent drives AXI approval gates but does not replace the configured pipeline agent that performs validation.
 
 ```sh
 no-mistakes axi
@@ -109,6 +110,8 @@ Reattaching to an in-flight run does not add or replace its design context.
 `--review-loop=off` disables only the post-PR Devin review loop for the run.
 Use it when the PR base repo is not Devin-applicable or the run should rely on normal CI checks only; it does not skip the `ci` step, so GitHub checks, merge, and close monitoring continue.
 Reattaching to an in-flight run can proceed while the daemon is already running even if the global config file has become invalid, but starting a fresh run still requires valid global config.
+Starting a fresh run also requires a runnable effective pipeline agent.
+If the configured native agent or ACP bridge is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 `--yes` does not override a review step parked at `awaiting_triage`; it returns that gate for master triage instead.
@@ -345,13 +348,14 @@ Checks:
 - Data directory (`~/.no-mistakes/`)
 - SQLite database
 - Daemon status
-- Native agent binaries: `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`, `grok`
+- Agent runners: native binaries `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`, and `grok`, plus the optional ACP bridge `acpx`
+- Effective global agent configuration, reported as `gate validation`; an unavailable configured runner is a failed check because the gate cannot validate without it
 
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 
-`doctor` checks only whether each default binary name is present on its `PATH`; it does not apply `agent_path_override` or execute capability probes. `agent: auto` additionally requires `acli rovodev --help` to succeed for Rovo Dev and `grok --version` to succeed for Grok.
-
-`doctor` does not validate `acpx` or ACP targets. For `agent: acp:<target>`, verify `acpx_path` yourself.
+For `agent: acp:<target>`, `doctor` verifies that `acpx` resolves but does not invoke the target or test its credentials.
+For `agent: auto`, gate validation also applies the Rovo Dev and Grok capability probes before selecting those runners.
+Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
 
 `doctor` checks `gh` and `az` availability. For GitLab PR and CI steps, install and authenticate `glab`. For Bitbucket Cloud PR and CI steps, set `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN`. For Azure DevOps PR and CI steps, install the `azure-devops` extension and provide a PAT.
 

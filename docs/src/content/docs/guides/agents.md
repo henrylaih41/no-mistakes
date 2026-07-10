@@ -3,9 +3,13 @@ title: Choosing an Agent
 description: Supported AI agents, how to pick one, and how they integrate.
 ---
 
-`no-mistakes` is agent-agnostic by design. The gate should mean the same thing
-regardless of which agent you prefer. The default `agent: auto` setting picks
-the first supported native agent available on your system.
+`no-mistakes` is pipeline-agent-agnostic by design: the gate should mean the same thing regardless of which supported agent backend you prefer.
+It is not runner-free.
+Every validation run requires either a supported native agent binary or `acpx` configured for an ACP target.
+The default `agent: auto` setting picks the first supported native agent available on your system.
+
+The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, evidence testing, documentation, lint discovery, or fixes.
+Those jobs run in the daemon's disposable worktree through the configured pipeline agent.
 
 The agent is responsible for the parts of the gate that benefit from judgment:
 code review, evidence-oriented test validation, test or lint detection when you
@@ -44,6 +48,44 @@ By default that directory is temporary and local to the machine; repos can opt i
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
 | Grok Build | `grok` | Subprocess per invocation, plain or schema-constrained output |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
+
+## Runner requirements
+
+A complete gate never degrades silently when its configured pipeline agent is unavailable.
+The daemon resolves the effective agent before creating pipeline step records, and the run fails immediately with setup guidance if the configured binary cannot run.
+This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
+
+| Surface or capability | Works without a runnable pipeline agent? | Behavior |
+|---|---:|---|
+| Install, `init`, daemon lifecycle, `status`, `runs`, and `doctor` | Yes | Local setup and diagnostics remain available. `doctor` reports that gate validation is unavailable. |
+| Start or rerun a validation gate | No | The run fails before any pipeline step starts. |
+| Review | No | Requires agent judgment and structured findings. |
+| Test with `commands.test` | No, as part of a full gate | The command is deterministic, but the gate refuses before steps start rather than presenting command-only validation as a complete pass. |
+| Test without `commands.test`, or evidence validation with user intent | No | Requires the agent to discover checks and gather end-to-end evidence. |
+| Document | No | Requires the agent to discover and update documentation gaps. |
+| Lint with `commands.lint` | No, as part of a full gate | The command is deterministic, but the full gate still requires an agent. |
+| Lint without `commands.lint` and all fix rounds | No | Requires agent discovery or code changes. |
+| Push, PR, and CI as part of a gate | No | They run only after the required validation steps, and PR or CI paths may invoke the agent themselves. |
+
+### Antigravity and Gemini setups
+
+Running the gate from Antigravity or another Gemini-based coding environment does not make that calling model available to the daemon automatically.
+Choose one of these supported setups:
+
+1. Install any supported native agent CLI and leave `agent: auto`, or select it explicitly in `~/.no-mistakes/config.yaml`.
+2. Install `acpx`, confirm that the Gemini ACP target works locally, and configure `agent: acp:gemini`.
+
+```yaml
+# ~/.no-mistakes/config.yaml
+agent: acp:gemini
+
+# Optional when acpx is not on PATH.
+acpx_path: C:\path\to\acpx.exe
+```
+
+Run `no-mistakes doctor` afterward and look for a successful `gate validation` line.
+Doctor checks the global agent configuration; each run performs the authoritative check again after applying any trusted repository-level agent override.
+If the calling environment exposes neither a supported native CLI nor a working ACP target, it can still inspect and respond to existing AXI state, but it cannot start an honest validation gate by itself.
 
 ## Setting the agent
 
@@ -368,7 +410,7 @@ Structured output is handled by appending the requested JSON schema to the promp
 
 ## Checking agent availability
 
-Run `no-mistakes doctor` to see which default native agent binary names are present on its `PATH`:
+Run `no-mistakes doctor` to inspect individual native and ACP runner binaries and to check the effective global agent configuration:
 
 ```
 $ no-mistakes doctor
@@ -379,17 +421,19 @@ $ no-mistakes doctor
   ✓ daemon running
   ✓ claude
   – codex (not found)
-  – acli (not found)
+  – rovodev (not found)
   – opencode (not found)
   – pi (not found)
   – copilot (not found)
   – grok (not found)
+  – acpx (not found)
+  ✓ gate validation claude is runnable
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
+The `gate validation` line is the decisive result: when the configured global runner is unavailable, doctor fails because a complete gate cannot validate without it.
 
-`doctor` checks binary presence only: it does not apply `agent_path_override` or execute capability probes.
-By contrast, `agent: auto` also requires `acli rovodev --help` to succeed for Rovo Dev and `grok --version` to succeed for Grok.
-
-For `agent: acp:<target>`, make sure `acpx` is installed on `PATH` or set `acpx_path` in global config.
-`no-mistakes doctor` does not validate ACP targets.
+For `agent: acp:<target>`, doctor verifies that `acpx` is installed on `PATH` or resolves through `acpx_path` in global config.
+It does not invoke the target or test its credentials.
+For `agent: auto`, gate validation also requires `acli rovodev --help` to succeed for Rovo Dev and `grok --version` to succeed for Grok before selecting either runner.
+Every new validation run resolves its effective agent again after applying any trusted repository-level override.

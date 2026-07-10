@@ -409,6 +409,7 @@ func TestMethodConstants(t *testing.T) {
 		MethodPushReceived,
 		MethodGetRun,
 		MethodGetRuns,
+		MethodGetRunsForHead,
 		MethodGetActiveRun,
 		MethodRerun,
 		MethodSubscribe,
@@ -427,8 +428,8 @@ func TestMethodConstants(t *testing.T) {
 		}
 		seen[m] = true
 	}
-	if len(methods) != 10 {
-		t.Errorf("expected 10 methods, got %d", len(methods))
+	if len(methods) != 11 {
+		t.Errorf("expected 11 methods, got %d", len(methods))
 	}
 }
 
