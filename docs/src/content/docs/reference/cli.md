@@ -329,7 +329,7 @@ Checks:
 - Data directory (`~/.no-mistakes/`)
 - SQLite database
 - Daemon status
-- Native agent binaries: `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`
+- Native agent binaries: `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`, `grok`
 
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 

@@ -409,6 +409,47 @@ func TestLoadRepoFromBytes_ReviewValidatesReservedArgs(t *testing.T) {
 	}
 }
 
+func TestLoadGlobal_GrokReviewerParsesAndResolves(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`agent: codex
+agent_path_override:
+  grok: /opt/grok
+agent_args_override:
+  grok:
+    - -m
+    - grok-code-fast-1
+review:
+  reviewers:
+    - agent: grok
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal() error = %v", err)
+	}
+	merged := Merge(cfg, &RepoConfig{})
+	got, err := merged.ResolveReviewers(context.Background(), func(bin string) (string, error) {
+		if bin != "/opt/grok" {
+			t.Fatalf("lookPath called with %q, want /opt/grok", bin)
+		}
+		return bin, nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveReviewers() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Agent != types.AgentGrok {
+		t.Fatalf("resolved reviewers = %v, want [grok]", got)
+	}
+	if path := merged.ReviewerPath(got[0]); path != "/opt/grok" {
+		t.Fatalf("reviewer path = %q, want /opt/grok", path)
+	}
+	if args := merged.ReviewerArgs(got[0]); !reflect.DeepEqual(args, []string{"-m", "grok-code-fast-1"}) {
+		t.Fatalf("reviewer args = %v, want model override", args)
+	}
+}
+
 func TestLoadRepoFromBytes_ReviewValidatesUnknownFamily(t *testing.T) {
 	data := []byte("review:\n  reviewers:\n    - agent: gpt5\n")
 	_, err := LoadRepoFromBytes(data)
@@ -457,6 +498,15 @@ func TestValidateReviewers_RejectsReservedArgs(t *testing.T) {
 		{types.AgentClaude, "-p"},
 		{types.AgentClaude, "--output-format=stream-json"},
 		{types.AgentOpenCode, "serve"},
+		{types.AgentGrok, "-p"},
+		{types.AgentGrok, "--single"},
+		{types.AgentGrok, "--prompt-file"},
+		{types.AgentGrok, "--prompt-json"},
+		{types.AgentGrok, "--output-format=json"},
+		{types.AgentGrok, "--json-schema"},
+		{types.AgentGrok, "--permission-mode=plan"},
+		{types.AgentGrok, "--always-approve"},
+		{types.AgentGrok, "--cwd=/tmp"},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.agent)+"_"+tc.arg, func(t *testing.T) {
