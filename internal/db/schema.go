@@ -28,11 +28,12 @@ CREATE TABLE IF NOT EXISTS runs (
     base_sha             TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'pending',
     pr_url               TEXT,
-    error                TEXT,
-    awaiting_agent_since INTEGER,
-    design_context_json  TEXT,
-    review_loop_disabled INTEGER NOT NULL DEFAULT 0,
-    route                TEXT,
+	error                TEXT,
+	awaiting_agent_since INTEGER,
+	parked_ms            INTEGER,
+	design_context_json  TEXT,
+	review_loop_disabled INTEGER NOT NULL DEFAULT 0,
+	route                TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -71,6 +72,40 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     created_at           INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_invocations (
+    id                    TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_name             TEXT NOT NULL,
+    round                 INTEGER NOT NULL,
+    purpose               TEXT NOT NULL,
+    agent                 TEXT NOT NULL,
+    model                 TEXT,
+    session_mode          TEXT NOT NULL,
+    session_key           TEXT,
+    started_at            INTEGER NOT NULL,
+    completed_at          INTEGER NOT NULL,
+    duration_ms           INTEGER NOT NULL,
+    exit_status           TEXT NOT NULL,
+    failure_category      TEXT,
+    input_tokens          INTEGER,
+    output_tokens         INTEGER,
+    cache_read_tokens     INTEGER,
+    cache_creation_tokens INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_invocations_run_started_id
+    ON agent_invocations (run_id, started_at, id);
+
+CREATE TABLE IF NOT EXISTS run_agent_sessions (
+    run_id     TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    role       TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, role)
+);
+
 CREATE TABLE IF NOT EXISTS intent_cache (
     cache_key   TEXT PRIMARY KEY,
     summary     TEXT NOT NULL,
@@ -96,6 +131,7 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN intent_session_id TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_score REAL`,
 	`ALTER TABLE runs ADD COLUMN awaiting_agent_since INTEGER`,
+	`ALTER TABLE runs ADD COLUMN parked_ms INTEGER`,
 	`ALTER TABLE runs ADD COLUMN design_context_json TEXT`,
 	`ALTER TABLE runs ADD COLUMN route TEXT`,
 	`ALTER TABLE runs ADD COLUMN review_loop_disabled INTEGER NOT NULL DEFAULT 0`,

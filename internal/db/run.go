@@ -25,6 +25,9 @@ type Run struct {
 	// wait is cancelled). It is observability only and does not affect gate
 	// resolution.
 	AwaitingAgentSince *int64
+	// ParkedMS accumulates the run's total parked-at-gate wall time in
+	// milliseconds across every gate wait.
+	ParkedMS int64
 	// DesignContextJSON is the immutable materialized design context for this
 	// run, encoded as types.DesignContext JSON. Steps parse this copy instead
 	// of rereading mutable files during later rounds.
@@ -42,14 +45,14 @@ type Run struct {
 	UpdatedAt          int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, design_context_json, intent, intent_source, intent_session_id, intent_score, route, review_loop_disabled, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), design_context_json, intent, intent_source, intent_session_id, intent_score, route, review_loop_disabled, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
 	return row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
-		&r.PRURL, &r.Error, &r.AwaitingAgentSince,
+		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.DesignContextJSON,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.Route, &r.ReviewLoopDisabled, &r.CreatedAt, &r.UpdatedAt,
@@ -297,10 +300,44 @@ func (d *DB) ClearRunAwaitingAgent(id string) error {
 	return nil
 }
 
+// AddRunParkedDuration accumulates parked-at-gate wall time onto a run's
+// total. Called by the executor when a gate wait ends.
+func (d *DB) AddRunParkedDuration(id string, ms int64) error {
+	if ms <= 0 {
+		return nil
+	}
+	_, err := d.sql.Exec(`UPDATE runs SET parked_ms = COALESCE(parked_ms, 0) + ?, updated_at = ? WHERE id = ?`, ms, now(), id)
+	if err != nil {
+		return fmt.Errorf("add run parked duration: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
+	if ms < 0 {
+		ms = 0
+	}
+	_, err := d.sql.Exec(
+		`UPDATE runs SET awaiting_agent_since = NULL, parked_ms = COALESCE(parked_ms, 0) + ?, updated_at = ? WHERE id = ?`,
+		ms, now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("complete run awaiting agent: %w", err)
+	}
+	return nil
+}
+
 // RecoverStaleRuns marks any runs stuck in pending/running status as failed
 // and fails any in-progress steps. This is called at daemon startup to clean
 // up after a previous crash. Returns the number of recovered runs.
 func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
+	return d.RecoverStaleRunsExcept(errMsg, nil)
+}
+
+// RecoverStaleRunsExcept marks active runs as failed unless their IDs appear
+// in preserved. Callers use preserved only after independently proving a run
+// can be reconstructed safely.
+func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}) (int, error) {
 	ts := now()
 
 	tx, err := d.sql.Begin()
@@ -309,23 +346,37 @@ func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
 	}
 	defer tx.Rollback()
 
-	// Fail stale steps first (running, awaiting_approval, awaiting_agent_retry,
-	// fixing, fix_review, awaiting_triage).
-	_, err = tx.Exec(
-		`UPDATE step_results SET status = ?, error = ?, completed_at = ? WHERE status IN (?, ?, ?, ?, ?, ?)`,
+	placeholders, args := recoveryExclusionClause(preserved)
+	stepArgs := []any{
 		types.StepStatusFailed, errMsg, ts,
 		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusAwaitingRetry, types.StepStatusFixing, types.StepStatusFixReview, types.StepStatusAwaitingTriage,
+		types.RunPending, types.RunRunning,
+	}
+	stepArgs = append(stepArgs, args...)
+	_, err = tx.Exec(
+		`UPDATE step_results SET status = ?, error = ?, completed_at = ?
+		 WHERE status IN (?, ?, ?, ?, ?, ?) AND run_id IN (
+			SELECT id FROM runs WHERE status IN (?, ?)`+placeholders+`
+		 )`,
+		stepArgs...,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("recover stale steps: %w", err)
 	}
 
 	// Fail stale runs. Clear any awaiting-agent marker so a recovered (now
-	// failed) run is never reported as still parked awaiting the agent.
+	// failed) run is never reported as still parked awaiting the agent,
+	// accumulating the marker's elapsed time into the run's parked total so
+	// the parked evidence survives the crash.
+	runArgs := []any{types.RunFailed, errMsg, ts, ts, ts, types.RunPending, types.RunRunning}
+	runArgs = append(runArgs, args...)
 	result, err := tx.Exec(
-		`UPDATE runs SET status = ?, error = ?, awaiting_agent_since = NULL, updated_at = ? WHERE status IN (?, ?)`,
-		types.RunFailed, errMsg, ts,
-		types.RunPending, types.RunRunning,
+		`UPDATE runs SET status = ?, error = ?,
+			parked_ms = COALESCE(parked_ms, 0) + CASE
+				WHEN awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since
+				THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
+			awaiting_agent_since = NULL, updated_at = ? WHERE status IN (?, ?)`+placeholders,
+		runArgs...,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("recover stale runs: %w", err)
@@ -340,4 +391,17 @@ func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
 		return 0, fmt.Errorf("commit transaction: %w", err)
 	}
 	return int(count), nil
+}
+
+func recoveryExclusionClause(preserved map[string]struct{}) (string, []any) {
+	if len(preserved) == 0 {
+		return "", nil
+	}
+	args := make([]any, 0, len(preserved))
+	placeholders := make([]string, 0, len(preserved))
+	for id := range preserved {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	return " AND id NOT IN (" + strings.Join(placeholders, ", ") + ")", args
 }

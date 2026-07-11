@@ -5,8 +5,8 @@ description: All fields for .no-mistakes.yaml.
 
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
-:::caution[Security: code-executing fields are read from the default branch]
-`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, `agent` selects which processes launch there (including ordered fallback lists and `acp:` targets), `review.reviewers` selects extra reviewer processes, and `review_loop` gates the post-PR review loop (it names the bot login whose comments become fix-prompt content, bounds how many automated fix rounds run, and points at a secret key file), all with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, `review`, and `review_loop` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, those repo-level code-executing fields are forced empty or absent - the run proceeds on built-in/global defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands`, `agent`, `review` panel, and `review_loop` you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`, `design_context`) are still read from the pushed branch.
+:::caution[Security: gate-control fields are read from the default branch]
+`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, `agent` selects which processes launch there (including ordered fallback lists and `acp:` targets), `review.reviewers` selects extra reviewer processes, and `review_loop` gates the post-PR review loop, all with the maintainer's credentials. To prevent supply-chain attacks, the daemon reads **`commands`, `agent`, `review`, `review_loop`, and `document.instructions` from your default branch**, never from the pushed SHA, at the exact commit resolved by a fresh fetch. If the fetch fails, those trusted fields are forced empty or absent rather than falling back to a stale or hostile copy. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`, `design_context`) are still read from the pushed branch; `document.instructions` is trusted because it controls the documentation policy that evaluates that branch.
 
 If you genuinely want per-branch `commands`, `agent`, `review`, and `review_loop` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -24,6 +24,11 @@ commands:
 ignore_patterns:
   - "*.generated.go"
   - "vendor/**"
+
+# Optional documentation ownership policy, read only from the trusted default branch.
+document:
+  instructions: |
+    docs/ owns detailed product guidance; README.md owns the introduction.
 
 auto_fix:
   rebase: 3
@@ -138,7 +143,8 @@ Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 | Default | Empty (agent auto-detects) |
 
 When set, the lint step runs this exact command and checks the exit code.
-When empty, the agent detects relevant linters and formatters, applies safe fixes, reruns the relevant checks, commits any agent changes, and reports only unresolved issues.
+When empty, the agent-driven lint duty is folded into the document step's combined housekeeping pass: one agent invocation covers both documentation and lint, and the lint step consumes that result, reporting lint-category findings with the same gate semantics (blocking findings park for a decision).
+Neither responsibility is skipped: when the document step has nothing to run against (or its structured output cannot be trusted), the lint step runs its own agent pass as before.
 
 ### commands.format
 
@@ -149,7 +155,22 @@ Formatter command run before the push step commits agent fixes.
 | Type | `string` |
 | Default | Empty (no separate push-step formatter) |
 
-This does not prevent empty `commands.lint` from detecting and running formatters during the lint step.
+This does not prevent empty `commands.lint` from detecting and running formatters during the combined housekeeping pass, or during the lint step when that pass cannot provide a result.
+
+### document.instructions
+
+Repository-specific documentation ownership policy for the document step.
+
+| | |
+|---|---|
+| Type | `string` (multiline) |
+| Default | Empty (built-in placement policy only) |
+
+The document step always applies a built-in placement policy: every fact has exactly one authoritative owner document, stale duplicates are removed or reduced to pointers instead of synchronized, no new documentation surfaces are created merely to close perceived gaps, and incident lessons live as invariants near their owner (with a pointer to the regression test), never as AGENTS.md postmortems.
+`document.instructions` states this repository's ownership map or extra placement rules (for example, which file owns which class of facts).
+It augments or clarifies the built-in policy; it cannot disable documentation integrity.
+
+Like `commands.*` and `agent`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a contributor's pushed branch cannot weaken the documentation rules that gate its own review.
 
 ### Command process lifetime
 
@@ -193,7 +214,7 @@ Override auto-fix attempt limits for specific steps. Fields not set here inherit
 
 Set to `0` to disable the follow-up auto-fix loop for a step (findings require manual approval).
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
-For empty `commands.lint`, the agent still attempts safe fixes during the initial lint pass; unresolved lint findings then pause for approval instead of starting another automatic fix loop.
+For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings pause for approval instead of starting another automatic fix loop.
 
 `auto_fix.ci` covers the CI step's CI failure and merge-conflict auto-fix attempts.
 

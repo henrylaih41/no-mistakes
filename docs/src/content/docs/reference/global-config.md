@@ -47,6 +47,8 @@ daemon_connect_timeout: "3s"
 
 log_level: info
 
+session_reuse: true
+
 auto_fix:
   rebase: 3
   review: 0
@@ -185,8 +187,8 @@ User-supplied flags are inserted ahead of no-mistakes' managed flags, so your ch
 
 | Agent | Reserved flags |
 |---|---|
-| `claude` | `-p`, `--print`, `--verbose`, `--output-format`, `--json-schema` |
-| `codex` | `exec`, `--json`, `--color` |
+| `claude` | `-p`, `--print`, `--verbose`, `--output-format`, `--json-schema`, `-r`, `--resume`, `--session-id`, `-c`, `--continue`, `--fork-session` |
+| `codex` | `exec`, `resume`, `--resume`, `--session`, `--session-id`, `--thread`, `--thread-id`, `--last`, `--json`, `--color` |
 | `rovodev` | `rovodev`, `serve`, `--disable-session-token` |
 | `opencode` | `serve`, `--hostname`, `--port`, `--print-logs` |
 | `pi` | `--mode`, `--no-session` |
@@ -194,6 +196,7 @@ User-supplied flags are inserted ahead of no-mistakes' managed flags, so your ch
 | `grok` | `-p`, `--single`, `--prompt-file`, `--prompt-json`, `--output-format`, `--json-schema`, `--permission-mode`, `--always-approve`, `--cwd` |
 
 For structured `codex` runs, no-mistakes also appends its own `--output-schema <tempfile>` after your overrides. Treat that flag as managed even though config validation does not currently reject it.
+The Claude and Codex session-control forms are reserved so no-mistakes can keep reviewer and fixer conversations role-isolated.
 
 Smart defaults:
 
@@ -298,11 +301,28 @@ Daemon log verbosity.
 | Values  | `debug`, `info`, `warn`, `error` |
 | Default | `info`                           |
 
+### session_reuse
+
+Per-run, per-role agent session reuse for the review loop.
+
+|         |        |
+| ------- | ------ |
+| Type    | `bool` |
+| Default | `true` |
+
+When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), each run keeps one durable reviewer session across the initial full review and every full rereview, and a separate durable fixer session across review-fix turns.
+The roles never share a session, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
+Every review turn still performs a full review of the complete branch diff; only the reviewer's own prior context is carried.
+When resume is unavailable or fails, the invocation falls back to a cold run or a fresh same-role session and the fallback is recorded in the local `agent_invocations` performance record.
+Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts.
+After a daemon restart, no-mistakes resumes only fully recorded parked approval gates; incomplete or ambiguous active runs fail closed through normal crash recovery.
+Set `false` to force every agent invocation cold.
+
 ### auto_fix
 
 Maximum follow-up auto-fix attempts per step. Set a step to `0` to disable the follow-up auto-fix loop, so findings require manual approval.
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
-For empty `commands.lint`, the agent still attempts safe fixes during the initial lint pass; unresolved lint findings then pause for approval instead of starting another automatic fix loop.
+For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings then pause for approval instead of starting another automatic fix loop.
 
 |      |          |
 | ---- | -------- |

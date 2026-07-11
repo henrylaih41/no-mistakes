@@ -42,6 +42,23 @@ type StepContext struct {
 	// Reviewers and fixers use it to check implementation against agreed
 	// decisions without rereading mutable files.
 	DesignContext types.DesignContext
+	// Sessions manages the run's durable review-loop agent sessions
+	// (reviewer and fixer roles). nil runs every invocation cold.
+	Sessions *RunSessions
+	// Shared carries in-memory run-scoped results one step hands to a later
+	// step in the same run (e.g. the combined document+lint pass).
+	Shared *RunShared
+}
+
+// RunAgentSession executes one turn of a durable review-loop role session,
+// running cold when sessions are unavailable. Only the review step's
+// reviewer/fixer turns use this; every other agent invocation goes through
+// sctx.Agent.Run directly and stays session-isolated.
+func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (*agent.Result, error) {
+	if sctx.Sessions == nil {
+		return sctx.Agent.Run(sctx.Ctx, opts)
+	}
+	return sctx.Sessions.Run(sctx.Ctx, sctx.Agent, role, opts, sctx.Log)
 }
 
 // StepOutcome is the result of executing a pipeline step.

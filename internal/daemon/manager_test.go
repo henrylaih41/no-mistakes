@@ -66,7 +66,11 @@ func TestPushReceivedTracksRunTelemetry(t *testing.T) {
 		t.Fatalf("started branch_role = %v, want default", got)
 	}
 
-	finished := recorder.find("run", "action", "finished")
+	// The executor persists terminal status before its owner goroutine emits
+	// terminal telemetry. Wait for that asynchronous handoff instead of
+	// assuming it completed in the same scheduling slice, which is especially
+	// unreliable on Windows.
+	finished := waitForTelemetryEvent(t, recorder, "run", "action", "finished")
 	if finished == nil {
 		t.Fatal("expected run finished telemetry event")
 	}
@@ -658,6 +662,11 @@ func TestPushReceivedTracksRunTelemetryAfterPanic(t *testing.T) {
 	}
 	if _, ok := finished.fields["duration_ms"]; !ok {
 		t.Fatal("expected duration_ms in run finished telemetry after panic")
+	}
+	for _, field := range []string{"agent_invocations", "resumed_invocations", "fallback_invocations"} {
+		if got, ok := finished.fields[field]; !ok || got != 0 {
+			t.Fatalf("%s = %v, want 0", field, got)
+		}
 	}
 }
 

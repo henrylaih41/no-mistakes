@@ -78,6 +78,8 @@ Previous review findings to address:
 			Prompt:                  fixPrompt,
 			ErrorPrefix:             "agent fix",
 			FallbackSummary:         "address review findings",
+			SessionRole:             pipeline.SessionRoleFixer,
+			Purpose:                 "review-fix",
 		})
 		if err != nil {
 			return nil, err
@@ -193,10 +195,22 @@ Risk assessment (after listing all findings):
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: reviewFindingsSchema,
+		Purpose:    "review",
 	}
 
 	var findings Findings
-	if len(reviewers) <= 1 {
+	if len(reviewers) <= 1 && len(sctx.Config.Review.Reviewers) == 0 {
+		// The default reviewer resumes one durable reviewer-role session across
+		// the initial review and post-fix rereviews. Configured panel reviewers
+		// stay independent and cold because each may use a different family,
+		// binary, or model override.
+		opts.OnChunk = sctx.LogChunk
+		result, err := sctx.RunAgentSession(pipeline.SessionRoleReviewer, opts)
+		if err != nil {
+			return nil, fmt.Errorf("agent review: %w", err)
+		}
+		findings = parseReviewFindings(result, sctx.Log)
+	} else if len(reviewers) <= 1 {
 		// Single reviewer: keep the exact streaming single-call path so behavior
 		// is byte-identical to the pre-panel pipeline.
 		opts.OnChunk = sctx.LogChunk

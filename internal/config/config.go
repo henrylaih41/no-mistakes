@@ -57,11 +57,16 @@ type GlobalConfig struct {
 	StepQuietWarning     time.Duration       `yaml:"-"`
 	DaemonConnectTimeout time.Duration       `yaml:"-"`
 	LogLevel             string              `yaml:"log_level"`
-	AutoFix              AutoFixRaw
-	Intent               IntentRaw
-	Test                 TestRaw
-	Review               ReviewRaw
-	ReviewLoop           ReviewLoopRaw
+	// SessionReuse controls per-run, per-role agent session reuse in the
+	// review loop (one durable reviewer session across full reviews, a
+	// separate durable fixer session across fix turns). Default true; set
+	// session_reuse: false to force every invocation cold.
+	SessionReuse bool `yaml:"-"`
+	AutoFix      AutoFixRaw
+	Intent       IntentRaw
+	Test         TestRaw
+	Review       ReviewRaw
+	ReviewLoop   ReviewLoopRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -76,6 +81,7 @@ type globalConfigRaw struct {
 	BabysitTimeout       string              `yaml:"babysit_timeout"`
 	StepQuietWarning     string              `yaml:"step_quiet_warning"`
 	LogLevel             string              `yaml:"log_level"`
+	SessionReuse         *bool               `yaml:"session_reuse"`
 	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
@@ -108,6 +114,20 @@ type RepoConfig struct {
 	// global review config (see Merge).
 	Review     *ReviewRaw    `yaml:"review"`
 	ReviewLoop ReviewLoopRaw `yaml:"review_loop"`
+	// Document carries the repository's documentation placement policy. It
+	// steers the document step's gate prompt, so it is honored ONLY from the
+	// trusted default-branch copy of .no-mistakes.yaml (see
+	// EffectiveRepoConfig): a contributor's pushed branch must not be able to
+	// weaken documentation rules for its own review.
+	Document DocumentRaw `yaml:"document"`
+}
+
+// DocumentRaw is the YAML representation of document-step settings.
+type DocumentRaw struct {
+	// Instructions augment (never replace) the built-in documentation
+	// placement policy with the repository's ownership map or extra
+	// placement rules.
+	Instructions string `yaml:"instructions"`
 }
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -122,6 +142,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		DesignContext     DesignContextRaw `yaml:"design_context"`
 		Review            *ReviewRaw       `yaml:"review"`
 		ReviewLoop        ReviewLoopRaw    `yaml:"review_loop"`
+		Document          DocumentRaw      `yaml:"document"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -138,6 +159,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.DesignContext = raw.DesignContext
 	c.Review = raw.Review
 	c.ReviewLoop = raw.ReviewLoop
+	c.Document = raw.Document
 	return nil
 }
 
@@ -182,6 +204,7 @@ type Config struct {
 	CITimeout            time.Duration
 	StepQuietWarning     time.Duration
 	LogLevel             string
+	SessionReuse         bool
 	Commands             Commands
 	IgnorePatterns       []string
 	AutoFix              AutoFix
@@ -190,6 +213,7 @@ type Config struct {
 	DesignContext        DesignContext
 	Review               Review
 	ReviewLoop           ReviewLoop
+	Document             Document
 }
 
 // ReviewerSpec identifies one reviewer in the cross-family review panel. Agent
@@ -302,6 +326,13 @@ type ReviewLoop struct {
 	// (/v3/organizations/{org_id}/pr-reviews). Required (with a review token) to use
 	// the Review API; empty keeps the loop on the legacy /v1/sessions trigger.
 	DevinOrgID string
+}
+
+// Document is the resolved document-step config. Instructions come from the
+// trusted default-branch repo config and augment the built-in placement
+// policy in the document prompt.
+type Document struct {
+	Instructions string
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -439,6 +470,13 @@ step_quiet_warning: "10m"
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
 daemon_connect_timeout: "3s"
+
+# Reuse one durable agent session per run for the review loop: the reviewer
+# keeps a single session across the initial review and every full rereview,
+# and review fixes keep a separate fixer session. Roles never share a session.
+# Supported for claude and codex; other agents run cold. Set false to force
+# every agent invocation cold.
+session_reuse: true
 
 # Log level for daemon output
 # Options: debug, info, warn, error
@@ -950,11 +988,24 @@ var reservedAgentArgs = map[string]map[string]bool{
 		"--verbose":       true,
 		"--output-format": true,
 		"--json-schema":   true,
+		"-r":              true,
+		"--resume":        true,
+		"--session-id":    true,
+		"-c":              true,
+		"--continue":      true,
+		"--fork-session":  true,
 	},
 	string(types.AgentCodex): {
-		"exec":    true,
-		"--json":  true,
-		"--color": true,
+		"exec":         true,
+		"resume":       true,
+		"--resume":     true,
+		"--session":    true,
+		"--session-id": true,
+		"--thread":     true,
+		"--thread-id":  true,
+		"--last":       true,
+		"--json":       true,
+		"--color":      true,
 	},
 	string(types.AgentRovoDev): {
 		"rovodev":                 true,
@@ -1119,6 +1170,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		StepQuietWarning:     DefaultStepQuietWarning,
 		DaemonConnectTimeout: DefaultDaemonConnectTimeout,
 		LogLevel:             "info",
+		SessionReuse:         true,
 	}
 }
 
@@ -1189,6 +1241,9 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	}
 	if raw.LogLevel != "" {
 		cfg.LogLevel = raw.LogLevel
+	}
+	if raw.SessionReuse != nil {
+		cfg.SessionReuse = *raw.SessionReuse
 	}
 	if raw.AutoFix.CI == nil {
 		raw.AutoFix.CI = raw.AutoFix.Babysit
@@ -1314,7 +1369,10 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // and nil Agents inherit the global agent; Commands{} yields built-in defaults;
 // Review nil inherits the global panel; ReviewLoopRaw{} leaves the loop off) rather than
 // falling back to the pushed branch — this blocks the supply-chain vector for
-// repos that ship .no-mistakes.yaml only on feature branches.
+// repos that ship .no-mistakes.yaml only on feature branches. Document (the
+// documentation placement policy injected into the document gate prompt) is
+// always trusted-only for the same reason: a pushed branch must not weaken the
+// documentation rules that gate itself.
 //
 // ReviewLoop is gated even though the fixer it drives is always no-mistakes
 // itself (never a contributor-named binary): a pushed branch that could flip
@@ -1334,6 +1392,11 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		pushed = &RepoConfig{}
 	}
 	effective := *pushed
+	if trusted != nil {
+		effective.Document = trusted.Document
+	} else {
+		effective.Document = DocumentRaw{}
+	}
 	if allowRepoCommands {
 		return &effective
 	}
@@ -1668,6 +1731,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		CITimeout:            global.CITimeout,
 		StepQuietWarning:     global.StepQuietWarning,
 		LogLevel:             global.LogLevel,
+		SessionReuse:         global.SessionReuse,
 		Commands:             repo.Commands,
 		IgnorePatterns:       repo.IgnorePatterns,
 		AutoFix:              af,
@@ -1676,6 +1740,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		DesignContext:        resolveDesignContext(repo.DesignContext),
 		Review:               review,
 		ReviewLoop:           reviewLoop,
+		Document:             Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 	}
 
 	if repo.Agent != "" {
