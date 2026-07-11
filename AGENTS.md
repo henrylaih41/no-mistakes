@@ -142,6 +142,32 @@ Safest local verification sequence after non-trivial changes:
 - Read-only surfaces (`axi` home/status/logs, `status`, `runs`) emit NO pageview and gate their command event through `telemetry.ReadSurfaceGate` (emit on state-fingerprint change, else at most once per 10 min, persisted at `<NM_HOME>/telemetry-gate.json`). Never reintroduce the pageview+command double emit for read surfaces - `axi-status` alone was 42% of all remote event rows. Mutation surfaces stay full-fidelity via `trackAxiSurface`/`trackCommand`.
 - Detailed performance evidence is LOCAL-ONLY (`agent_invocations` rows plus `runs.parked_ms`); never store prompts, outputs, or diffs there (shape-guard test `TestAgentInvocations_PrivacySafeShape`) and never send run IDs, paths, session identities, or per-invocation records to Umami - the only remote perf data is three bounded counts on the terminal `run finished` event. The local/remote split is documented in `docs/src/content/docs/reference/environment.md`; read locally with `no-mistakes stats`.
 
+**Review-Loop Agent Sessions (`internal/pipeline/sessions.go`)**
+
+- The review loop reuses durable native agent sessions per run and per role: ONE reviewer session across the initial review and every full rereview, and a SEPARATE fixer session across review-fix turns (`RunSessions`, roles `reviewer`/`review-fixer`).
+  Roles never share a session (the reviewer must never inherit the fixer's rationale), no other step uses a session, and sessions are keyed strictly by run - concurrent runs/branches/repos stay isolated.
+  Every review turn is still a full adversarial review of the complete branch diff; the resumed session only carries the reviewer's own prior context.
+- Adapter contract: `agent.RunOpts.Session` in, `Result.SessionID/Resumed` out, capability via the optional `agent.SessionResumer` interface + `agent.SupportsSessionResume` helper (wrappers like `lifecycleAgent`/`perfRecordingAgent` must forward it).
+  claude resumes via `-p --resume <id>` (session id parsed from stream-json events); codex via `codex exec resume <id> <prompt>` (thread id from `thread.started`).
+  `codex exec resume` exposes a NARROWER flag surface than `codex exec` (no `--color`, no `-s/--sandbox` as of 0.144) - the resume argv omits `--color never`, and any unsupported user extraArg simply fails the resume and falls back.
+- Fail-safe rules: unsupported adapter → cold run; failed resume → drop the identity, re-run the same turn in a fresh same-role session (`SessionFallback`), never skip the review; cancelled ctx → no fallback retry; `session_reuse: false` forces everything cold.
+  Persistence is minimum metadata only (run, role, agent, session id) in `run_agent_sessions` - never prompts or transcripts.
+  Regressions: `internal/pipeline/sessions_test.go`, `internal/pipeline/steps/review_session_test.go` (executor-level role isolation incl. park/respond), `internal/agent/session_test.go` (argv + parsing).
+- The e2e fakeagent must keep understanding both codex argv shapes; `extractCodexPrompt` handles `exec resume <id> <prompt>`.
+
+**Combined Document+Lint Housekeeping Pass**
+
+- When `commands.lint` is empty (agent-driven lint), the document step performs BOTH duties in one agent invocation (`housekeepingFindingsSchema` adds a per-finding `category`: documentation|lint) and stashes the lint half on `sctx.Shared` (`RunShared.SetHousekeepingLint`); the lint step consumes it (`TakeHousekeepingLint`, consume-once) instead of paying a second cold pass.
+  Neither duty is ever silently dropped: document-skipped, untrusted structured output, or a lint fix round all fall back to lint's own agent pass. Configured `commands.lint` is untouched and stays a first-class deterministic gate.
+  Gate split fails safe: uncategorized findings count as documentation (the stricter gate). Regressions: `internal/pipeline/steps/housekeeping_test.go` (incl. the 2→1 cold-start test `TestPipeline_DocumentPlusLintIsOneAgentInvocation`).
+- The document prompt enforces a placement policy (every fact has ONE owner doc; stale duplicates become pointers, never synced copies; no AGENTS.md postmortems - keep the invariant in its owner and point at the regression test; scope limited to docs this change made stale).
+  Do not reintroduce exhaustive-corpus-sweep language ("Be exhaustive", "resolve every gap"); it caused doc commits in 90/121 audited PRs. Contract test: `TestDocumentStep_PromptAppliesPlacementPolicy`.
+
+**Telemetry Shape (source-side diet + local perf evidence)**
+
+- Read-only surfaces (`axi` home/status/logs, `status`, `runs`) emit NO pageview and gate their `command` event through `telemetry.ReadSurfaceGate` (`internal/cli/telemetry.go` `trackReadSurface`): emit on state-fingerprint change, else at most once per 10 min, persisted at `<NM_HOME>/telemetry-gate.json` so per-poll CLI processes stay bounded. Never reintroduce the pageview+command double emit for read surfaces - `axi-status` alone was ~3M Umami rows (42% of all event rows). Mutation surfaces (`axi run/respond/abort`, run/step/fix/approval events) stay full-fidelity via `trackAxiSurface`/`trackCommand`.
+- Detailed performance evidence is LOCAL-ONLY: `agent_invocations` rows (one per agent invocation: purpose, session mode cold/started/resumed/fallback, truncated session-id hash, timing, exit/failure category, tokens) written by the executor's `perfRecordingAgent` wrapper, plus `runs.parked_ms` accumulated on every gate-wait end (and folded in by `RecoverStaleRuns` on crash). Steps label invocations via `RunOpts.Purpose`. Never store prompts/outputs/diffs there (shape-guard test `TestAgentInvocations_PrivacySafeShape`) and never send run IDs, paths, session identities, or per-invocation records to Umami - the only remote perf data is three bounded counts on the terminal `run finished` event (`addRunPerformanceSummary`). Read surfaces: `no-mistakes stats --agents` / `stats --run <id>`. The local/remote split is documented in `docs/src/content/docs/reference/environment.md`.
+
 **Rebase Base & Force-Push Safety (data-loss prevention)**
 
 - The whole job of this tool is to not lose people's code; favor refusing the push and surfacing a finding over any clever recovery. The comments in `internal/pipeline/steps/forcepush.go` own the full reasoning; the invariants are the next three bullets.

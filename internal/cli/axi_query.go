@@ -144,39 +144,6 @@ func configQuietWarning(env *axiEnv) time.Duration {
 	return env.cfg.StepQuietWarning
 }
 
-func annotateRunView(env *axiEnv, rv *runView) {
-	if env == nil || rv == nil {
-		return
-	}
-	quietWarning := configQuietWarning(env)
-	for i := range rv.Steps {
-		step := &rv.Steps[i]
-		step.QuietWarning = quietWarning
-		if step.ID != "" {
-			if stats, err := env.d.StepRoundStats(step.ID); err == nil {
-				step.RoundCount = stats.TotalRounds
-				step.FixRoundCount = stats.FixRounds
-				step.PendingFixSource = stats.PendingFixSource
-			}
-		}
-		if step.LastActivityAt == nil {
-			logPath := filepath.Join(env.p.RunLogDir(rv.ID), step.Name+".log")
-			if info, err := os.Stat(logPath); err == nil {
-				ts := info.ModTime().Unix()
-				step.LastActivityAt = &ts
-				step.LastActivity = "step log updated"
-			}
-		}
-	}
-}
-
-func configQuietWarning(env *axiEnv) time.Duration {
-	if env == nil || env.cfg == nil || env.cfg.StepQuietWarning <= 0 {
-		return 0
-	}
-	return env.cfg.StepQuietWarning
-}
-
 func startRunHelp() string {
 	return `Run no-mistakes axi run --intent "the user's goal" --yes to validate the current branch`
 }
