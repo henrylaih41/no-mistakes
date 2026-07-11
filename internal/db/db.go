@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,8 @@ var (
 
 // DB wraps a SQLite database connection.
 type DB struct {
-	sql *sql.DB
+	sql  *sql.DB
+	path string
 }
 
 // Open opens (or creates) the SQLite database at path and runs migrations.
@@ -39,7 +41,14 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 	}
-	return &DB{sql: sqlDB}, nil
+	canonicalPath, pathErr := filepath.Abs(path)
+	if pathErr != nil {
+		canonicalPath = path
+	}
+	if resolvedPath, resolveErr := filepath.EvalSymlinks(canonicalPath); resolveErr == nil {
+		canonicalPath = resolvedPath
+	}
+	return &DB{sql: sqlDB, path: canonicalPath}, nil
 }
 
 // isDuplicateColumnErr reports whether err is SQLite's "duplicate column name"
