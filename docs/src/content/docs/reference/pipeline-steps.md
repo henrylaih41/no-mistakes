@@ -65,7 +65,7 @@ AI code review of your diff.
 - Diffs the base commit against head
 - Filters out files matching `ignore_patterns` from the repo config
 - Sends the filtered diff to the configured agent, or to every reviewer in `review.reviewers`, with structured review instructions and a structured output schema
-- Includes user intent when the run has supplied intent or transcript matching found a relevant local agent session
+- Includes user intent when the run supplied it or transcript matching found a relevant local agent session; detailed provenance semantics are documented in [Intent extraction](/no-mistakes/guides/agents/#intent-extraction)
 - Each reviewer returns findings with severity (`error`, `warning`, `info`), file location, description, and an `action` (`no-op`, `auto-fix`, `ask-user`)
 - In review-panel mode, merged findings keep a reviewer `source`, get reviewer-namespaced IDs, concatenate reviewer summaries/rationales, and use the highest reported `risk_level`
 - `review.max_parallel` bounds concurrent reviewers; `review.fail_open: false` (the default) fails the review step on any reviewer error, while `true` drops failed reviewers if at least one reviewer succeeds
@@ -73,7 +73,7 @@ AI code review of your diff.
 - With the default `session_reuse: true`, Claude and Codex reuse one reviewer session across the initial review and every full rereview, and a separate fixer session across review-fix turns
 - A resume failure retries the same turn in a fresh session for that role, never skips the full rereview, and unsupported agents run cold
 
-**Approval:** required if any finding has severity `error` or `warning`. Findings with `action: ask-user` pause for approval instead of entering the normal auto-fix loop. This is for findings that challenge the author's intent, not routine correctness, reliability, or security fixes that may need to re-add a small amount of deleted logic. With the default `auto_fix.review: 0`, blocking review findings park for approval even when their action is `auto-fix`; setting repo or global `auto_fix.review` above `0` re-enables the automatic review fix loop for eligible `auto-fix` findings. Findings with `action: no-op` are informational only.
+**Approval:** required if any finding has severity `error` or `warning`. Findings with `action: ask-user` pause for approval instead of entering the normal auto-fix loop. This is for findings that challenge the author's intent, not routine correctness, reliability, or security fixes that may need to re-add a small amount of deleted logic. With the default `auto_fix.review: 0`, blocking review findings park for approval even when their action is `auto-fix`; setting repo or global `auto_fix.review` above `0` re-enables the automatic review fix loop for eligible `auto-fix` findings. Findings with `action: no-op` are informational only. The shared [finding-action model](/no-mistakes/concepts/auto-fix/#finding-actions) owns the behavior for a missing `action`.
 
 `review.max_fix_rounds` caps all review fix/re-review rounds, including automatic review fixes and owner-approved `axi respond --action fix` rounds. The default `0` preserves unlimited behavior. When the cap is reached, the review step parks at `awaiting_triage` with residual findings intact. A plain fix response is refused; an additional fix round requires `--fix-override --override-reason "<master triage reason>"`, and that reason is persisted on the round.
 
