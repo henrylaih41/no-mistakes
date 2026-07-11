@@ -73,11 +73,6 @@ Safest local verification sequence after non-trivial changes:
 - The hook's `--gate` value must never come from a bare `$(pwd)`: Git can invoke `post-receive` from a cwd that collapses to `.` (issue #269), which the daemon rejects and the pipeline silently never starts. The hook script resolves an absolute gate dir (git first, hook location fallback), and `normalizeNotifyGatePath` in `internal/cli/daemon_cmd.go` is an independent second layer that absolutizes whatever an already-installed older hook sends.
 - Regressions: `TestPostReceiveHook_ResolvesAbsoluteGateDir`, `TestPostReceiveHook_FallsBackToHookLocationForGateDir`, `TestNormalizeNotifyGatePathResolvesLegacyDotGate`.
 
-**Post-Receive Hook Gate Path Resolution (`internal/git/hook.go`)**
-
-- The hook's `--gate` value must never come from a bare `$(pwd)`: Git can invoke `post-receive` from a cwd whose `pwd` collapses to `.` (issue #269), which the daemon rejects (`"invalid gate path: ."`) and the pipeline silently never starts - `git push` reports success with no hint. `GATE_DIR` is resolved in order: `git rev-parse --absolute-git-dir` (queries git directly, ignores `$PWD`) first; if that fails or yields a relative path, fall back to `cd`-ing to the parent of the hook script's own location (`$0`) and reading `pwd -P`; a final `pwd -P` is the last-resort guard. `daemon notify-push --gate` (`internal/cli/daemon_cmd.go` `normalizeNotifyGatePath`) is a second, independent layer that `filepath.Abs`+`Clean`s whatever gate path it is given, so an already-installed older managed hook that still emits a relative path keeps working after a CLI upgrade without needing the hook file itself reinstalled.
-- Regressions: `TestPostReceiveHook_ResolvesAbsoluteGateDir`, `TestPostReceiveHook_FallsBackToHookLocationForGateDir` (`internal/git/hook_test.go`), `TestNormalizeNotifyGatePathResolvesLegacyDotGate` (`internal/cli/daemon_cmd_test.go`).
-
 **Daemon Singleton Lock (`internal/daemon/lock.go`)**
 
 - Only one live daemon may own an `NM_HOME`: an exclusive OS file lock on `<NM_HOME>/daemon.lock` is acquired as the very first action in `RunWithOptions`, strictly before stale-run recovery and socket bind, and held for the process lifetime. The kernel releases it on any process death, so a held lock always means a live holder and no staleness heuristic is needed. Without it, a second daemon stole the socket and ran global crash recovery against the live daemon's runs and worktrees.
@@ -141,32 +136,6 @@ Safest local verification sequence after non-trivial changes:
 
 - Read-only surfaces (`axi` home/status/logs, `status`, `runs`) emit NO pageview and gate their command event through `telemetry.ReadSurfaceGate` (emit on state-fingerprint change, else at most once per 10 min, persisted at `<NM_HOME>/telemetry-gate.json`). Never reintroduce the pageview+command double emit for read surfaces - `axi-status` alone was 42% of all remote event rows. Mutation surfaces stay full-fidelity via `trackAxiSurface`/`trackCommand`.
 - Detailed performance evidence is LOCAL-ONLY (`agent_invocations` rows plus `runs.parked_ms`); never store prompts, outputs, or diffs there (shape-guard test `TestAgentInvocations_PrivacySafeShape`) and never send run IDs, paths, session identities, or per-invocation records to Umami - the only remote perf data is three bounded counts on the terminal `run finished` event. The local/remote split is documented in `docs/src/content/docs/reference/environment.md`; read locally with `no-mistakes stats`.
-
-**Review-Loop Agent Sessions (`internal/pipeline/sessions.go`)**
-
-- The review loop reuses durable native agent sessions per run and per role: ONE reviewer session across the initial review and every full rereview, and a SEPARATE fixer session across review-fix turns (`RunSessions`, roles `reviewer`/`review-fixer`).
-  Roles never share a session (the reviewer must never inherit the fixer's rationale), no other step uses a session, and sessions are keyed strictly by run - concurrent runs/branches/repos stay isolated.
-  Every review turn is still a full adversarial review of the complete branch diff; the resumed session only carries the reviewer's own prior context.
-- Adapter contract: `agent.RunOpts.Session` in, `Result.SessionID/Resumed` out, capability via the optional `agent.SessionResumer` interface + `agent.SupportsSessionResume` helper (wrappers like `lifecycleAgent`/`perfRecordingAgent` must forward it).
-  claude resumes via `-p --resume <id>` (session id parsed from stream-json events); codex via `codex exec resume <id> <prompt>` (thread id from `thread.started`).
-  `codex exec resume` exposes a NARROWER flag surface than `codex exec` (no `--color`, no `-s/--sandbox` as of 0.144) - the resume argv omits `--color never`, and any unsupported user extraArg simply fails the resume and falls back.
-- Fail-safe rules: unsupported adapter → cold run; failed resume → drop the identity, re-run the same turn in a fresh same-role session (`SessionFallback`), never skip the review; cancelled ctx → no fallback retry; `session_reuse: false` forces everything cold.
-  Persistence is minimum metadata only (run, role, agent, session id) in `run_agent_sessions` - never prompts or transcripts.
-  Regressions: `internal/pipeline/sessions_test.go`, `internal/pipeline/steps/review_session_test.go` (executor-level role isolation incl. park/respond), `internal/agent/session_test.go` (argv + parsing).
-- The e2e fakeagent must keep understanding both codex argv shapes; `extractCodexPrompt` handles `exec resume <id> <prompt>`.
-
-**Combined Document+Lint Housekeeping Pass**
-
-- When `commands.lint` is empty (agent-driven lint), the document step performs BOTH duties in one agent invocation (`housekeepingFindingsSchema` adds a per-finding `category`: documentation|lint) and stashes the lint half on `sctx.Shared` (`RunShared.SetHousekeepingLint`); the lint step consumes it (`TakeHousekeepingLint`, consume-once) instead of paying a second cold pass.
-  Neither duty is ever silently dropped: document-skipped, untrusted structured output, or a lint fix round all fall back to lint's own agent pass. Configured `commands.lint` is untouched and stays a first-class deterministic gate.
-  Gate split fails safe: uncategorized findings count as documentation (the stricter gate). Regressions: `internal/pipeline/steps/housekeeping_test.go` (incl. the 2→1 cold-start test `TestPipeline_DocumentPlusLintIsOneAgentInvocation`).
-- The document prompt enforces a placement policy (every fact has ONE owner doc; stale duplicates become pointers, never synced copies; no AGENTS.md postmortems - keep the invariant in its owner and point at the regression test; scope limited to docs this change made stale).
-  Do not reintroduce exhaustive-corpus-sweep language ("Be exhaustive", "resolve every gap"); it caused doc commits in 90/121 audited PRs. Contract test: `TestDocumentStep_PromptAppliesPlacementPolicy`.
-
-**Telemetry Shape (source-side diet + local perf evidence)**
-
-- Read-only surfaces (`axi` home/status/logs, `status`, `runs`) emit NO pageview and gate their `command` event through `telemetry.ReadSurfaceGate` (`internal/cli/telemetry.go` `trackReadSurface`): emit on state-fingerprint change, else at most once per 10 min, persisted at `<NM_HOME>/telemetry-gate.json` so per-poll CLI processes stay bounded. Never reintroduce the pageview+command double emit for read surfaces - `axi-status` alone was ~3M Umami rows (42% of all event rows). Mutation surfaces (`axi run/respond/abort`, run/step/fix/approval events) stay full-fidelity via `trackAxiSurface`/`trackCommand`.
-- Detailed performance evidence is LOCAL-ONLY: `agent_invocations` rows (one per agent invocation: purpose, session mode cold/started/resumed/fallback, truncated session-id hash, timing, exit/failure category, tokens) written by the executor's `perfRecordingAgent` wrapper, plus `runs.parked_ms` accumulated on every gate-wait end (and folded in by `RecoverStaleRuns` on crash). Steps label invocations via `RunOpts.Purpose`. Never store prompts/outputs/diffs there (shape-guard test `TestAgentInvocations_PrivacySafeShape`) and never send run IDs, paths, session identities, or per-invocation records to Umami - the only remote perf data is three bounded counts on the terminal `run finished` event (`addRunPerformanceSummary`). Read surfaces: `no-mistakes stats --agents` / `stats --run <id>`. The local/remote split is documented in `docs/src/content/docs/reference/environment.md`.
 
 **Rebase Base & Force-Push Safety (data-loss prevention)**
 
