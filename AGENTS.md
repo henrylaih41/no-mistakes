@@ -109,8 +109,8 @@ Safest local verification sequence after non-trivial changes:
 
 **Parked / Awaiting-Agent Signal**
 
-- `runs.awaiting_agent_since` is non-nil **iff** a step is actually parked at an `awaiting_approval`/`fix_review` gate: the executor sets it on gate entry, clears it when `waitForApproval` returns, and `RecoverStaleRuns` clears it on crash recovery. It is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
-- Tests: `internal/db/run_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
+- `runs.awaiting_agent_since` is non-nil **iff** a step is durably parked at an `awaiting_approval`, `fix_review`, `awaiting_agent_retry`, or `awaiting_triage` gate. Change the run marker and step status only through the bounded `EnterApprovalGate`/`ExitApprovalGate`/`FailApprovalGate` transactions; entry failures fail closed, and exit failures attempt terminal cleanup rather than leaving a live-looking gate. It is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
+- IPC run queries must pair each run with its steps through the `Get*Snapshot` helpers so readers cannot observe a torn gate transition. Regressions: `internal/db/gate_transition_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
 
 **Review-Loop Agent Sessions (`internal/pipeline/sessions.go`)**
 

@@ -157,8 +157,10 @@ branch, marking the remaining steps as skipped.
 A step can attach an auto-resolver to an approval gate so it clears without user action once the external condition that forced the pause resolves on its own - for example the CI idle-timeout or Devin manual-verify gate when the PR is merged or closed out-of-band.
 
 While the executor is paused at an approval, agent-retry, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
+The executor publishes that marker and the step's gate status in one bounded SQLite transaction; AXI-facing daemon queries likewise read the run and its steps from one snapshot, so clients cannot observe half of a gate transition.
 That timestamp is observability only and does not alter approval behavior.
-When the wait ends, it atomically clears the marker and adds the elapsed wall time to the run's local parked-time total, so a crash cannot leave that time undercounted.
+When the wait ends, one transaction moves the step to its next durable state, clears the marker, and adds the elapsed wall time to the run's local parked-time total.
+If gate entry cannot be committed, the executor fails closed instead of waiting at an invisible gate; if an exit cannot be committed, it attempts a terminal cleanup transaction that fails the step and run together and clears the marker.
 While a step is running or fixing, the executor also records the latest meaningful step activity from log lines and native subprocess lifecycle events.
 AXI renders that activity in `active_steps`, including a quiet prefix when no activity has arrived for longer than the configured `step_quiet_warning`.
 

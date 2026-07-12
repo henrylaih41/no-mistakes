@@ -368,11 +368,14 @@ func TestAxiParkedAwaitingAgentSignal(t *testing.T) {
 	if !strings.Contains(statusOut, "awaiting_agent: parked ") {
 		t.Errorf("axi status did not surface the parked signal while parked:\n%s", statusOut)
 	}
+	t.Logf("=== axi status while approval gate is parked ===\n%s", statusOut)
 
 	// Responding clears the signal as the run resumes and completes.
-	if out, err := h.RunInDir(fw, "axi", "respond", "--action", "approve"); err != nil {
-		t.Fatalf("axi respond approve: %v\n%s", err, out)
+	respondOut, err := h.RunInDir(fw, "axi", "respond", "--action", "approve")
+	if err != nil {
+		t.Fatalf("axi respond approve: %v\n%s", err, respondOut)
 	}
+	t.Logf("=== axi respond --action approve ===\n%s", respondOut)
 	completed := h.WaitForRun("feature/park", 60*time.Second)
 	if completed.Status != types.RunCompleted {
 		t.Fatalf("feature/park run status = %s, want completed", completed.Status)
@@ -392,6 +395,7 @@ func TestAxiParkedAwaitingAgentSignal(t *testing.T) {
 	if strings.Contains(doneStatus, "awaiting_agent") {
 		t.Errorf("axi status still shows the parked signal after completion:\n%s", doneStatus)
 	}
+	t.Logf("=== axi status after approval gate clears ===\n%s", doneStatus)
 }
 
 func TestAxiAttachCommandsIgnoreInvalidConfigWhenDaemonRunning(t *testing.T) {
