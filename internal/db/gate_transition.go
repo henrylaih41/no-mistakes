@@ -156,7 +156,7 @@ func (d *DB) ExitApprovalGate(parent context.Context, runID, stepResultID string
 		 WHERE id = ? AND run_id = ? AND status IN (?, ?, ?, ?)`,
 		status, errorValue, completedAt, activityAt, activity, stepResultID, runID,
 		types.StepStatusAwaitingApproval, types.StepStatusFixReview,
-		types.StepStatus("awaiting_agent_retry"), types.StepStatus("awaiting_triage"),
+		types.StepStatusAwaitingRetry, types.StepStatusAwaitingTriage,
 	)
 	if err != nil {
 		return fmt.Errorf("publish approval gate exit step status: %w", err)
@@ -194,10 +194,82 @@ func (d *DB) ExitApprovalGate(parent context.Context, runID, stepResultID string
 	return nil
 }
 
+// FailApprovalGate is the terminal fallback when an atomic gate exit fails.
+// It makes a second bounded transaction that fails the step and run together,
+// clears the marker, and preserves parked time. This prevents a failed run from
+// retaining a live-looking gate after the original exit transaction rolls back.
+func (d *DB) FailApprovalGate(parent context.Context, runID, stepResultID string, parkedMS int64, reason string) (err error) {
+	ctx, cancel := boundedGateContext(parent)
+	defer cancel()
+	if parkedMS < 0 {
+		parkedMS = 0
+	}
+
+	transitionID := newID()
+	started := time.Now()
+	fields := d.gateLogFields(transitionID, "fail", runID, stepResultID, types.StepStatusFailed)
+	defer func() {
+		fields = append(fields,
+			"parked_ms", parkedMS,
+			"elapsed_ms", time.Since(started).Milliseconds(),
+		)
+		if err != nil {
+			slog.Error("approval gate terminal cleanup failed", append(fields, "error", err)...)
+		}
+	}()
+
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin approval gate terminal cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	ts := now()
+	stepResult, err := tx.ExecContext(ctx,
+		`UPDATE step_results
+		 SET status = ?, error = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL
+		 WHERE id = ? AND run_id = ? AND status IN (?, ?, ?, ?)`,
+		types.StepStatusFailed, reason, ts, ts, "step failed: "+reason, stepResultID, runID,
+		types.StepStatusAwaitingApproval, types.StepStatusFixReview,
+		types.StepStatusAwaitingRetry, types.StepStatusAwaitingTriage,
+	)
+	if err != nil {
+		return fmt.Errorf("fail approval gate step: %w", err)
+	}
+	if err := requireOneRow(stepResult, "fail approval gate step"); err != nil {
+		return err
+	}
+
+	runResult, err := tx.ExecContext(ctx,
+		`UPDATE runs
+		 SET status = ?, error = ?, awaiting_agent_since = NULL,
+		     parked_ms = COALESCE(parked_ms, 0) + ?, updated_at = ?
+		 WHERE id = ?`,
+		types.RunFailed, reason, parkedMS, ts, runID,
+	)
+	if err != nil {
+		return fmt.Errorf("fail approval gate run: %w", err)
+	}
+	if err := requireOneRow(runResult, "fail approval gate run"); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit approval gate terminal cleanup: %w", err)
+	}
+	slog.Info("approval gate terminal cleanup committed", append(fields,
+		"parked_ms", parkedMS,
+		"run_rows_affected", 1,
+		"step_rows_affected", 1,
+		"elapsed_ms", time.Since(started).Milliseconds(),
+	)...)
+	return nil
+}
+
 func isApprovalGateStatus(status types.StepStatus) bool {
 	switch status {
 	case types.StepStatusAwaitingApproval, types.StepStatusFixReview,
-		types.StepStatus("awaiting_agent_retry"), types.StepStatus("awaiting_triage"):
+		types.StepStatusAwaitingRetry, types.StepStatusAwaitingTriage:
 		return true
 	default:
 		return false

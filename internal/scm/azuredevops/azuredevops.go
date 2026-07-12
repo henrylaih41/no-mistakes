@@ -51,6 +51,8 @@ type Host struct {
 	repo         string // repository name
 }
 
+var _ scm.Host = (*Host)(nil)
+
 // New builds a Host. cliAvailable reports whether the az binary is resolvable
 // on the caller's PATH. org is the organization URL; it is passed via
 // --organization to every command so they resolve the right organization
@@ -75,6 +77,22 @@ func (h *Host) Provider() scm.Provider { return scm.ProviderAzureDevOps }
 // gate on FailedCheckLogs and skip it.
 func (h *Host) Capabilities() scm.Capabilities {
 	return scm.Capabilities{MergeableState: true, FailedCheckLogs: false}
+}
+
+// GetReviewVerdict is unsupported on Azure DevOps. Capabilities().Reviews is
+// false, so callers should not invoke this review-loop method.
+func (h *Host) GetReviewVerdict(_ context.Context, _ int, _, _ string) (scm.ReviewVerdict, []scm.ReviewComment, error) {
+	return scm.VerdictNone, nil, scm.ErrUnsupported
+}
+
+// GetBotFindings is unsupported on Azure DevOps; see GetReviewVerdict.
+func (h *Host) GetBotFindings(_ context.Context, _ int, _, _ string) ([]scm.ReviewComment, error) {
+	return nil, scm.ErrUnsupported
+}
+
+// ReplyToReviewComment is unsupported on Azure DevOps; see GetReviewVerdict.
+func (h *Host) ReplyToReviewComment(_ context.Context, _ int, _ int64, _ string) error {
+	return scm.ErrUnsupported
 }
 
 // orgArgs scopes a command to the organization. The show/update/policy-list

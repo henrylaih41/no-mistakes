@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"regexp"
 	"strings"

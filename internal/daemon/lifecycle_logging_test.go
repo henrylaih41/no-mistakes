@@ -145,7 +145,7 @@ func TestRecoverOnStartupLogsOrphanWorktreeActorAndReason(t *testing.T) {
 	}
 	defer func() { removeGitWorktree = oldRemove }()
 
-	recoverOnStartup(d, p)
+	recoverOnStartup(d, p, NewRunManager(d, p, nil))
 
 	got := logs.String()
 	for _, want := range []string{
