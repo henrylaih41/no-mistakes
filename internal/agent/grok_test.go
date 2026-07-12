@@ -80,6 +80,48 @@ printf '%s' '{"ok":true}'
 	}
 }
 
+func TestGrokAgentRunUsesEnvelopeStructuredOutputWhenTextHasMultipleSummaries(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeGrok(t, dir, `#!/bin/sh
+printf '%s' '{"text":"{\"summary\":\"Investigating ...\"}{\"summary\":\"Implementing ...\"}{\"summary\":\"Done\"}","stopReason":"EndTurn","sessionId":"session-1","requestId":"request-1","structuredOutput":{"summary":"Done"}}'
+`, "@echo off\r\n<nul set /p ={\"text\":\"{\\\"summary\\\":\\\"Investigating ...\\\"}{\\\"summary\\\":\\\"Implementing ...\\\"}{\\\"summary\\\":\\\"Done\\\"}\",\"stopReason\":\"EndTurn\",\"sessionId\":\"session-1\",\"requestId\":\"request-1\",\"structuredOutput\":{\"summary\":\"Done\"}}\r\n")
+	a := &grokAgent{bin: bin}
+	result, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        dir,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`),
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if string(result.Output) != `{"summary":"Done"}` {
+		t.Fatalf("structured output = %s", result.Output)
+	}
+}
+
+func TestGrokAgentRunOnceEmitsRawOutputWhenEnvelopeStructuredOutputIsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	response := `{"text":"` + strings.Repeat("progress summary; ", 20) + `","structuredOutput":{"summary":42}}`
+	bin := writeFakeGrok(t, dir,
+		"#!/bin/sh\nprintf '%s' '"+response+"'\n",
+		"@echo off\r\n<nul set /p ="+response+"\r\n",
+	)
+	var chunks []string
+	a := &grokAgent{bin: bin}
+	_, err := a.runOnce(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        dir,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`),
+		OnChunk:    func(chunk string) { chunks = append(chunks, chunk) },
+	})
+	if err == nil {
+		t.Fatal("expected invalid structured output error")
+	}
+	if len(chunks) != 1 || chunks[0] != response {
+		t.Fatalf("chunks = %q, want complete raw response %q", chunks, response)
+	}
+}
+
 func TestGrokAgentRunUsesWorktreeCWD(t *testing.T) {
 	dir := t.TempDir()
 	binDir := t.TempDir()
