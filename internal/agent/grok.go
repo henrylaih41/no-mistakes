@@ -50,8 +50,12 @@ func (a *grokAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		return nil, fmt.Errorf("grok exited: %w", err)
 	}
 
-	result, err := finalizeGrokResult(strings.TrimSpace(stdout.String()), opts.JSONSchema, TokenUsage{})
+	text := strings.TrimSpace(stdout.String())
+	result, err := finalizeGrokResult(text, opts.JSONSchema, TokenUsage{})
 	if err != nil {
+		if opts.OnChunk != nil && text != "" {
+			opts.OnChunk(text)
+		}
 		return nil, err
 	}
 	if opts.OnChunk != nil && result.Text != "" {
