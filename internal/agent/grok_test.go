@@ -80,6 +80,25 @@ printf '%s' '{"ok":true}'
 	}
 }
 
+func TestGrokAgentRunUsesEnvelopeStructuredOutputWhenTextHasMultipleSummaries(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeGrok(t, dir, `#!/bin/sh
+printf '%s' '{"text":"{\"summary\":\"Investigating ...\"}{\"summary\":\"Implementing ...\"}{\"summary\":\"Done\"}","stopReason":"EndTurn","sessionId":"session-1","requestId":"request-1","structuredOutput":{"summary":"Done"}}'
+`, "@echo off\r\n<nul set /p ={\"text\":\"{\\\"summary\\\":\\\"Investigating ...\\\"}{\\\"summary\\\":\\\"Implementing ...\\\"}{\\\"summary\\\":\\\"Done\\\"}\",\"stopReason\":\"EndTurn\",\"sessionId\":\"session-1\",\"requestId\":\"request-1\",\"structuredOutput\":{\"summary\":\"Done\"}}\r\n")
+	a := &grokAgent{bin: bin}
+	result, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        dir,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`),
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if string(result.Output) != `{"summary":"Done"}` {
+		t.Fatalf("structured output = %s", result.Output)
+	}
+}
+
 func TestGrokAgentRunUsesWorktreeCWD(t *testing.T) {
 	dir := t.TempDir()
 	binDir := t.TempDir()
