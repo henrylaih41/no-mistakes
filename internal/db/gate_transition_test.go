@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -168,6 +170,44 @@ func TestEnterApprovalGate_RollsBackMarkerWhenStepUpdateFails(t *testing.T) {
 	}
 	if observedStep.DurationMS != nil {
 		t.Fatalf("duration_ms = %d after rollback, want nil", *observedStep.DurationMS)
+	}
+}
+
+func TestGateLogFieldsUsesDeviceAndInodeIdentity(t *testing.T) {
+	database, path := openGateTransitionTestDB(t)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := database.gateLogFields("transition", "enter", "run", "step", types.StepStatusFixReview)
+	var identity string
+	for i := 0; i+1 < len(fields); i += 2 {
+		if fields[i] == "db_identity" {
+			identity, _ = fields[i+1].(string)
+			break
+		}
+	}
+	if identity == "" {
+		t.Fatal("db_identity field is empty")
+	}
+
+	stat := reflect.ValueOf(info.Sys())
+	if stat.Kind() == reflect.Pointer {
+		stat = stat.Elem()
+	}
+	if stat.IsValid() && stat.Kind() == reflect.Struct {
+		dev := stat.FieldByName("Dev")
+		ino := stat.FieldByName("Ino")
+		if dev.IsValid() && ino.IsValid() && dev.CanInterface() && ino.CanInterface() {
+			want := fmt.Sprintf("%s|dev=%v|ino=%v", database.path, dev.Interface(), ino.Interface())
+			if identity != want {
+				t.Fatalf("db_identity = %q, want %q", identity, want)
+			}
+			return
+		}
+	}
+	if identity != database.path {
+		t.Fatalf("db_identity = %q, want path fallback %q", identity, database.path)
 	}
 }
 

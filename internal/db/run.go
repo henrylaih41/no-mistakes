@@ -296,33 +296,6 @@ func (d *DB) AddRunParkedDuration(id string, ms int64) error {
 	return nil
 }
 
-// AddRunParkedDuration accumulates parked-at-gate wall time onto a run's
-// total. Called by the executor when a gate wait ends.
-func (d *DB) AddRunParkedDuration(id string, ms int64) error {
-	if ms <= 0 {
-		return nil
-	}
-	_, err := d.sql.Exec(`UPDATE runs SET parked_ms = COALESCE(parked_ms, 0) + ?, updated_at = ? WHERE id = ?`, ms, now(), id)
-	if err != nil {
-		return fmt.Errorf("add run parked duration: %w", err)
-	}
-	return nil
-}
-
-func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
-	if ms < 0 {
-		ms = 0
-	}
-	_, err := d.sql.Exec(
-		`UPDATE runs SET awaiting_agent_since = NULL, parked_ms = COALESCE(parked_ms, 0) + ?, updated_at = ? WHERE id = ?`,
-		ms, now(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("complete run awaiting agent: %w", err)
-	}
-	return nil
-}
-
 // RecoverStaleRuns marks any runs stuck in pending/running status as failed
 // and fails any in-progress steps. This is called at daemon startup to clean
 // up after a previous crash. Returns the number of recovered runs.

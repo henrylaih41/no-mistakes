@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -301,7 +302,7 @@ func (d *DB) gateLogFields(transitionID, phase, runID, stepResultID string, stat
 	if path != "" {
 		canonicalRoot = filepath.Dir(path)
 		if info, err := os.Stat(path); err == nil {
-			identity = fmt.Sprintf("%s|%v", path, info.Sys())
+			identity = stableFileIdentity(path, info)
 		}
 	}
 	return []any{
@@ -315,6 +316,22 @@ func (d *DB) gateLogFields(transitionID, phase, runID, stepResultID string, stat
 		"step_result", stepResultID,
 		"step_status", status,
 	}
+}
+
+func stableFileIdentity(path string, info os.FileInfo) string {
+	stat := reflect.ValueOf(info.Sys())
+	if stat.Kind() == reflect.Pointer {
+		stat = stat.Elem()
+	}
+	if !stat.IsValid() || stat.Kind() != reflect.Struct {
+		return path
+	}
+	dev := stat.FieldByName("Dev")
+	ino := stat.FieldByName("Ino")
+	if !dev.IsValid() || !ino.IsValid() || !dev.CanInterface() || !ino.CanInterface() {
+		return path
+	}
+	return fmt.Sprintf("%s|dev=%v|ino=%v", path, dev.Interface(), ino.Interface())
 }
 
 // GetRunSnapshot returns one run and all of its steps in a single read
