@@ -94,7 +94,7 @@ effects, so exiting should not be too easy once those side effects exist.
 
 ## Agent suggestions
 
-When you leave branch name or commit subject blank, the wizard invokes the configured agent (global or per-repo `agent` setting) to produce a suggestion. The agent sees the local diff and returns:
+When you leave branch name or commit subject blank, the wizard invokes the configured agent (global or per-repo `agent` setting, including fallback lists) to produce a suggestion. The agent sees the local diff and returns:
 
 - A kebab-case branch name prefixed with a type (`feat/`, `fix/`, `chore/`, etc.)
 - A conventional-commit subject line, using `feat` or `fix` for user-facing product impact so release automation can pick it up
@@ -107,9 +107,10 @@ The wizard requires:
 
 - The gate to be initialized (`no-mistakes init` has run).
 - A clean enough state to commit and push.
-- A configured native agent binary available on `PATH` (or via `agent_path_override`), or `acpx` available on `PATH` (or via `acpx_path`) for `agent: acp:<target>`, only when the wizard needs to suggest a branch name or commit subject.
+- A configured native agent binary available on `PATH` (or via `agent_path_override`), or `acpx` available on `PATH` (or via `acpx_path`) for `agent: acp:<target>`, only when the wizard needs to suggest a branch name or commit subject. For an ordered fallback list, at least one configured entry must be available.
   If you already have a branch and clean working tree, or you enter those values yourself in the interactive flow, the wizard can continue without agent suggestions.
 
 If any of those are missing, the wizard reports the problem and exits.
-`no-mistakes doctor` is the fastest way to check native agent availability.
-For ACP targets, verify `acpx_path` yourself.
+`no-mistakes doctor` is the fastest way to check whether the configured global runner can start a validation gate.
+For ACP targets, it verifies that `acpx_path` resolves but does not invoke the target or test its credentials.
+The wizard can proceed without an agent when it does not need a suggestion, but the pushed validation gate still fails before its first step unless the effective pipeline-agent configuration resolves to a runnable runner.

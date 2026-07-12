@@ -23,6 +23,12 @@ func TestLoadGlobal_Defaults(t *testing.T) {
 	if cfg.CITimeout != DefaultCITimeout {
 		t.Errorf("ci_timeout = %v, want %v", cfg.CITimeout, DefaultCITimeout)
 	}
+	if cfg.StepQuietWarning != DefaultStepQuietWarning {
+		t.Errorf("step_quiet_warning = %v, want %v", cfg.StepQuietWarning, DefaultStepQuietWarning)
+	}
+	if cfg.DaemonConnectTimeout != DefaultDaemonConnectTimeout {
+		t.Errorf("daemon_connect_timeout = %v, want %v", cfg.DaemonConnectTimeout, DefaultDaemonConnectTimeout)
+	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("log_level = %q, want %q", cfg.LogLevel, "info")
 	}
@@ -45,6 +51,8 @@ func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
 	for _, want := range []string{
 		"agent: auto",
 		"ci_timeout:",
+		"step_quiet_warning:",
+		"daemon_connect_timeout:",
 		"log_level: info",
 		"# agent_path_override:",
 	} {
@@ -70,8 +78,30 @@ func TestEnsureDefaultGlobalConfig_CreatedConfigIsLoadable(t *testing.T) {
 	if cfg.CITimeout != DefaultCITimeout {
 		t.Errorf("ci_timeout = %v, want %v", cfg.CITimeout, DefaultCITimeout)
 	}
+	if cfg.StepQuietWarning != DefaultStepQuietWarning {
+		t.Errorf("step_quiet_warning = %v, want %v", cfg.StepQuietWarning, DefaultStepQuietWarning)
+	}
+	if cfg.DaemonConnectTimeout != DefaultDaemonConnectTimeout {
+		t.Errorf("daemon_connect_timeout = %v, want %v", cfg.DaemonConnectTimeout, DefaultDaemonConnectTimeout)
+	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("log_level = %q, want %q", cfg.LogLevel, "info")
+	}
+}
+
+func TestLoadGlobal_StepQuietWarning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("step_quiet_warning: 90s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if cfg.StepQuietWarning != 90*time.Second {
+		t.Fatalf("step_quiet_warning = %v, want 90s", cfg.StepQuietWarning)
 	}
 }
 
@@ -150,6 +180,7 @@ agent_path_override:
   claude: /usr/local/bin/claude
   codex: /opt/codex
 ci_timeout: "2h30m"
+daemon_connect_timeout: "4s"
 log_level: "debug"
 `
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
@@ -166,6 +197,9 @@ log_level: "debug"
 	if cfg.CITimeout != 2*time.Hour+30*time.Minute {
 		t.Errorf("ci_timeout = %v, want %v", cfg.CITimeout, 2*time.Hour+30*time.Minute)
 	}
+	if cfg.DaemonConnectTimeout != 4*time.Second {
+		t.Errorf("daemon_connect_timeout = %v, want 4s", cfg.DaemonConnectTimeout)
+	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("log_level = %q, want %q", cfg.LogLevel, "debug")
 	}
@@ -174,6 +208,54 @@ log_level: "debug"
 	}
 	if cfg.AgentPathOverride["codex"] != "/opt/codex" {
 		t.Errorf("codex path = %q, want %q", cfg.AgentPathOverride["codex"], "/opt/codex")
+	}
+}
+
+func TestLoadGlobal_AgentAcceptsList(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `agent: [codex, claude]
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentCodex {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentCodex)
+	}
+	want := []types.AgentName{types.AgentCodex, types.AgentClaude}
+	if len(cfg.Agents) != len(want) {
+		t.Fatalf("agents = %v, want %v", cfg.Agents, want)
+	}
+	for i := range want {
+		if cfg.Agents[i] != want[i] {
+			t.Fatalf("agents = %v, want %v", cfg.Agents, want)
+		}
+	}
+}
+
+func TestLoadGlobal_AgentStringPreservesSingleAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `agent: codex
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentCodex {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentCodex)
+	}
+	if len(cfg.Agents) != 1 || cfg.Agents[0] != types.AgentCodex {
+		t.Fatalf("agents = %v, want [codex]", cfg.Agents)
 	}
 }
 
@@ -196,6 +278,9 @@ func TestLoadGlobal_PartialOverride(t *testing.T) {
 	}
 	if cfg.CITimeout != DefaultCITimeout {
 		t.Errorf("ci_timeout = %v, want %v (should be default)", cfg.CITimeout, DefaultCITimeout)
+	}
+	if cfg.DaemonConnectTimeout != DefaultDaemonConnectTimeout {
+		t.Errorf("daemon_connect_timeout = %v, want %v (should be default)", cfg.DaemonConnectTimeout, DefaultDaemonConnectTimeout)
 	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("log_level = %q, want %q (should be default)", cfg.LogLevel, "info")
@@ -225,6 +310,28 @@ func TestLoadGlobal_InvalidDuration(t *testing.T) {
 	_, err := LoadGlobal(path)
 	if err == nil {
 		t.Fatal("expected error for invalid duration")
+	}
+}
+
+func TestLoadGlobal_InvalidDaemonConnectTimeout(t *testing.T) {
+	cases := []string{
+		`daemon_connect_timeout: "not-a-duration"`,
+		`daemon_connect_timeout: "0s"`,
+		`daemon_connect_timeout: "-1s"`,
+	}
+	for _, data := range cases {
+		t.Run(data, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := LoadGlobal(path)
+			if err == nil {
+				t.Fatal("expected error for invalid daemon_connect_timeout")
+			}
+		})
 	}
 }
 
@@ -299,7 +406,7 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 		t.Fatalf("defaultConfigYAML is not valid YAML: %v", err)
 	}
 
-	if raw.Agent != types.AgentAuto {
+	if len(raw.Agent) != 1 || raw.Agent[0] != types.AgentAuto {
 		t.Errorf("YAML agent = %q, Go default = %q", raw.Agent, types.AgentAuto)
 	}
 	d, err := time.ParseDuration(raw.CITimeout)
@@ -309,8 +416,18 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 	if d != DefaultCITimeout {
 		t.Errorf("YAML ci_timeout = %v, Go default = %v", d, DefaultCITimeout)
 	}
+	d, err = time.ParseDuration(raw.DaemonConnectTimeout)
+	if err != nil {
+		t.Fatalf("YAML daemon_connect_timeout %q is not a valid duration: %v", raw.DaemonConnectTimeout, err)
+	}
+	if d != DefaultDaemonConnectTimeout {
+		t.Errorf("YAML daemon_connect_timeout = %v, Go default = %v", d, DefaultDaemonConnectTimeout)
+	}
 	if raw.LogLevel != "info" {
 		t.Errorf("YAML log_level = %q, Go default = %q", raw.LogLevel, "info")
+	}
+	if raw.SessionReuse == nil || !*raw.SessionReuse {
+		t.Errorf("YAML session_reuse = %v, Go default = true", raw.SessionReuse)
 	}
 	defaults := autoFixDefaults()
 	if raw.AutoFix.Lint == nil || *raw.AutoFix.Lint != defaults.Lint {

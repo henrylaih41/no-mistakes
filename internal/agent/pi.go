@@ -23,6 +23,8 @@ type piAgent struct {
 
 func (a *piAgent) Name() string { return "pi" }
 
+func (a *piAgent) ReportsAgentAttempts() bool { return true }
+
 func (a *piAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, "pi", opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
@@ -36,26 +38,20 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Env = gitSafeEnv(opts.CWD)
-	// Run in a dedicated process group so cancelling ctx reaps the pi CLI and
-	// any subprocesses it spawns, not just the direct child.
 	shellenv.ConfigureShellCommand(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pi stdin pipe: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("pi stdout pipe: %w", err)
-	}
-	stderrR, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("pi stderr pipe: %w", err)
-	}
 
-	if err := cmd.Start(); err != nil {
+	started, err := startNativeAgentCommand(cmd)
+	if err != nil {
 		return nil, fmt.Errorf("pi start: %w", err)
 	}
+	defer started.closePipes()
+	pid := started.pid()
+	emitAgentStarted(opts, "pi", pid)
 
 	prompt := buildPiPrompt(opts.Prompt, opts.JSONSchema)
 	go func() {
@@ -68,31 +64,42 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	stderrWG.Add(1)
 	go func() {
 		defer stderrWG.Done()
-		stderrBuf, _ = io.ReadAll(stderrR)
+		stderrBuf, _ = io.ReadAll(started.stderr)
 	}()
 
 	pp := &piParser{onChunk: opts.OnChunk}
-	if err := pp.parse(ctx, stdout); err != nil {
+	if err := pp.parse(ctx, started.stdout); err != nil {
+		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("pi parse events: %w", err)
+		retErr := fmt.Errorf("pi parse events: %w", err)
+		emitAgentExited(opts, "pi", pid, retErr)
+		return nil, retErr
 	}
 
+	waitErr := started.wait()
 	stderrWG.Wait()
-	if err := cmd.Wait(); err != nil {
+	if waitErr != nil {
 		stderr := strings.TrimSpace(string(stderrBuf))
 		if stderr != "" {
-			return nil, fmt.Errorf("pi exited: %w: %s", err, stderr)
+			retErr := fmt.Errorf("pi exited: %w: %s", waitErr, stderr)
+			emitAgentExited(opts, "pi", pid, retErr)
+			return nil, retErr
 		}
-		return nil, fmt.Errorf("pi exited: %w", err)
+		retErr := fmt.Errorf("pi exited: %w", waitErr)
+		emitAgentExited(opts, "pi", pid, retErr)
+		return nil, retErr
 	}
 
 	if pp.assistantError != "" {
-		return nil, fmt.Errorf("pi reported error: %s", pp.assistantError)
+		retErr := fmt.Errorf("pi reported error: %s", pp.assistantError)
+		emitAgentExited(opts, "pi", pid, retErr)
+		return nil, retErr
 	}
 
 	text := pp.finalText()
-	return finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
+	res, err := finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
+	emitAgentExited(opts, "pi", pid, err)
+	return res, err
 }
 
 // buildArgs returns the Pi argv for one invocation. User extras come first

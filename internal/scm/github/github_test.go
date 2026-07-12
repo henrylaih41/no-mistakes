@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -42,6 +43,47 @@ func TestRepoSlug(t *testing.T) {
 	}
 }
 
+func TestHostPrefixedSlug(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// github.com inputs keep the plain owner/name format.
+		{"github.com https", "https://github.com/test/repo", "test/repo"},
+		{"github.com https with .git suffix", "https://github.com/test/repo.git", "test/repo"},
+		{"github.com pr url", "https://github.com/test/repo/pull/42", "test/repo"},
+		{"github.com ssh scp form", "git@github.com:test/repo.git", "test/repo"},
+		{"github.com ssh url form", "ssh://git@github.com/test/repo.git", "test/repo"},
+		{"github.com https with port", "https://github.com:8443/test/repo", "test/repo"},
+		{"github.com mixed case host", "https://GitHub.com/test/repo.git", "test/repo"},
+		{"github.com trailing slash", "https://github.com/test/repo/", "test/repo"},
+
+		// GitHub Enterprise Server inputs get the host prefix gh requires.
+		{"ghe https", "https://bbgithub.dev.bloomberg.com/org/repo", "bbgithub.dev.bloomberg.com/org/repo"},
+		{"ghe https with .git suffix", "https://bbgithub.dev.bloomberg.com/org/repo.git", "bbgithub.dev.bloomberg.com/org/repo"},
+		{"ghe ssh scp form", "git@bbgithub.dev.bloomberg.com:org/repo.git", "bbgithub.dev.bloomberg.com/org/repo"},
+		{"ghe ssh url form", "ssh://git@bbgithub.dev.bloomberg.com/org/repo.git", "bbgithub.dev.bloomberg.com/org/repo"},
+		{"ghe pr url", "https://bbgithub.dev.bloomberg.com/org/repo/pull/42", "bbgithub.dev.bloomberg.com/org/repo"},
+		{"ghe https with port", "https://bbgithub.dev.bloomberg.com:8443/org/repo.git", "bbgithub.dev.bloomberg.com/org/repo"},
+		{"ghe trailing slash", "https://bbgithub.dev.bloomberg.com/org/repo/", "bbgithub.dev.bloomberg.com/org/repo"},
+
+		// Empty/malformed inputs return "" so the --repo flag is omitted.
+		{"empty", "", ""},
+		{"host only ghe", "https://bbgithub.dev.bloomberg.com/", ""},
+		{"owner only ghe", "https://bbgithub.dev.bloomberg.com/onlyowner", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HostPrefixedSlug(tc.in); got != tc.want {
+				t.Fatalf("HostPrefixedSlug(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGetChecksPassesRepoFlag(t *testing.T) {
 	t.Parallel()
 
@@ -49,7 +91,7 @@ func TestGetChecksPassesRepoFlag(t *testing.T) {
 		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt": {
 			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass"}]` + "\n",
 		},
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
 	if err != nil {
@@ -67,7 +109,7 @@ func TestGetPRStatePassesRepoFlag(t *testing.T) {
 		"gh pr view 123 --repo test/repo --json state --jq .state": {
 			stdout: "MERGED\n",
 		},
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	state, err := host.GetPRState(context.Background(), &scm.PR{Number: "123"})
 	if err != nil {
@@ -78,6 +120,52 @@ func TestGetPRStatePassesRepoFlag(t *testing.T) {
 	}
 }
 
+func TestCreatePRStreamsBodyThroughStdin(t *testing.T) {
+	t.Parallel()
+
+	const body = "## What Changed\n\n- keep generated pull request bodies postable"
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr create --head feature/body-cap --base main --repo test/repo --title fix: cap body --body-file -": {
+			stdout:    "https://github.com/test/repo/pull/42\n",
+			wantStdin: body,
+		},
+	}), nil, "", "test/repo")
+
+	pr, err := host.CreatePR(context.Background(), "feature/body-cap", "main", scm.PRContent{
+		Title: "fix: cap body",
+		Body:  body,
+	})
+	if err != nil {
+		t.Fatalf("CreatePR() error = %v", err)
+	}
+	if pr == nil || pr.Number != "42" {
+		t.Fatalf("CreatePR() PR = %+v, want #42", pr)
+	}
+}
+
+func TestUpdatePRStreamsBodyThroughStdin(t *testing.T) {
+	t.Parallel()
+
+	const body = "## What Changed\n\n- update existing pull request bodies without long argv"
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr edit 42 --repo test/repo --title fix: cap body --body-file -": {
+			wantStdin: body,
+		},
+	}), nil, "", "test/repo")
+
+	pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42"}
+	updated, err := host.UpdatePR(context.Background(), pr, scm.PRContent{
+		Title: "fix: cap body",
+		Body:  body,
+	})
+	if err != nil {
+		t.Fatalf("UpdatePR() error = %v", err)
+	}
+	if updated != pr {
+		t.Fatalf("UpdatePR() = %+v, want original PR", updated)
+	}
+}
+
 func TestGetChecksFallsBackToStateWhenBucketMissing(t *testing.T) {
 	t.Parallel()
 
@@ -85,7 +173,7 @@ func TestGetChecksFallsBackToStateWhenBucketMissing(t *testing.T) {
 		"gh pr checks 123 --json name,state,bucket,completedAt": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":""},{"name":"tests","state":"PENDING","bucket":""}]` + "\n",
 		},
-	}), nil, "")
+	}), nil, "", "")
 
 	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
 	if err != nil {
@@ -109,7 +197,7 @@ func TestGetChecksParsesCompletedAt(t *testing.T) {
 		"gh pr checks 123 --json name,state,bucket,completedAt": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":"fail","completedAt":"2026-04-24T04:15:00Z"},{"name":"tests","state":"SUCCESS","bucket":"pass","completedAt":"not-a-time"}]` + "\n",
 		},
-	}), nil, "")
+	}), nil, "", "")
 
 	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
 	if err != nil {
@@ -144,7 +232,7 @@ func TestFetchFailedCheckLogsSelectsMatchingRunForHeadSHA(t *testing.T) {
 		"gh run view 102 --log-failed": {
 			stdout: "lint failed\n",
 		},
-	}), nil, "")
+	}), nil, "", "")
 
 	logs, err := host.FetchFailedCheckLogs(context.Background(), &scm.PR{Number: "123"}, "feature", "abc123", []string{"lint"})
 	if err != nil {
@@ -162,7 +250,7 @@ func TestFindPRFiltersByBaseBranch(t *testing.T) {
 		"gh pr list --head feature/refactor --base release/1.0 --state open --json number,url": {
 			stdout: `[{"number":42,"url":"https://github.example.com/org/repo/pull/42"}]` + "\n",
 		},
-	}), nil, "")
+	}), nil, "", "")
 
 	pr, err := host.FindPR(context.Background(), "feature/refactor", "release/1.0")
 	if err != nil {
@@ -194,7 +282,7 @@ func TestFindPRForkUsesBareHeadAndFiltersOwner(t *testing.T) {
 				`{"number":42,"url":"https://github.com/parent/repo/pull/42","headRefName":"feature/refactor","headRepositoryOwner":{"login":"fork-owner"}}` +
 				`]` + "\n",
 		},
-	}), nil, "parent/repo", "fork-owner/repo")
+	}), nil, "", "parent/repo", "fork-owner/repo")
 
 	pr, err := host.FindPR(context.Background(), branch, "main")
 	if err != nil {
@@ -219,7 +307,7 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 			stderr: "api unavailable\n",
 			code:   1,
 		},
-	}), nil, "")
+	}), nil, "", "")
 
 	pr, err := host.FindPR(context.Background(), "feature/refactor", "main")
 	if err == nil {
@@ -349,7 +437,7 @@ func TestGetBotFindingsReturnsOnlyLiveBotThreads(t *testing.T) {
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...),
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -403,7 +491,7 @@ func TestGetReviewVerdictChangesRequested(t *testing.T) {
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...)}), nil, "test/repo")
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...)}), nil, "", "test/repo")
 
 	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -475,7 +563,7 @@ func TestGetReviewVerdictReadsAllReviewPages(t *testing.T) {
 			stdout: page1 + page2,
 		},
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -500,7 +588,7 @@ func TestGetReviewVerdictHonorsChangesRequestedState(t *testing.T) {
 		// CHANGES_REQUESTED state can be driving the verdict.
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
 			thread(false, false, botUser, "a.go", 1, "nit: please follow up here"),
-		)}), nil, "test/repo")
+		)}), nil, "", "test/repo")
 
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -525,7 +613,7 @@ func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
 			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	verdict, _, err := approvedLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -542,7 +630,7 @@ func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
 			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T02:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	verdict2, _, err := changesLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -571,7 +659,7 @@ func TestGetReviewVerdictConvergesWhenSevereThreadsAddressed(t *testing.T) {
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
 			thread(false, true, botUser, "internal/old/outdated.go", 3, "🔴 **Outdated severe finding**"),
 			thread(true, false, botUser, "internal/old/resolved.go", 5, "🔴 **Resolved severe finding**"),
-		)}), nil, "test/repo")
+		)}), nil, "", "test/repo")
 
 	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -663,7 +751,7 @@ func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
 					stdout: fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"body":%q,"user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, tt.commit, tt.body) + "\n",
 				},
 				graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(tt.threads...),
-			}), nil, "test/repo")
+			}), nil, "", "test/repo")
 
 			verdict, _, err := host.GetReviewVerdict(context.Background(), 7, tt.head, botUser)
 			if err != nil {
@@ -759,7 +847,7 @@ func TestGetReviewVerdictFindingsBodyWithReadErrorNeedsManualReview(t *testing.T
 		},
 		// The reviewThreads read fails (non-zero exit) -> GetBotFindings errors.
 		graphqlThreadsKey("test/repo", 7): {stderr: "graphql: rate limited\n", code: 1},
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -782,7 +870,7 @@ func TestGetReviewVerdictPendingWhenHeadNotYetReviewed(t *testing.T) {
 			stdout: `[{"state":"COMMENTED","commit_id":"0000oldsha","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
 		// No live review threads remain on the head.
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse()}), nil, "test/repo")
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse()}), nil, "", "test/repo")
 
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -801,7 +889,7 @@ func TestGetReviewVerdictNoneWhenBotNeverReviewed(t *testing.T) {
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"APPROVED","commit_id":"abc123def","user":{"login":"some-human"}}]` + "\n",
 		},
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -822,7 +910,7 @@ func TestGetReviewVerdictEmptyHeadSHAIsNotYetReviewed(t *testing.T) {
 	t.Parallel()
 
 	for _, head := range []string{"", "   "} {
-		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "test/repo")
+		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "", "test/repo")
 		verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, head, botUser)
 		if err != nil {
 			t.Fatalf("GetReviewVerdict(head=%q) error = %v", head, err)
@@ -844,7 +932,7 @@ func TestGetBotFindingsEmptyHeadSHAIsFailSafe(t *testing.T) {
 	t.Parallel()
 
 	for _, head := range []string{"", "   "} {
-		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "test/repo")
+		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "", "test/repo")
 
 		findings, err := host.GetBotFindings(context.Background(), 7, head, botUser)
 		if err != nil {
@@ -879,7 +967,7 @@ func TestGetBotFindingsCollectsAllLiveThreadsAndSevereFlipsVerdict(t *testing.T)
 		"gh api repos/test/repo/pulls/7/reviews --paginate": {
 			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
 		},
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(nodes...)}), nil, "test/repo")
+		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(nodes...)}), nil, "", "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -941,7 +1029,7 @@ func TestGetReviewVerdictPaginatesReviewThreads(t *testing.T) {
 		},
 		graphqlThreadsKey("test/repo", 7):            reviewThreadsPage(true, "CURSOR1", page1...),
 		graphqlThreadsKey("test/repo", 7, "CURSOR1"): reviewThreadsPage(false, "", page2...),
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -969,7 +1057,7 @@ func TestGetBotFindingsPopulatesCommentID(t *testing.T) {
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
 			threadID(987654321, false, false, botUser, "a.go", 3, "🔴 **bug**"),
-		)}), nil, "test/repo")
+		)}), nil, "", "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -992,7 +1080,7 @@ func TestReplyToReviewComment(t *testing.T) {
 	key := "gh api repos/test/repo/pulls/7/comments/4242/replies -f body=" + body
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		key: {stdout: `{"id":1}` + "\n"},
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	if err := host.ReplyToReviewComment(context.Background(), 7, 4242, body); err != nil {
 		t.Fatalf("ReplyToReviewComment() error = %v", err)
@@ -1005,7 +1093,7 @@ func TestReplyToReviewCommentSurfacesError(t *testing.T) {
 	t.Parallel()
 
 	// No canned response => the factory returns a non-zero exit for the call.
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "test/repo")
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "", "test/repo")
 	if err := host.ReplyToReviewComment(context.Background(), 7, 4242, "body"); err == nil {
 		t.Fatal("expected an error when the gh api replies call fails")
 	}
@@ -1058,7 +1146,7 @@ func TestGetBotFindingsRealGraphQLLogin(t *testing.T) {
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
 			thread(false, false, botSlug, "internal/batch/download.go", 42, "🔴 **crash on empty manifest**"),
 		),
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -1082,7 +1170,7 @@ func TestGetReviewVerdictSlugFormConfig(t *testing.T) {
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
 			thread(false, false, botSlug, "internal/batch/download.go", 42, "🔴 **crash**"),
 		),
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botSlug)
 	if err != nil {
@@ -1106,7 +1194,7 @@ func TestGetBotFindingsRejectsHuman(t *testing.T) {
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
 			thread(false, false, "some-human", "internal/human/note.go", 9, "🔴 **human high severity**"),
 		),
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -1180,10 +1268,42 @@ func TestActorKind(t *testing.T) {
 	}
 }
 
+func TestAvailableScopesAuthToConfiguredHost(t *testing.T) {
+	t.Parallel()
+
+	// With a known host, the auth check must be scoped via --hostname so a
+	// stale credential on some other configured gh host (e.g. github.com vs
+	// a GHE instance) cannot make this repo look unauthenticated. The
+	// unscoped form is treated as a failure here to prove the scoped form
+	// is the one actually invoked.
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh auth status --hostname ghe.example.com": {},
+		"gh auth status": {stderr: "github.com: token invalid\n", code: 1},
+	}), func() bool { return true }, "ghe.example.com", "")
+
+	if err := host.Available(context.Background()); err != nil {
+		t.Fatalf("Available() error = %v, want nil (scoped auth should pass)", err)
+	}
+}
+
+func TestAvailableFallsBackToUnscopedAuthWhenHostUnknown(t *testing.T) {
+	t.Parallel()
+
+	// No host -> behave as before: a bare `gh auth status`.
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh auth status": {},
+	}), func() bool { return true }, "", "")
+
+	if err := host.Available(context.Background()); err != nil {
+		t.Fatalf("Available() error = %v, want nil", err)
+	}
+}
+
 type githubTestResponse struct {
-	stdout string
-	stderr string
-	code   int
+	stdout    string
+	stderr    string
+	wantStdin string
+	code      int
 }
 
 func githubTestCmdFactory(responses map[string]githubTestResponse) CmdFactory {
@@ -1198,6 +1318,7 @@ func githubTestCmdFactory(responses map[string]githubTestResponse) CmdFactory {
 			"GITHUB_TEST_HELPER=1",
 			"GITHUB_TEST_STDOUT="+response.stdout,
 			"GITHUB_TEST_STDERR="+response.stderr,
+			"GITHUB_TEST_WANT_STDIN="+response.wantStdin,
 			fmt.Sprintf("GITHUB_TEST_EXIT_CODE=%d", response.code),
 		)
 		return cmd
@@ -1209,6 +1330,17 @@ func TestGitHubHelperProcess(t *testing.T) {
 		return
 	}
 
+	if want := os.Getenv("GITHUB_TEST_WANT_STDIN"); want != "" {
+		got, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read stdin: %v", err)
+			os.Exit(1)
+		}
+		if string(got) != want {
+			fmt.Fprintf(os.Stderr, "stdin = %q, want %q", string(got), want)
+			os.Exit(1)
+		}
+	}
 	if _, err := fmt.Fprint(os.Stdout, os.Getenv("GITHUB_TEST_STDOUT")); err != nil {
 		os.Exit(1)
 	}
@@ -1259,7 +1391,7 @@ func TestGetBotFindingsFiltersStaleThreadsByHeadSHA(t *testing.T) {
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(threads...),
-	}), nil, "test/repo")
+	}), nil, "", "test/repo")
 
 	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
 	if err != nil {
@@ -1332,7 +1464,7 @@ func TestGetBotFindingsHeadSHANormalization(t *testing.T) {
 			}
 			host := New(githubTestCmdFactory(map[string]githubTestResponse{
 				graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(threads...),
-			}), nil, "test/repo")
+			}), nil, "", "test/repo")
 
 			findings, err := host.GetBotFindings(context.Background(), 7, tt.argSHA, botUser)
 			if err != nil {

@@ -24,6 +24,8 @@ type copilotAgent struct {
 
 func (a *copilotAgent) Name() string { return "copilot" }
 
+func (a *copilotAgent) ReportsAgentAttempts() bool { return true }
+
 func (a *copilotAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, "copilot", opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
@@ -39,61 +41,64 @@ func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
-	// Run in a dedicated process group so cancelling ctx reaps the copilot CLI
-	// and any subprocesses it spawns (git, build tools), not just the direct
-	// child. Otherwise they survive and hold the worktree locked.
 	shellenv.ConfigureShellCommand(cmd)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("copilot stdout pipe: %w", err)
-	}
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
-	stderrR, err := cmd.StderrPipe()
+	started, err := startNativeAgentCommand(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("copilot stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("copilot start: %w", err)
 	}
+	defer started.closePipes()
+	pid := started.pid()
+	emitAgentStarted(opts, "copilot", pid)
 
 	stderrWG.Add(1)
 	go func() {
 		defer stderrWG.Done()
-		stderrBuf, _ = io.ReadAll(stderrR)
+		stderrBuf, _ = io.ReadAll(started.stderr)
 	}()
 
 	var usage TokenUsage
 	var messages []string
 	var copilotErr string
 	exitCode := 0
-	if err := parseCopilotEvents(ctx, stdout, opts.OnChunk, &usage, &messages, &copilotErr, &exitCode); err != nil {
+	if err := parseCopilotEvents(ctx, started.stdout, opts.OnChunk, &usage, &messages, &copilotErr, &exitCode); err != nil {
+		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("copilot parse events: %w", err)
+		retErr := fmt.Errorf("copilot parse events: %w", err)
+		emitAgentExited(opts, "copilot", pid, retErr)
+		return nil, retErr
 	}
 
+	waitErr := started.wait()
 	stderrWG.Wait()
-	waitErr := cmd.Wait()
 
 	detail := copilotErrorDetail(copilotErr, string(stderrBuf))
 	if waitErr != nil {
 		if detail != "" {
-			return nil, fmt.Errorf("copilot exited: %w: %s", waitErr, detail)
+			retErr := fmt.Errorf("copilot exited: %w: %s", waitErr, detail)
+			emitAgentExited(opts, "copilot", pid, retErr)
+			return nil, retErr
 		}
-		return nil, fmt.Errorf("copilot exited: %w", waitErr)
+		retErr := fmt.Errorf("copilot exited: %w", waitErr)
+		emitAgentExited(opts, "copilot", pid, retErr)
+		return nil, retErr
 	}
 	if exitCode != 0 {
 		if detail != "" {
-			return nil, fmt.Errorf("copilot reported exit code %d: %s", exitCode, detail)
+			retErr := fmt.Errorf("copilot reported exit code %d: %s", exitCode, detail)
+			emitAgentExited(opts, "copilot", pid, retErr)
+			return nil, retErr
 		}
-		return nil, fmt.Errorf("copilot reported exit code %d", exitCode)
+		retErr := fmt.Errorf("copilot reported exit code %d", exitCode)
+		emitAgentExited(opts, "copilot", pid, retErr)
+		return nil, retErr
 	}
 
-	return finalizeCopilotResult(messages, opts.JSONSchema, usage)
+	res, err := finalizeCopilotResult(messages, opts.JSONSchema, usage)
+	emitAgentExited(opts, "copilot", pid, err)
+	return res, err
 }
 
 // finalizeCopilotResult converts the assistant messages emitted during a run

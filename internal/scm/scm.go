@@ -7,16 +7,18 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"gopkg.in/yaml.v3"
 )
 
 type Provider string
 
 const (
-	ProviderGitHub    Provider = "github"
-	ProviderGitLab    Provider = "gitlab"
-	ProviderBitbucket Provider = "bitbucket"
-	ProviderUnknown   Provider = "unknown"
+	ProviderGitHub      Provider = "github"
+	ProviderGitLab      Provider = "gitlab"
+	ProviderBitbucket   Provider = "bitbucket"
+	ProviderAzureDevOps Provider = "azuredevops"
+	ProviderUnknown     Provider = "unknown"
 )
 
 func DetectProvider(url string) Provider {
@@ -28,6 +30,10 @@ func DetectProvider(url string) Provider {
 		return ProviderGitLab
 	case strings.Contains(lower, "bitbucket.org"):
 		return ProviderBitbucket
+	case strings.Contains(lower, "dev.azure.com") || strings.Contains(lower, "visualstudio.com"):
+		// Covers dev.azure.com, ssh.dev.azure.com, {org}.visualstudio.com, and
+		// the legacy vs-ssh.visualstudio.com SSH host.
+		return ProviderAzureDevOps
 	}
 
 	// Fallback for self-hosted GitLab instances whose hostname carries no
@@ -35,9 +41,16 @@ func DetectProvider(url string) Provider {
 	// host (or a host's api_host) is one glab is configured to talk to, treat it
 	// as GitLab. This reads whatever the user configured at runtime; no host is
 	// hardcoded.
+	//
+	// Fallback for GitHub Enterprise Server instances: consult the gh CLI's
+	// configured hosts (hosts.yml). If the remote's host is one gh is
+	// authenticated with, treat it as GitHub.
 	if host := ExtractHost(url); host != "" {
 		if glabKnowsHost(host) {
 			return ProviderGitLab
+		}
+		if ghKnowsHost(host) {
+			return ProviderGitHub
 		}
 	}
 
@@ -93,6 +106,48 @@ func glabConfigPath() string {
 	return filepath.Join(home, ".config", "glab-cli", "config.yml")
 }
 
+// ghKnowsHost reports whether host appears as a top-level key in gh's
+// hosts.yml. Any read/parse error is treated as "not configured" so detection
+// fails closed to ProviderUnknown.
+func ghKnowsHost(host string) bool {
+	path := ghConfigPath()
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var hosts map[string]interface{}
+	if err := yaml.Unmarshal(data, &hosts); err != nil {
+		return false
+	}
+	host = strings.ToLower(host)
+	for key := range hosts {
+		if strings.ToLower(strings.TrimSpace(key)) == host {
+			return true
+		}
+	}
+	return false
+}
+
+// ghConfigPath resolves gh's hosts config file location, preferring
+// $GH_CONFIG_DIR, then $XDG_CONFIG_HOME/gh, then ~/.config/gh.
+// It returns "" when no home/config directory can be determined.
+func ghConfigPath() string {
+	if dir := os.Getenv("GH_CONFIG_DIR"); dir != "" {
+		return filepath.Join(dir, "hosts.yml")
+	}
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return filepath.Join(dir, "gh", "hosts.yml")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "gh", "hosts.yml")
+}
+
 func (p Provider) CLIName() string {
 	switch p {
 	case ProviderGitHub:
@@ -101,6 +156,8 @@ func (p Provider) CLIName() string {
 		return "glab"
 	case ProviderBitbucket:
 		return "bb"
+	case ProviderAzureDevOps:
+		return "az"
 	default:
 		return ""
 	}
@@ -114,6 +171,8 @@ func (p Provider) AuthCheckCommand() []string {
 		return []string{"glab", "auth", "status"}
 	case ProviderBitbucket:
 		return []string{"bb", "profile", "which"}
+	case ProviderAzureDevOps:
+		return []string{"az", "account", "show"}
 	default:
 		return nil
 	}
@@ -135,5 +194,6 @@ func AuthConfigured(ctx context.Context, provider Provider, workDir string) bool
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = workDir
+	winproc.Harden(cmd)
 	return cmd.Run() == nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 func envValue(env []string, key string) (string, bool) {
@@ -157,6 +158,7 @@ func stepCmd(sctx *pipeline.StepContext, name string, args ...string) *exec.Cmd 
 	}
 	cmd := exec.CommandContext(sctx.Ctx, resolved, args...)
 	cmd.Dir = sctx.WorkDir
+	winproc.Harden(cmd)
 	if len(sctx.Env) > 0 {
 		cmd.Env = mergeEnv(sctx.Env)
 	}
@@ -247,15 +249,12 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
-	// Isolate the command in its own process group so that cancelling ctx kills
-	// the whole tree (e.g. npm -> node test workers), not just the shell parent.
-	// Otherwise grandchildren survive, keep running, and hold the worktree locked.
 	shellenv.ConfigureShellCommand(cmd)
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = mergeEnv(env)
 	}
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return string(out), ee.ExitCode(), nil

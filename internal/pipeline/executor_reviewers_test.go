@@ -68,11 +68,10 @@ func captureReviewers(t *testing.T, ag agent.Agent, configure func(*Executor)) [
 	}
 }
 
-// TestExecutor_ReviewersDefaultAndPassthrough pins the PR1 invariant: with no
-// SetReviewers the review panel defaults to exactly the single impl agent, and
-// after SetReviewers([a, b]) the two reviewers pass through to StepContext in
-// order. Both halves run deterministically with no real agent calls.
-func TestExecutor_ReviewersDefaultAndPassthrough(t *testing.T) {
+// TestExecutor_ReviewersDefaultAndOrder pins the PR1 invariant: with no
+// SetReviewers the review panel defaults to the single impl agent, and after
+// SetReviewers([a, b]) the two reviewers retain their configured order.
+func TestExecutor_ReviewersDefaultAndOrder(t *testing.T) {
 	t.Run("DefaultsToSingleImplAgent", func(t *testing.T) {
 		impl := &stubReviewer{name: "impl"}
 
@@ -81,8 +80,8 @@ func TestExecutor_ReviewersDefaultAndPassthrough(t *testing.T) {
 		if len(got) != 1 {
 			t.Fatalf("default reviewers len = %d, want 1 (the single impl agent)", len(got))
 		}
-		if got[0] != agent.Agent(impl) {
-			t.Errorf("default reviewer = %v (Name=%q), want the impl agent itself", got[0], got[0].Name())
+		if got[0].Name() != impl.Name() {
+			t.Errorf("default reviewer name = %q, want %q", got[0].Name(), impl.Name())
 		}
 	})
 
@@ -98,7 +97,7 @@ func TestExecutor_ReviewersDefaultAndPassthrough(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("panel reviewers len = %d, want 2", len(got))
 		}
-		if got[0] != agent.Agent(a) || got[1] != agent.Agent(b) {
+		if got[0].Name() != a.Name() || got[1].Name() != b.Name() {
 			t.Fatalf("panel reviewers = [%q, %q], want [a, b] in order", got[0].Name(), got[1].Name())
 		}
 	})

@@ -78,6 +78,8 @@ Previous review findings to address:
 			Prompt:                  fixPrompt,
 			ErrorPrefix:             "agent fix",
 			FallbackSummary:         "address review findings",
+			SessionRole:             pipeline.SessionRoleFixer,
+			Purpose:                 "review-fix",
 		})
 		if err != nil {
 			return nil, err
@@ -132,7 +134,18 @@ Previous review findings to address:
 	// Ask agent to review
 	sctx.Log("reviewing changes...")
 
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
+	// The review turn (initial and every post-fix rereview) carries the intent
+	// conformance obligation: when the intent is authoritative acceptance
+	// criteria (explicit --intent), a change that contradicts it must park via
+	// an ask-user finding. The clause is empty for inferred intent, leaving the
+	// prompt unchanged. This is what makes a fixer round that removed a
+	// required behavior park instead of silently completing.
+	//
+	// TODO(intent-conformance-C, HELD): add the deterministic, zero-LLM
+	// net-deleted-author-lines git-diff backstop for the removal-of-required
+	// class - a fixer round that net-deletes author-added lines parks
+	// regardless of intent source. Held pending a scope decision.
+	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx) + intentConformanceReviewClause(sctx)
 
 	prompt := fmt.Sprintf(
 		`Review the code changes and return structured findings with a risk assessment.
@@ -193,10 +206,22 @@ Risk assessment (after listing all findings):
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: reviewFindingsSchema,
+		Purpose:    "review",
 	}
 
 	var findings Findings
-	if len(reviewers) <= 1 {
+	if len(reviewers) <= 1 && len(sctx.Config.Review.Reviewers) == 0 {
+		// The default reviewer resumes one durable reviewer-role session across
+		// the initial review and post-fix rereviews. Configured panel reviewers
+		// stay independent and cold because each may use a different family,
+		// binary, or model override.
+		opts.OnChunk = sctx.LogChunk
+		result, err := sctx.RunAgentSession(pipeline.SessionRoleReviewer, opts)
+		if err != nil {
+			return nil, fmt.Errorf("agent review: %w", err)
+		}
+		findings = parseReviewFindings(result, sctx.Log)
+	} else if len(reviewers) <= 1 {
 		// Single reviewer: keep the exact streaming single-call path so behavior
 		// is byte-identical to the pre-panel pipeline.
 		opts.OnChunk = sctx.LogChunk

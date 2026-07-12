@@ -143,6 +143,20 @@ func encodeLastFixedChecks(failing []string, mergeConflict bool) string {
 	return string(encoded)
 }
 
+// combinedFixKey is the anti-thrash key for the shared CI-fix path that handles
+// failing checks and/or merge conflicts. When the post-PR review loop has also
+// flagged the head (devinNotGreen), the head SHA and Devin finding fingerprints
+// are folded in so newly-posted review findings on still-failing checks are not
+// mistaken for an already-attempted fix and skipped — they reach the fixer
+// (which accepts them) instead. With no review findings the key is byte-identical
+// to encodeLastFixedChecks, preserving the review-loop-disabled anti-thrash.
+func combinedFixKey(failing []string, mergeConflict, devinNotGreen bool, headSHA string, devinPrints []string) string {
+	if devinNotGreen {
+		return encodeDevinFixKey(failing, mergeConflict, headSHA, devinPrints)
+	}
+	return encodeLastFixedChecks(failing, mergeConflict)
+}
+
 // encodeDevinFixKey builds the anti-thrash key for a post-PR review-loop fix
 // round. It folds the head SHA and the Devin finding fingerprints into the key
 // so a fix is treated as "already attempted" only until the head advances (a new

@@ -32,6 +32,13 @@ type claudeAgent struct {
 
 func (a *claudeAgent) Name() string { return "claude" }
 
+// SupportsSessionResume reports claude's native durable-session capability:
+// every stream-json event carries a session_id, and `claude -p --resume <id>`
+// continues that session in print mode with the same identity.
+func (a *claudeAgent) SupportsSessionResume() bool { return true }
+
+func (a *claudeAgent) ReportsAgentAttempts() bool { return true }
+
 func (a *claudeAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, "claude", opts, claudeMaxRetries, claudeRetryClassifier, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
@@ -39,61 +46,69 @@ func (a *claudeAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 }
 
 func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
-	args := a.buildArgs(opts.Prompt, opts.JSONSchema)
+	resumeID := ""
+	if opts.Session != nil {
+		resumeID = opts.Session.ID
+	}
+	args := a.buildArgs(opts.Prompt, opts.JSONSchema, resumeID)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
-	// Run in a dedicated process group so cancelling ctx kills the claude CLI
-	// and any subprocesses it spawns (git, build tools, editors), not just the
-	// direct child. Otherwise they survive and hold the worktree locked.
 	shellenv.ConfigureShellCommand(cmd)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("claude stdout pipe: %w", err)
-	}
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
-	stderrR, err := cmd.StderrPipe()
+	started, err := startNativeAgentCommand(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("claude stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("claude start: %w", err)
 	}
+	defer started.closePipes()
+	pid := started.pid()
+	emitAgentStarted(opts, "claude", pid)
 
 	stderrWG.Add(1)
 	go func() {
 		defer stderrWG.Done()
-		stderrBuf, _ = io.ReadAll(stderrR)
+		stderrBuf, _ = io.ReadAll(started.stderr)
 	}()
 
 	var usage TokenUsage
 	var result *claudeResult
-	if err := parseClaudeEvents(ctx, stdout, opts.OnChunk, &usage, &result); err != nil {
+	if err := parseClaudeEvents(ctx, started.stdout, opts.OnChunk, &usage, &result); err != nil {
+		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("claude parse events: %w", err)
+		retErr := fmt.Errorf("claude parse events: %w", err)
+		emitAgentExited(opts, "claude", pid, retErr)
+		return nil, retErr
 	}
 
+	waitErr := started.wait()
 	stderrWG.Wait()
-	if err := cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("claude exited: %w: %s", err, string(stderrBuf))
+	if waitErr != nil {
+		retErr := fmt.Errorf("claude exited: %w: %s", waitErr, string(stderrBuf))
+		emitAgentExited(opts, "claude", pid, retErr)
+		return nil, retErr
 	}
 
 	if result == nil {
-		return nil, fmt.Errorf("claude returned no result event")
+		retErr := fmt.Errorf("claude returned no result event")
+		emitAgentExited(opts, "claude", pid, retErr)
+		return nil, retErr
 	}
 
 	res, err := finalizeClaudeResult(result, opts.JSONSchema, usage)
+	if res != nil {
+		res.SessionID = result.sessionID
+		res.Resumed = resumeID != ""
+		res.Model = result.model
+	}
 	if errors.Is(err, errNoStructuredOutput) && opts.OnChunk != nil {
 		opts.OnChunk(fmt.Sprintf("structured output missing: subtype=%s, text_len=%d, input_tokens=%d, output_tokens=%d",
 			result.Subtype, len(result.text), usage.InputTokens, usage.OutputTokens))
 		opts.OnChunk(fmt.Sprintf("raw result event: %s", string(result.rawEvent)))
 	}
+	emitAgentExited(opts, "claude", pid, err)
 	return res, err
 }
 
@@ -118,15 +133,20 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 // (from agent_args_override in the global config) are inserted ahead of the
 // managed flags, so user choices win over no-mistakes' defaults. If the user
 // supplied their own permission mode, the default --dangerously-skip-permissions
-// is not added.
-func (a *claudeAgent) buildArgs(prompt string, schema json.RawMessage) []string {
-	args := make([]string, 0, len(a.extraArgs)+8)
+// is not added. A non-empty resumeID continues that session via --resume
+// (never --fork-session: the session identity must stay stable so later
+// turns keep resuming the same conversation).
+func (a *claudeAgent) buildArgs(prompt string, schema json.RawMessage, resumeID string) []string {
+	args := make([]string, 0, len(a.extraArgs)+10)
 	args = append(args, a.extraArgs...)
 	args = append(args,
 		"-p", prompt,
 		"--verbose",
 		"--output-format", "stream-json",
 	)
+	if resumeID != "" {
+		args = append(args, "--resume", resumeID)
+	}
 	if len(schema) > 0 {
 		args = append(args, "--json-schema", string(schema))
 	}
@@ -151,8 +171,9 @@ func claudeUserSetPermissionMode(extraArgs []string) bool {
 
 // claudeEvent is the top-level JSONL event from claude CLI.
 type claudeEvent struct {
-	Type    string          `json:"type"`
-	Message json.RawMessage `json:"message,omitempty"`
+	Type      string          `json:"type"`
+	Message   json.RawMessage `json:"message,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
 
 	// result fields
 	Subtype          string          `json:"subtype,omitempty"`
@@ -168,6 +189,8 @@ type claudeResult struct {
 	StructuredOutput json.RawMessage
 	text             string // accumulated text from assistant events
 	rawEvent         json.RawMessage
+	sessionID        string // durable session identity from the event stream
+	model            string // model reported by assistant events
 }
 
 type claudeUsage struct {
@@ -178,6 +201,7 @@ type claudeUsage struct {
 }
 
 type claudeMessage struct {
+	Model   string          `json:"model"`
 	Usage   claudeUsage     `json:"usage"`
 	Content []claudeContent `json:"content"`
 }
@@ -193,6 +217,8 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), claudeScannerMaxTokenSize)
 	var textBuf string
+	var lastSessionID string
+	var lastModel string
 
 	for scanner.Scan() {
 		select {
@@ -210,12 +236,18 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 		if err := json.Unmarshal(line, &event); err != nil {
 			continue // skip malformed lines
 		}
+		if event.SessionID != "" {
+			lastSessionID = event.SessionID
+		}
 
 		switch event.Type {
 		case "assistant":
 			var msg claudeMessage
 			if err := json.Unmarshal(event.Message, &msg); err != nil {
 				continue
+			}
+			if msg.Model != "" {
+				lastModel = msg.Model
 			}
 			usage.Add(TokenUsage{
 				InputTokens:         msg.Usage.InputTokens,
@@ -242,6 +274,8 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 					StructuredOutput: event.StructuredOutput,
 					text:             textBuf,
 					rawEvent:         raw,
+					sessionID:        lastSessionID,
+					model:            lastModel,
 				}
 			}
 		}

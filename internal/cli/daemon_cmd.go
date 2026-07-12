@@ -3,12 +3,15 @@ package cli
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/designcontext"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/lifecycle"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
@@ -70,6 +73,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			gatePath, err := normalizeNotifyGatePath(gate)
+			if err != nil {
+				return err
+			}
 
 			p, err := paths.New()
 			if err != nil {
@@ -84,7 +91,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 
 			var result ipc.PushReceivedResult
 			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
-				Gate:               gate,
+				Gate:               gatePath,
 				Ref:                ref,
 				Old:                oldSHA,
 				New:                newSHA,
@@ -108,6 +115,17 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("new")
 
 	return cmd
+}
+
+func normalizeNotifyGatePath(gate string) (string, error) {
+	if strings.TrimSpace(gate) == "" {
+		return "", fmt.Errorf("gate path is required")
+	}
+	abs, err := filepath.Abs(gate)
+	if err != nil {
+		return "", fmt.Errorf("resolve gate path: %w", err)
+	}
+	return filepath.Clean(abs), nil
 }
 
 func parseSkipPushOptions(options []string) ([]types.StepName, error) {
@@ -304,13 +322,18 @@ func newDaemonStartCmd() *cobra.Command {
 }
 
 func newDaemonStopCmd() *cobra.Command {
-	return &cobra.Command{
+	var force bool
+	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the running daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			logLifecycleInvocation("daemon.stop", force)
 			return trackCommand("daemon.stop", func() error {
 				p, err := paths.New()
 				if err != nil {
+					return err
+				}
+				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon stop", force); err != nil {
 					return err
 				}
 				if err := daemonStopFn(p); err != nil {
@@ -321,19 +344,26 @@ func newDaemonStopCmd() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&force, "force", false, "stop the daemon even when pipeline runs are active")
+	return cmd
 }
 
 func newDaemonRestartCmd() *cobra.Command {
-	return &cobra.Command{
+	var force bool
+	cmd := &cobra.Command{
 		Use:   "restart",
 		Short: "Restart the daemon (stop if running, then start)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			logLifecycleInvocation("daemon.restart", force)
 			return trackCommand("daemon.restart", func() error {
 				p, err := paths.New()
 				if err != nil {
 					return err
 				}
 				if err := p.EnsureDirs(); err != nil {
+					return err
+				}
+				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon restart", force); err != nil {
 					return err
 				}
 				if err := daemonStopFn(p); err != nil {
@@ -347,6 +377,24 @@ func newDaemonRestartCmd() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&force, "force", false, "restart the daemon even when pipeline runs are active")
+	return cmd
+}
+
+func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action string, force bool) error {
+	runs, err := lifecycle.ActiveRuns(p)
+	if err != nil {
+		return fmt.Errorf("check active pipeline runs: %w", err)
+	}
+	if len(runs) == 0 {
+		return nil
+	}
+	if force {
+		fmt.Fprintf(stderr, "FORCE: %s will stop/restart the daemon while %d active pipeline runs are in progress\n", action, len(runs))
+		fmt.Fprint(stderr, lifecycle.RunList(runs))
+		return nil
+	}
+	return fmt.Errorf("refusing %s because %d active pipeline runs are in progress; pass --force to stop/restart the daemon anyway\n%s", action, len(runs), lifecycle.RunList(runs))
 }
 
 func newDaemonStatusCmd() *cobra.Command {

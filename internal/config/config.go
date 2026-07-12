@@ -15,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/devin"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -31,6 +32,12 @@ import (
 const (
 	// DefaultCITimeout is the monitor's idle timeout when ci_timeout is unset.
 	DefaultCITimeout = 7 * 24 * time.Hour
+	// DefaultStepQuietWarning is how long a running/fixing step can go without
+	// a new log or lifecycle activity before AXI status marks it quiet.
+	DefaultStepQuietWarning = 10 * time.Minute
+	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
+	// daemon socket that exists but is not accepting connections.
+	DefaultDaemonConnectTimeout = 3 * time.Second
 	// CITimeoutUnlimited is the sentinel meaning "monitor until the PR is
 	// merged, closed, or the run is aborted - never self-terminate".
 	// Any non-positive ci_timeout, or the keywords "unlimited", "none",
@@ -41,29 +48,40 @@ const (
 // GlobalConfig represents ~/.no-mistakes/config.yaml.
 type GlobalConfig struct {
 	Agent                types.AgentName     `yaml:"agent"`
+	Agents               []types.AgentName   `yaml:"-"`
 	ACPXPath             string              `yaml:"acpx_path"`
 	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
 	CITimeout            time.Duration       `yaml:"-"`
+	StepQuietWarning     time.Duration       `yaml:"-"`
+	DaemonConnectTimeout time.Duration       `yaml:"-"`
 	LogLevel             string              `yaml:"log_level"`
-	AutoFix              AutoFixRaw
-	Intent               IntentRaw
-	Test                 TestRaw
-	Review               ReviewRaw
-	ReviewLoop           ReviewLoopRaw
+	// SessionReuse controls per-run, per-role agent session reuse in the
+	// review loop (one durable reviewer session across full reviews, a
+	// separate durable fixer session across fix turns). Default true; set
+	// session_reuse: false to force every invocation cold.
+	SessionReuse bool `yaml:"-"`
+	AutoFix      AutoFixRaw
+	Intent       IntentRaw
+	Test         TestRaw
+	Review       ReviewRaw
+	ReviewLoop   ReviewLoopRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
 type globalConfigRaw struct {
-	Agent                types.AgentName     `yaml:"agent"`
+	Agent                agentList           `yaml:"agent"`
 	ACPXPath             string              `yaml:"acpx_path"`
 	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
 	CITimeout            string              `yaml:"ci_timeout"`
+	DaemonConnectTimeout string              `yaml:"daemon_connect_timeout"`
 	BabysitTimeout       string              `yaml:"babysit_timeout"`
+	StepQuietWarning     string              `yaml:"step_quiet_warning"`
 	LogLevel             string              `yaml:"log_level"`
+	SessionReuse         *bool               `yaml:"session_reuse"`
 	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
@@ -73,9 +91,10 @@ type globalConfigRaw struct {
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
 type RepoConfig struct {
-	Agent          types.AgentName `yaml:"agent"`
-	Commands       Commands        `yaml:"commands"`
-	IgnorePatterns []string        `yaml:"ignore_patterns"`
+	Agent          types.AgentName   `yaml:"agent"`
+	Agents         []types.AgentName `yaml:"-"`
+	Commands       Commands          `yaml:"commands"`
+	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
 	// fields (commands.{test,lint,format} and agent) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
@@ -95,6 +114,53 @@ type RepoConfig struct {
 	// global review config (see Merge).
 	Review     *ReviewRaw    `yaml:"review"`
 	ReviewLoop ReviewLoopRaw `yaml:"review_loop"`
+	// Document carries the repository's documentation placement policy. It
+	// steers the document step's gate prompt, so it is honored ONLY from the
+	// trusted default-branch copy of .no-mistakes.yaml (see
+	// EffectiveRepoConfig): a contributor's pushed branch must not be able to
+	// weaken documentation rules for its own review.
+	Document DocumentRaw `yaml:"document"`
+}
+
+// DocumentRaw is the YAML representation of document-step settings.
+type DocumentRaw struct {
+	// Instructions augment (never replace) the built-in documentation
+	// placement policy with the repository's ownership map or extra
+	// placement rules.
+	Instructions string `yaml:"instructions"`
+}
+
+func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
+	type repoConfigRaw struct {
+		Agent             agentList        `yaml:"agent"`
+		Commands          Commands         `yaml:"commands"`
+		IgnorePatterns    []string         `yaml:"ignore_patterns"`
+		AllowRepoCommands bool             `yaml:"allow_repo_commands"`
+		AutoFix           AutoFixRaw       `yaml:"auto_fix"`
+		Intent            IntentRaw        `yaml:"intent"`
+		Test              TestRaw          `yaml:"test"`
+		DesignContext     DesignContextRaw `yaml:"design_context"`
+		Review            *ReviewRaw       `yaml:"review"`
+		ReviewLoop        ReviewLoopRaw    `yaml:"review_loop"`
+		Document          DocumentRaw      `yaml:"document"`
+	}
+	var raw repoConfigRaw
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	c.Agent = firstAgent(raw.Agent)
+	c.Agents = copyAgents(raw.Agent)
+	c.Commands = raw.Commands
+	c.IgnorePatterns = raw.IgnorePatterns
+	c.AllowRepoCommands = raw.AllowRepoCommands
+	c.AutoFix = raw.AutoFix
+	c.Intent = raw.Intent
+	c.Test = raw.Test
+	c.DesignContext = raw.DesignContext
+	c.Review = raw.Review
+	c.ReviewLoop = raw.ReviewLoop
+	c.Document = raw.Document
+	return nil
 }
 
 // Commands holds optional per-repo command overrides.
@@ -130,12 +196,15 @@ type AutoFix struct {
 // Config is the merged result of global + per-repo configuration.
 type Config struct {
 	Agent                types.AgentName
+	Agents               []types.AgentName
 	ACPXPath             string
 	ACPRegistryOverrides map[string]string
 	AgentPathOverride    map[string]string
 	AgentArgsOverride    map[string][]string
 	CITimeout            time.Duration
+	StepQuietWarning     time.Duration
 	LogLevel             string
+	SessionReuse         bool
 	Commands             Commands
 	IgnorePatterns       []string
 	AutoFix              AutoFix
@@ -144,6 +213,7 @@ type Config struct {
 	DesignContext        DesignContext
 	Review               Review
 	ReviewLoop           ReviewLoop
+	Document             Document
 }
 
 // ReviewerSpec identifies one reviewer in the cross-family review panel. Agent
@@ -258,6 +328,13 @@ type ReviewLoop struct {
 	DevinOrgID string
 }
 
+// Document is the resolved document-step config. Instructions come from the
+// trusted default-branch repo config and augment the built-in placement
+// policy in the document prompt.
+type Document struct {
+	Instructions string
+}
+
 // TestRaw is the YAML representation of test-step settings.
 type TestRaw struct {
 	Evidence EvidenceRaw `yaml:"evidence"`
@@ -313,10 +390,58 @@ type Intent struct {
 	DisabledReaders map[string]bool
 }
 
+type agentList []types.AgentName
+
+func (a *agentList) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		name := strings.TrimSpace(value.Value)
+		if name == "" {
+			*a = nil
+			return nil
+		}
+		*a = []types.AgentName{types.AgentName(name)}
+		return nil
+	case yaml.SequenceNode:
+		names := make([]types.AgentName, 0, len(value.Content))
+		for i, item := range value.Content {
+			if item.Kind != yaml.ScalarNode {
+				return fmt.Errorf("agent[%d] must be a string", i)
+			}
+			name := strings.TrimSpace(item.Value)
+			if name == "" {
+				return fmt.Errorf("agent[%d] must not be empty", i)
+			}
+			names = append(names, types.AgentName(name))
+		}
+		*a = names
+		return nil
+	default:
+		return fmt.Errorf("agent must be a string or a list of strings")
+	}
+}
+
+func firstAgent(names []types.AgentName) types.AgentName {
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+func copyAgents(names []types.AgentName) []types.AgentName {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]types.AgentName, len(names))
+	copy(out, names)
+	return out
+}
+
 // defaultConfigYAML is the template written when no global config file exists.
 const defaultConfigYAML = `# no-mistakes global configuration
 
-# Agent to use for code generation
+# Agent to use for code generation. This may also be an ordered fallback list,
+# for example: agent: [codex, claude]
 # Options: auto, claude, codex, rovodev, opencode, pi, copilot, grok, acp:<target>
 # "auto" detects the first available native agent on your system
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
@@ -337,6 +462,22 @@ agent: auto
 # aborted with: no-mistakes axi abort --run <id>
 ci_timeout: "168h"
 
+# AXI status marks a running/fixing step as quiet when no step log or native
+# agent lifecycle activity has appeared for this long. This is observability
+# only; it never cancels work.
+step_quiet_warning: "10m"
+
+# Maximum time a CLI client waits for an existing daemon socket to accept a
+# connection before failing instead of hanging.
+daemon_connect_timeout: "3s"
+
+# Reuse one durable agent session per run for the review loop: the reviewer
+# keeps a single session across the initial review and every full rereview,
+# and review fixes keep a separate fixer session. Roles never share a session.
+# Supported for claude and codex; other agents run cold. Set false to force
+# every agent invocation cold.
+session_reuse: true
+
 # Log level for daemon output
 # Options: debug, info, warn, error
 log_level: info
@@ -348,10 +489,15 @@ log_level: info
 #   grok: /Users/you/.local/bin/grok
 
 # Extra native agent CLI flags (optional, global only)
+# Codex service_tier controls speed/priority; model_reasoning_effort controls reasoning depth.
 # agent_args_override:
 #   codex:
 #     - -m
 #     - gpt-5.4
+#     - -c
+#     - service_tier="priority"
+#     - -c
+#     - model_reasoning_effort="low"
 #   grok:
 #     - --reasoning-effort
 #     - high
@@ -471,6 +617,7 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, bin, "rovodev", "--help")
+	winproc.Harden(cmd)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return true, nil
@@ -515,13 +662,56 @@ var probeGrokSupport = func(ctx context.Context, bin string) (bool, error) {
 	}
 }
 
-// ResolveAgent resolves AgentAuto to a concrete agent by probing which binaries
-// are available on the system. If agent is already set to a specific value, this
-// is a no-op. The lookPath function should behave like exec.LookPath.
+// ResolveAgent resolves configured agent names to available agents. A single
+// explicit agent must be runnable; auto is probed into the first available
+// native agent; an ordered list is filtered to available agents and kept as fallbacks.
+// The lookPath function should behave like exec.LookPath.
 func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string, error)) error {
-	if c.Agent != types.AgentAuto {
+	candidates := c.configuredAgents()
+	if len(candidates) <= 1 {
+		c.Agent = firstAgent(candidates)
+		c.Agents = copyAgents(candidates)
+		if c.Agent == types.AgentAuto {
+			name, err := c.resolveAutoAgent(ctx, lookPath)
+			if err != nil {
+				return err
+			}
+			c.Agent = name
+			c.Agents = []types.AgentName{name}
+			return nil
+		}
+		name, ok, probe, err := c.resolveConfiguredAgent(ctx, c.Agent, lookPath)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return noRunnableAgentError([]types.AgentName{c.Agent}, []string{probe})
+		}
+		c.Agent = name
+		c.Agents = []types.AgentName{name}
 		return nil
 	}
+
+	resolved, err := c.resolveAgentList(ctx, candidates, lookPath)
+	if err != nil {
+		return err
+	}
+	c.Agent = resolved[0]
+	c.Agents = resolved
+	return nil
+}
+
+func (c *Config) configuredAgents() []types.AgentName {
+	if len(c.Agents) > 0 {
+		return copyAgents(c.Agents)
+	}
+	if c.Agent != "" {
+		return []types.AgentName{c.Agent}
+	}
+	return []types.AgentName{types.AgentAuto}
+}
+
+func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (string, error)) (types.AgentName, error) {
 	probed := make([]string, 0, len(agentProbeOrder))
 	for _, name := range agentProbeOrder {
 		bin := string(name)
@@ -539,7 +729,7 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 			if name == types.AgentRovoDev {
 				ok, probeErr := probeRovoDevSupport(ctx, resolvedBin)
 				if probeErr != nil {
-					return probeErr
+					return "", probeErr
 				}
 				if !ok {
 					continue
@@ -547,49 +737,131 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 			} else if name == types.AgentGrok {
 				ok, probeErr := probeGrokSupport(ctx, resolvedBin)
 				if probeErr != nil {
-					return probeErr
+					return "", probeErr
 				}
 				if !ok {
 					continue
 				}
 			}
-			c.Agent = name
-			return nil
+			return name, nil
 		} else if !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
+			return "", fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
 		}
 	}
-	return fmt.Errorf("no supported agent found in PATH (looked for: %s); install one or set 'agent' in ~/.no-mistakes/config.yaml", strings.Join(probed, ", "))
+	return "", noRunnableAgentError([]types.AgentName{types.AgentAuto}, probed)
+}
+
+func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, lookPath func(string) (string, error)) ([]types.AgentName, error) {
+	resolved := make([]types.AgentName, 0, len(candidates))
+	seen := map[types.AgentName]bool{}
+	probed := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		name, ok, probe, err := c.resolveConfiguredAgent(ctx, candidate, lookPath)
+		if probe != "" {
+			probed = append(probed, probe)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+		resolved = append(resolved, name)
+	}
+	if len(resolved) == 0 {
+		return nil, noRunnableAgentError(candidates, probed)
+	}
+	return resolved, nil
+}
+
+func noRunnableAgentError(configured []types.AgentName, probed []string) error {
+	names := make([]string, 0, len(configured))
+	for _, name := range configured {
+		names = append(names, string(name))
+	}
+	return fmt.Errorf(
+		"no runnable agent found for configured agent %s (looked for: %s); the gate cannot validate without an agent; install a supported native agent, choose an available agent in ~/.no-mistakes/config.yaml, or configure agent: acp:<target> with acpx installed",
+		strings.Join(names, ", "),
+		strings.Join(probed, ", "),
+	)
+}
+
+func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentName, lookPath func(string) (string, error)) (types.AgentName, bool, string, error) {
+	if name == types.AgentAuto {
+		resolved, err := c.resolveAutoAgent(ctx, lookPath)
+		if err != nil && strings.HasPrefix(err.Error(), "no runnable agent found") {
+			return "", false, "auto", nil
+		}
+		return resolved, err == nil, "auto", err
+	}
+	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
+		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, grok, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+	}
+	bin := c.AgentPathFor(name)
+	resolvedBin, err := lookPath(bin)
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+			return "", false, bin, nil
+		}
+		return "", false, bin, fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
+	}
+	if name == types.AgentRovoDev {
+		ok, probeErr := probeRovoDevSupport(ctx, resolvedBin)
+		if probeErr != nil {
+			return "", false, bin, probeErr
+		}
+		if !ok {
+			return "", false, bin, nil
+		}
+	} else if name == types.AgentGrok {
+		ok, probeErr := probeGrokSupport(ctx, resolvedBin)
+		if probeErr != nil {
+			return "", false, bin, probeErr
+		}
+		if !ok {
+			return "", false, bin, nil
+		}
+	}
+	return name, true, bin, nil
 }
 
 // AgentPath returns the binary path for the configured agent.
 // ACP agents use acpx_path if set, otherwise acpx.
 // Native agents use agent_path_override if set, otherwise the default binary name.
 func (c *Config) AgentPath() string {
-	if isACPAgent(c.Agent) {
+	return c.AgentPathFor(c.Agent)
+}
+
+func (c *Config) AgentPathFor(name types.AgentName) string {
+	if isACPAgent(name) {
 		if c.ACPXPath != "" {
 			return c.ACPXPath
 		}
 		return "acpx"
 	}
 	if c.AgentPathOverride != nil {
-		if p, ok := c.AgentPathOverride[string(c.Agent)]; ok {
+		if p, ok := c.AgentPathOverride[string(name)]; ok {
 			return p
 		}
 	}
-	if b, ok := defaultBinary[c.Agent]; ok {
+	if b, ok := defaultBinary[name]; ok {
 		return b
 	}
-	return string(c.Agent)
+	return string(name)
 }
 
 // AgentArgs returns extra CLI args for the configured native agent, as declared in
 // agent_args_override. Returns nil when no override is set for this agent.
 func (c *Config) AgentArgs() []string {
+	return c.AgentArgsFor(c.Agent)
+}
+
+func (c *Config) AgentArgsFor(name types.AgentName) []string {
 	if c.AgentArgsOverride == nil {
 		return nil
 	}
-	return c.AgentArgsOverride[string(c.Agent)]
+	return c.AgentArgsOverride[string(name)]
 }
 
 // ResolveReviewers resolves the configured review panel into concrete reviewer
@@ -623,6 +895,14 @@ func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (st
 		// so this path and validateReviewers cannot drift.
 		if err := validateReviewerSpec(i, spec); err != nil {
 			return nil, err
+		}
+		// Re-check per-reviewer args against the concrete resolved family before
+		// they reach the real command. This runs for every spec (not just "auto")
+		// because the untrusted pushed-config path skips validateReviewers, so a
+		// concrete-family reviewer under allow_repo_commands reaches here with no
+		// prior reserved-arg check.
+		if arg, j, bad := reservedArgViolation(string(spec.Agent), spec.Args); bad {
+			return nil, fmt.Errorf("review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
 		}
 		if spec.Agent == types.AgentRovoDev {
 			bin := c.ReviewerPath(spec)
@@ -716,11 +996,24 @@ var reservedAgentArgs = map[string]map[string]bool{
 		"--verbose":       true,
 		"--output-format": true,
 		"--json-schema":   true,
+		"-r":              true,
+		"--resume":        true,
+		"--session-id":    true,
+		"-c":              true,
+		"--continue":      true,
+		"--fork-session":  true,
 	},
 	string(types.AgentCodex): {
-		"exec":    true,
-		"--json":  true,
-		"--color": true,
+		"exec":         true,
+		"resume":       true,
+		"--resume":     true,
+		"--session":    true,
+		"--session-id": true,
+		"--thread":     true,
+		"--thread-id":  true,
+		"--last":       true,
+		"--json":       true,
+		"--color":      true,
 	},
 	string(types.AgentRovoDev): {
 		"rovodev":                 true,
@@ -876,13 +1169,22 @@ func EnsureDefaultGlobalConfig(path string) {
 	}
 }
 
+// DefaultGlobalConfig returns the built-in global defaults.
+func DefaultGlobalConfig() *GlobalConfig {
+	return &GlobalConfig{
+		Agent:                types.AgentAuto,
+		Agents:               []types.AgentName{types.AgentAuto},
+		CITimeout:            DefaultCITimeout,
+		StepQuietWarning:     DefaultStepQuietWarning,
+		DaemonConnectTimeout: DefaultDaemonConnectTimeout,
+		LogLevel:             "info",
+		SessionReuse:         true,
+	}
+}
+
 // LoadGlobal reads global config from path. Returns defaults if file doesn't exist.
 func LoadGlobal(path string) (*GlobalConfig, error) {
-	cfg := &GlobalConfig{
-		Agent:     types.AgentAuto,
-		CITimeout: DefaultCITimeout,
-		LogLevel:  "info",
-	}
+	cfg := DefaultGlobalConfig()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -899,8 +1201,9 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 
-	if raw.Agent != "" {
-		cfg.Agent = raw.Agent
+	if len(raw.Agent) > 0 {
+		cfg.Agents = copyAgents(raw.Agent)
+		cfg.Agent = firstAgent(cfg.Agents)
 	}
 	if raw.ACPXPath != "" {
 		cfg.ACPXPath = raw.ACPXPath
@@ -928,8 +1231,27 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		}
 		cfg.CITimeout = d
 	}
+	if raw.StepQuietWarning != "" {
+		d, err := time.ParseDuration(raw.StepQuietWarning)
+		if err != nil {
+			return nil, fmt.Errorf("parse step_quiet_warning %q: %w", raw.StepQuietWarning, err)
+		}
+		if d > 0 {
+			cfg.StepQuietWarning = d
+		}
+	}
+	if raw.DaemonConnectTimeout != "" {
+		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
+		if err != nil {
+			return nil, err
+		}
+		cfg.DaemonConnectTimeout = d
+	}
 	if raw.LogLevel != "" {
 		cfg.LogLevel = raw.LogLevel
+	}
+	if raw.SessionReuse != nil {
+		cfg.SessionReuse = *raw.SessionReuse
 	}
 	if raw.AutoFix.CI == nil {
 		raw.AutoFix.CI = raw.AutoFix.Babysit
@@ -964,6 +1286,17 @@ func parseCITimeout(value string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return CITimeoutUnlimited, nil
+	}
+	return d, nil
+}
+
+func parsePositiveDuration(name, value string) (time.Duration, error) {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s %q: %w", name, value, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("parse %s %q: duration must be positive", name, value)
 	}
 	return d, nil
 }
@@ -1029,9 +1362,10 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // given a pushed-branch copy and the trusted default-branch copy.
 //
 // The execution-affecting selection fields — Commands (run verbatim via sh -c
-// on the daemon host), Agent (selects which process launches with the
-// maintainer's credentials, including acp: targets), Review (the review panel,
-// which likewise selects which reviewer binaries launch), and ReviewLoop (which
+// on the daemon host), Agent/Agents (select which processes launch with the
+// maintainer's credentials, including fallback lists and acp: targets), Review
+// (the review panel, which likewise selects which reviewer binaries launch),
+// and ReviewLoop (which
 // gates whether the post-PR review loop runs, names the bot login whose
 // comments become fix-prompt content, and bounds how many automated fix rounds
 // execute) — are taken only from the trusted copy when it is present, so a
@@ -1040,10 +1374,13 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // opted in (via allow_repo_commands on the TRUSTED default-branch copy) to
 // honoring the pushed-branch copy wholesale. When there is no trusted copy and
 // the maintainer has not opted in, these fields are forced empty/zero (Agent ""
-// inherits the global agent; Commands{} yields built-in defaults; Review nil
-// inherits the global panel; ReviewLoopRaw{} leaves the loop off) rather than
+// and nil Agents inherit the global agent; Commands{} yields built-in defaults;
+// Review nil inherits the global panel; ReviewLoopRaw{} leaves the loop off) rather than
 // falling back to the pushed branch — this blocks the supply-chain vector for
-// repos that ship .no-mistakes.yaml only on feature branches.
+// repos that ship .no-mistakes.yaml only on feature branches. Document (the
+// documentation placement policy injected into the document gate prompt) is
+// always trusted-only for the same reason: a pushed branch must not weaken the
+// documentation rules that gate itself.
 //
 // ReviewLoop is gated even though the fixer it drives is always no-mistakes
 // itself (never a contributor-named binary): a pushed branch that could flip
@@ -1063,12 +1400,18 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		pushed = &RepoConfig{}
 	}
 	effective := *pushed
+	if trusted != nil {
+		effective.Document = trusted.Document
+	} else {
+		effective.Document = DocumentRaw{}
+	}
 	if allowRepoCommands {
 		return &effective
 	}
 	if trusted != nil {
 		effective.Commands = trusted.Commands
 		effective.Agent = trusted.Agent
+		effective.Agents = copyAgents(trusted.Agents)
 		// SECURITY: the review panel selects which reviewer binaries launch
 		// with the maintainer's credentials, so it is code-executing config.
 		// Take it from the trusted default-branch copy, never the pushed SHA.
@@ -1080,6 +1423,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 	} else {
 		effective.Commands = Commands{}
 		effective.Agent = ""
+		effective.Agents = nil
 		effective.Review = nil
 		effective.ReviewLoop = ReviewLoopRaw{}
 	}
@@ -1350,8 +1694,9 @@ func (c *Config) AutoFixLimit(step types.StepName) int {
 	}
 }
 
-// Merge combines global and per-repo config. Per-repo agent overrides global
-// when non-empty. Commands and ignore patterns come from repo config only.
+// Merge combines global and per-repo config. Per-repo agent values, including
+// ordered fallback lists, override global agent values when non-empty. Commands
+// and ignore patterns come from repo config only.
 func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	af := autoFixDefaults()
 	applyAutoFixOverrides(&af, &global.AutoFix)
@@ -1386,12 +1731,15 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 
 	cfg := &Config{
 		Agent:                global.Agent,
+		Agents:               copyAgents(global.Agents),
 		ACPXPath:             global.ACPXPath,
 		ACPRegistryOverrides: global.ACPRegistryOverrides,
 		AgentPathOverride:    global.AgentPathOverride,
 		AgentArgsOverride:    global.AgentArgsOverride,
 		CITimeout:            global.CITimeout,
+		StepQuietWarning:     global.StepQuietWarning,
 		LogLevel:             global.LogLevel,
+		SessionReuse:         global.SessionReuse,
 		Commands:             repo.Commands,
 		IgnorePatterns:       repo.IgnorePatterns,
 		AutoFix:              af,
@@ -1400,10 +1748,15 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		DesignContext:        resolveDesignContext(repo.DesignContext),
 		Review:               review,
 		ReviewLoop:           reviewLoop,
+		Document:             Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 	}
 
 	if repo.Agent != "" {
 		cfg.Agent = repo.Agent
+		cfg.Agents = copyAgents(repo.Agents)
+		if len(cfg.Agents) == 0 {
+			cfg.Agents = []types.AgentName{repo.Agent}
+		}
 	}
 
 	return cfg

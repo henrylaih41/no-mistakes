@@ -34,8 +34,22 @@ func (p *Paths) DB() string         { return filepath.Join(p.root, "state.sqlite
 func (p *Paths) Socket() string     { return filepath.Join(p.root, "socket") }
 func (p *Paths) PIDFile() string    { return filepath.Join(p.root, "daemon.pid") }
 func (p *Paths) ConfigFile() string { return filepath.Join(p.root, "config.yaml") }
+
+// LockFile is the OS-level advisory lock used to enforce a single live daemon
+// per NM_HOME (see the singleton lock in internal/daemon). Distinct from
+// PIDFile, which is an informational record a live daemon writes for
+// CLI/status consumers: LockFile is what actually prevents two daemons from
+// ever running startup recovery or binding the socket concurrently for the
+// same root.
+func (p *Paths) LockFile() string { return filepath.Join(p.root, "daemon.lock") }
 func (p *Paths) UpdateCheckFile() string {
 	return filepath.Join(p.root, "update-check.json")
+}
+
+// TelemetryGateFile persists the read-surface telemetry dedupe state so
+// high-frequency status polling stays rate-limited across CLI processes.
+func (p *Paths) TelemetryGateFile() string {
+	return filepath.Join(p.root, "telemetry-gate.json")
 }
 
 func (p *Paths) ReposDir() string { return filepath.Join(p.root, "repos") }

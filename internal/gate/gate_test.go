@@ -14,6 +14,14 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
+func TestMain(m *testing.M) {
+	// Agent harnesses inject git config (e.g. safe.bareRepository=explicit)
+	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n; tests that need it re-set it with
+	// t.Setenv (issue #362).
+	os.Unsetenv("GIT_CONFIG_COUNT")
+	os.Exit(m.Run())
+}
+
 // resolveSymlinks resolves symlinks in a path (needed on macOS where
 // /var → /private/var but git returns resolved paths).
 func resolveSymlinks(t *testing.T, p string) string {
@@ -23,6 +31,33 @@ func resolveSymlinks(t *testing.T, p string) string {
 		t.Fatalf("eval symlinks %q: %v", p, err)
 	}
 	return resolved
+}
+
+// copyDirTree recursively copies src into dst (creating dst). It is a portable
+// stand-in for `cp -R`, which is unavailable on Windows.
+func copyDirTree(t *testing.T, src, dst string) {
+	t.Helper()
+	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatalf("copy working dir: %v", err)
+	}
 }
 
 // setupTestRepo creates a git repo with an origin remote and returns its resolved path.
@@ -141,6 +176,41 @@ func TestInit(t *testing.T) {
 	}
 	if dbRepo.ID != repo.ID {
 		t.Errorf("db repo id = %q, want %q", dbRepo.ID, repo.ID)
+	}
+}
+
+func TestInitUnderSafeBareRepositoryExplicit(t *testing.T) {
+	// Agent harnesses (e.g. Claude Code) and hardened CI inject this git
+	// config, which forbids cwd-based discovery of bare repos, so every git
+	// operation on the gate must name it explicitly (issue #362).
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+
+	workDir := setupTestRepo(t)
+	nmRoot := t.TempDir()
+	p := paths.WithRoot(nmRoot)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	d := openTestDB(t, p)
+	ctx := context.Background()
+
+	repo, created, err := Init(ctx, d, p, workDir)
+	if err != nil {
+		t.Fatalf("init under safe.bareRepository=explicit: %v", err)
+	}
+	if !created {
+		t.Error("expected a new gate to be created")
+	}
+
+	// Read the gate config naming the repo explicitly; -C discovery would
+	// itself fail under the injected setting.
+	bareDir := p.RepoDir(repo.ID)
+	if out, err := exec.Command("git", "--git-dir="+bareDir, "config", "--get", "receive.advertisePushOptions").Output(); err != nil {
+		t.Fatalf("get receive.advertisePushOptions: %v", err)
+	} else if got := string(out); got != "true\n" {
+		t.Fatalf("receive.advertisePushOptions = %q, want true", got)
 	}
 }
 
@@ -545,9 +615,7 @@ func TestInitCreatesFreshGateForCopiedWorkingDir(t *testing.T) {
 	}
 
 	copyDir := filepath.Join(filepath.Dir(workDir), "copy")
-	if out, err := exec.Command("cp", "-R", workDir, copyDir).CombinedOutput(); err != nil {
-		t.Fatalf("copy working dir: %v: %s", err, out)
-	}
+	copyDirTree(t, workDir, copyDir)
 
 	second, created, err := Init(ctx, d, p, copyDir)
 	if err != nil {
@@ -830,7 +898,7 @@ func TestEjectCleansUpWorktrees(t *testing.T) {
 
 	// Create a fake worktree directory to verify cleanup.
 	wtDir := p.WorktreeDir(repo.ID, "fake-run-id")
-	if err := exec.Command("mkdir", "-p", wtDir).Run(); err != nil {
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
 		t.Fatalf("create worktree dir: %v", err)
 	}
 

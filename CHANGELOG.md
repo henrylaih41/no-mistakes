@@ -1,5 +1,71 @@
 # Changelog
 
+## [1.35.0](https://github.com/kunchenguid/no-mistakes/compare/v1.34.2...v1.35.0) (2026-07-11)
+
+
+### Features
+
+* **pipeline:** reuse review sessions and streamline telemetry ([#444](https://github.com/kunchenguid/no-mistakes/issues/444)) ([48bd29f](https://github.com/kunchenguid/no-mistakes/commit/48bd29f6c04eef9876d4e85bf97af465de023df4))
+
+## [1.34.2](https://github.com/kunchenguid/no-mistakes/compare/v1.34.1...v1.34.2) (2026-07-10)
+
+
+### Bug Fixes
+
+* **daemon:** require explicit daemon run argv, fail fast on dead socket ([#416](https://github.com/kunchenguid/no-mistakes/issues/416)) ([b876724](https://github.com/kunchenguid/no-mistakes/commit/b87672422163865f0e2dfcc3f1432887ccea2124))
+* **git:** resolve gate hook paths robustly ([#383](https://github.com/kunchenguid/no-mistakes/issues/383)) ([df2db1e](https://github.com/kunchenguid/no-mistakes/commit/df2db1efd4d4d508679064481650195fb4b0b032))
+
+## [1.34.1](https://github.com/kunchenguid/no-mistakes/compare/v1.34.0...v1.34.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **cli:** guard destructive daemon lifecycle commands against active runs ([#415](https://github.com/kunchenguid/no-mistakes/issues/415)) ([493fc69](https://github.com/kunchenguid/no-mistakes/commit/493fc69d62b3d6b841080233230ce90c5fcf7b6e))
+* **config:** fail gate validation when no pipeline agent is runnable ([#437](https://github.com/kunchenguid/no-mistakes/issues/437)) ([3752c1a](https://github.com/kunchenguid/no-mistakes/commit/3752c1a0fb7b76ff40f83143eea799fbd6e7d5b0))
+* **daemon:** bound IPC connect attempts with a configurable timeout ([#403](https://github.com/kunchenguid/no-mistakes/issues/403)) ([c663aee](https://github.com/kunchenguid/no-mistakes/commit/c663aeee95d34b07351c3a0fbd105acbfcf5ac3a))
+* **update:** make --version a side-effect-free read-only probe ([#423](https://github.com/kunchenguid/no-mistakes/issues/423)) ([65e37bc](https://github.com/kunchenguid/no-mistakes/commit/65e37bcce93507fea3680abd28bcb9f0ace1b077))
+* **winproc:** suppress console window flashing for child processes on windows ([#418](https://github.com/kunchenguid/no-mistakes/issues/418)) ([7625211](https://github.com/kunchenguid/no-mistakes/commit/7625211125c399c9665ff7e7edc1dd8aa17af075))
+
+## [1.34.0](https://github.com/kunchenguid/no-mistakes/compare/v1.33.0...v1.34.0) (2026-07-07)
+
+
+### Features
+
+* **agent:** support ordered fallback agent lists ([#379](https://github.com/kunchenguid/no-mistakes/issues/379)) ([59278f1](https://github.com/kunchenguid/no-mistakes/commit/59278f156c670e568ca5b75d507746dd4ab92088))
+* **cli:** surface AXI step activity and auto-fix diagnostics ([#413](https://github.com/kunchenguid/no-mistakes/issues/413)) ([6fcf9d5](https://github.com/kunchenguid/no-mistakes/commit/6fcf9d59df29facbcde28c5a4981187e9e2b5a90))
+* **scm:** add GitHub Enterprise Server provider detection and host-prefixed slug ([#377](https://github.com/kunchenguid/no-mistakes/issues/377)) ([d4f9274](https://github.com/kunchenguid/no-mistakes/commit/d4f927462ad942ed9fd50bf065f14bd66e0c5e92))
+
+
+### Bug Fixes
+
+* **daemon:** enforce single-daemon ownership per NM_HOME ([#411](https://github.com/kunchenguid/no-mistakes/issues/411)) ([bbdf1f0](https://github.com/kunchenguid/no-mistakes/commit/bbdf1f0be8edd5c2917cb6bcc8cc6441d1e6a78f))
+* **git:** name bare gate repos explicitly with --git-dir ([#384](https://github.com/kunchenguid/no-mistakes/issues/384)) ([7bd8384](https://github.com/kunchenguid/no-mistakes/commit/7bd83841c930d4de4d902a1f3af7bea6d7386e6c))
+* **git:** write worktree identity per-worktree to avoid shared config.lock ([#385](https://github.com/kunchenguid/no-mistakes/issues/385)) ([95b4482](https://github.com/kunchenguid/no-mistakes/commit/95b4482d2aaae1235b105ba948a839a8b74a291b))
+
+## [1.33.0](https://github.com/kunchenguid/no-mistakes/compare/v1.32.2...v1.33.0) (2026-07-03)
+
+
+### Features
+
+* **scm:** add Azure DevOps provider ([#369](https://github.com/kunchenguid/no-mistakes/issues/369)) ([78c7e60](https://github.com/kunchenguid/no-mistakes/commit/78c7e606ce598491d50e72bf532045f4684ca8b7))
+
+
+### Bug Fixes
+
+* **agent:** surface opencode StructuredOutputError instead of text-parsing prose ([#375](https://github.com/kunchenguid/no-mistakes/issues/375)) ([02009a8](https://github.com/kunchenguid/no-mistakes/commit/02009a8535761eb41f8dea07118e71f86c9f0644))
+* **daemon:** detect stray daemons by resolved root before start ([#360](https://github.com/kunchenguid/no-mistakes/issues/360)) ([6c59484](https://github.com/kunchenguid/no-mistakes/commit/6c594845054c896a316bfc124489725624323d8b))
+* **daemon:** forward proxy env vars into managed daemon service definitions ([#322](https://github.com/kunchenguid/no-mistakes/issues/322)) ([03f5157](https://github.com/kunchenguid/no-mistakes/commit/03f515777c16db8fab0a58ee9000da86d409e6f4))
+* **gate:** resolve absolute bare repo dir in post-receive hook ([#269](https://github.com/kunchenguid/no-mistakes/issues/269)) ([#358](https://github.com/kunchenguid/no-mistakes/issues/358)) ([087fd27](https://github.com/kunchenguid/no-mistakes/commit/087fd279bb227e2d9f6112afb4c2d2a100f4fa8a))
+* **git:** absolutize PWD in NonInteractiveEnv ([#381](https://github.com/kunchenguid/no-mistakes/issues/381)) ([a84593c](https://github.com/kunchenguid/no-mistakes/commit/a84593cd4fa622d9aef38788db9c20acb7da431c))
+* **pipeline:** cap generated PR bodies safely ([#370](https://github.com/kunchenguid/no-mistakes/issues/370)) ([9059685](https://github.com/kunchenguid/no-mistakes/commit/9059685ad88e30554e5228fbb45ffd70f61caf00))
+
+## [1.32.2](https://github.com/kunchenguid/no-mistakes/compare/v1.32.1...v1.32.2) (2026-06-28)
+
+
+### Bug Fixes
+
+* **agent:** reap agent process group on clean exit to prevent daemon OOM crash ([#357](https://github.com/kunchenguid/no-mistakes/issues/357)) ([bdd2e39](https://github.com/kunchenguid/no-mistakes/commit/bdd2e3932e6b49830c622ed00cf7b99635688fca))
+
 ## [1.32.1](https://github.com/kunchenguid/no-mistakes/compare/v1.32.0...v1.32.1) (2026-06-28)
 
 

@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,7 +66,11 @@ func TestPushReceivedTracksRunTelemetry(t *testing.T) {
 		t.Fatalf("started branch_role = %v, want default", got)
 	}
 
-	finished := recorder.find("run", "action", "finished")
+	// The executor persists terminal status before its owner goroutine emits
+	// terminal telemetry. Wait for that asynchronous handoff instead of
+	// assuming it completed in the same scheduling slice, which is especially
+	// unreliable on Windows.
+	finished := waitForTelemetryEvent(t, recorder, "run", "action", "finished")
 	if finished == nil {
 		t.Fatal("expected run finished telemetry event")
 	}
@@ -256,6 +262,93 @@ func waitForStartedBranch(t *testing.T, started <-chan string, branch string) {
 			}
 		case <-timeout:
 			t.Fatalf("run for branch %s did not start", branch)
+		}
+	}
+}
+
+// TestPushReceivedConcurrentDifferentBranchRunsAvoidSharedConfigLock fires two
+// branch pushes for the same repo at the same time so both runs hit worktree
+// creation and git-identity setup concurrently. All runs share one gate bare
+// repo, so writing identity with `git config --local` (which targets the bare's
+// shared config) made the two startups race on <bare>/config.lock and fail one
+// run with "could not lock config file ...: File exists". CopyLocalUserIdentity
+// now writes per-worktree, so the startups no longer contend. The race window
+// is during synchronous startRun, so a failure surfaces directly as the
+// push_received call's error. macOS-only in practice (Linux file locking and
+// timing hide it), but the assertion is platform-independent.
+func TestPushReceivedConcurrentDifferentBranchRunsAvoidSharedConfigLock(t *testing.T) {
+	started := make(chan string, 2)
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&notifyBlockStep{name: types.StepReview, started: started}}
+	})
+
+	const repoID = "concurrent-config-lock-repo"
+	_, headSHA := setupTestGitRepo(t, p, d, repoID)
+
+	// Mirror a real gate: enable the per-worktree config isolation that
+	// `no-mistakes init` installs, which is what lets identity writes avoid the
+	// shared config.lock.
+	if err := git.IsolateHooksPath(context.Background(), p.RepoDir(repoID)); err != nil {
+		t.Fatalf("isolate hooks path: %v", err)
+	}
+
+	branches := []string{"feature/one", "feature/two"}
+	errs := make([]error, len(branches))
+	var wg sync.WaitGroup
+	for i, br := range branches {
+		wg.Add(1)
+		go func(i int, br string) {
+			defer wg.Done()
+			// A dedicated client per goroutine: a single client serializes
+			// calls, which would defeat the concurrency we are testing.
+			client, err := ipc.Dial(p.Socket())
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			defer client.Close()
+			var res ipc.PushReceivedResult
+			errs[i] = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+				Gate: p.RepoDir(repoID),
+				Ref:  "refs/heads/" + br,
+				Old:  "0000000000000000000000000000000000000000",
+				New:  headSHA,
+			}, &res)
+		}(i, br)
+	}
+	wg.Wait()
+
+	for i, br := range branches {
+		if errs[i] != nil {
+			t.Fatalf("concurrent push for %s failed: %v", br, errs[i])
+		}
+	}
+
+	// Drain both start signals regardless of which run won the race to begin,
+	// then confirm both branches have a live, error-free run.
+	gotStarted := make(map[string]bool, len(branches))
+	for range branches {
+		select {
+		case b := <-started:
+			gotStarted[b] = true
+		case <-time.After(3 * time.Second):
+			t.Fatalf("a concurrent run did not start (started so far: %v)", gotStarted)
+		}
+	}
+
+	for _, br := range branches {
+		if !gotStarted[br] {
+			t.Fatalf("run for branch %s did not start", br)
+		}
+		active, err := d.GetActiveRun(repoID, br)
+		if err != nil {
+			t.Fatalf("get active run for %s: %v", br, err)
+		}
+		if active == nil {
+			t.Fatalf("expected active run for %s", br)
+		}
+		if active.Status != types.RunRunning {
+			t.Fatalf("active run for %s status = %s, want running (error: %v)", br, active.Status, active.Error)
 		}
 	}
 }
@@ -482,8 +575,22 @@ func TestPushReceivedReturnsBeforeIntentSummarization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(started); elapsed > 2500*time.Millisecond {
-		t.Fatalf("PushReceived took %s, want under 2.5s", elapsed)
+	// The 3s slowClaude script is not on this test's synchronous path (the
+	// review step here is a mockPassStep and the "claude" agent is explicit,
+	// so ResolveAgent never probes it): what this bound really guards is
+	// startRun's synchronous git plumbing (worktree add, identity copy,
+	// fetch, resolve-ref, config loads) staying well clear of the 3s the
+	// pipeline goroutine's slow agent call would take if it ever ran inline.
+	// Windows CI process-spawn overhead across those several git subprocess
+	// calls is much higher than on macOS/Linux, so Windows gets generous
+	// headroom while non-Windows keeps the tight bound that would catch a
+	// real regression in startRun's synchronous git plumbing.
+	maxElapsed := 2500 * time.Millisecond
+	if runtimeGOOS == "windows" {
+		maxElapsed = 8 * time.Second
+	}
+	if elapsed := time.Since(started); elapsed > maxElapsed {
+		t.Fatalf("PushReceived took %s, want under %s", elapsed, maxElapsed)
 	}
 	if result.RunID == "" {
 		t.Fatal("expected non-empty run ID")
@@ -555,6 +662,11 @@ func TestPushReceivedTracksRunTelemetryAfterPanic(t *testing.T) {
 	}
 	if _, ok := finished.fields["duration_ms"]; !ok {
 		t.Fatal("expected duration_ms in run finished telemetry after panic")
+	}
+	for _, field := range []string{"agent_invocations", "resumed_invocations", "fallback_invocations"} {
+		if got, ok := finished.fields[field]; !ok || got != 0 {
+			t.Fatalf("%s = %v, want 0", field, got)
+		}
 	}
 }
 

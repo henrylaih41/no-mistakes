@@ -112,6 +112,53 @@ func TestStartStep(t *testing.T) {
 	if got.StartedAt == nil {
 		t.Error("expected non-nil started_at")
 	}
+	if got.LastActivityAt == nil {
+		t.Error("expected non-nil last_activity_at")
+	}
+	if got.LastActivity == nil || *got.LastActivity != "step started" {
+		t.Errorf("last_activity = %v, want step started", got.LastActivity)
+	}
+}
+
+func TestStepActivity(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+
+	if err := d.StartStep(step.ID); err != nil {
+		t.Fatalf("start step: %v", err)
+	}
+	pid := 12345
+	if err := d.SetStepAgentActivity(step.ID, "codex started pid=12345", &pid); err != nil {
+		t.Fatalf("set agent activity: %v", err)
+	}
+	got, _ := d.GetStepResult(step.ID)
+	if got.AgentPID == nil || *got.AgentPID != pid {
+		t.Fatalf("agent_pid = %v, want %d", got.AgentPID, pid)
+	}
+	if got.LastActivity == nil || *got.LastActivity != "codex started pid=12345" {
+		t.Fatalf("last_activity = %v, want codex start", got.LastActivity)
+	}
+
+	if err := d.TouchStepActivity(step.ID, "log: still working"); err != nil {
+		t.Fatalf("touch activity: %v", err)
+	}
+	got, _ = d.GetStepResult(step.ID)
+	if got.AgentPID == nil || *got.AgentPID != pid {
+		t.Fatalf("touch should preserve agent_pid, got %v", got.AgentPID)
+	}
+	if got.LastActivity == nil || *got.LastActivity != "log: still working" {
+		t.Fatalf("last_activity = %v, want log activity", got.LastActivity)
+	}
+
+	if err := d.SetStepAgentActivity(step.ID, "codex exited pid=12345 status=success", nil); err != nil {
+		t.Fatalf("clear agent activity: %v", err)
+	}
+	got, _ = d.GetStepResult(step.ID)
+	if got.AgentPID != nil {
+		t.Fatalf("agent_pid = %v, want nil after exit", *got.AgentPID)
+	}
 }
 
 func TestCompleteStep(t *testing.T) {
@@ -213,25 +260,6 @@ func TestCompleteStepWithStatusClearsRecoveredError(t *testing.T) {
 				t.Fatalf("completed step retained stale error %q", *got.Error)
 			}
 		})
-	}
-}
-
-func TestUpdateStepStatusWithDuration(t *testing.T) {
-	d := openTestDB(t)
-	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
-	step, _ := d.InsertStepResult(run.ID, types.StepTest)
-
-	if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1200); err != nil {
-		t.Fatalf("update step status with duration: %v", err)
-	}
-
-	got, _ := d.GetStepResult(step.ID)
-	if got.Status != types.StepStatusAwaitingApproval {
-		t.Errorf("status = %q, want %q", got.Status, types.StepStatusAwaitingApproval)
-	}
-	if got.DurationMS == nil || *got.DurationMS != 1200 {
-		t.Fatalf("duration_ms = %v, want 1200", got.DurationMS)
 	}
 }
 

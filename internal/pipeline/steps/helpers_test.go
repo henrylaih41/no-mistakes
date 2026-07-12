@@ -40,8 +40,12 @@ func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result,
 
 func (m *mockAgent) Close() error { return nil }
 
+var gitCmdMu sync.Mutex
+
 func gitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	gitCmdMu.Lock()
+	defer gitCmdMu.Unlock()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),

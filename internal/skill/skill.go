@@ -88,6 +88,10 @@ the same way once the work is committed on a feature branch.
   validates committed history, not your uncommitted working tree.
 - You must be on a **feature branch**, not the repository's default branch.
 - The repository must already be initialized with ` + "`no-mistakes init`" + `.
+- The daemon must have a runnable configured pipeline agent: a supported native
+  agent binary, or ` + "`acpx`" + ` for an ` + "`acp:<target>`" + `. You are the AXI driver, not
+  an implicit pipeline-agent backend. If none is available, the run fails
+  before its first step; ` + "`no-mistakes doctor`" + ` reports the configuration problem.
 
 If any of these is not met, ` + "`axi run`" + ` returns an ` + "`error:`" + ` with the exact command
 to fix it - read it and act on it (commit your work, or create a branch). If the
@@ -171,6 +175,13 @@ Run the pipeline and decide on its findings as they come up:
    the run is parked at an approval, fix-review, transient agent retry, or triage gate and waiting
    for you to send ` + "`axi respond`" + `. The field is observability only: it does not change
    gate resolution, auto-resume the run, or make ` + "`--yes`" + ` the default.
+   While a step is actively ` + "`running`" + ` or ` + "`fixing`" + `, ` + "`axi status`" + ` may include
+   ` + "`active_steps`" + ` with ` + "`active_for`" + `, ` + "`last_activity`" + `, a native ` + "`agent_pid`" + ` when
+   a subprocess agent is running, and the current round such as ` + "`round 1`" + `,
+   ` + "`auto-fix 1/3`" + `, or ` + "`fix 2`" + `. If ` + "`last_activity`" + ` is prefixed with
+   ` + "`quiet`" + `, no step log or native-agent lifecycle activity has arrived for
+   longer than ` + "`step_quiet_warning`" + `. Treat that as a liveness clue, not as
+   permission to cancel, rerun, or edit the worktree yourself.
 2. If the output contains a ` + "`gate:`" + ` object, the pipeline is waiting on you.
    If the gate status is ` + "`awaiting_agent_retry`" + `, it has no findings to
    fix; use ` + "`no-mistakes axi respond --action retry`" + ` to retry that same
@@ -265,6 +276,15 @@ Run the pipeline and decide on its findings as they come up:
      never mid-run to circumvent a gate. Do not leave the user at a ` + "`failed`" + `
      outcome without either retrying or explaining what blocks it.
 
+The same applies to any additional fix that comes after a gate round has
+already produced fix commits - a newly surfaced finding, a reviewer's
+pre-merge request, or any other post-completion change: commit it on top of
+the existing branch and re-run ` + "`no-mistakes axi run --intent \"...\"`" + ` with the original user intent.
+Never abort-and-restart, reset the branch, or open a new branch in a way that drops the prior gate-fix commits (including the pipeline's own
+` + "`no-mistakes(review|document|lint): ...`" + ` commits) - a re-run only
+re-validates the branch's current state, so those commits stay on the branch
+and already-resolved findings do not re-surface.
+
 The CI step deliberately keeps watching the PR after checks pass, so
 ` + "`axi run`" + ` returns ` + "`checks-passed`" + ` the moment checks are green rather than
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
@@ -332,6 +352,7 @@ no-mistakes axi abort --run <id>   # cancel a specific run by id (works outside 
 
 - Output is TOON: ` + "`key: value`" + ` pairs, ` + "`name[N]{cols}:`" + ` tables, and ` + "`help[N]:`" + ` hints.
 - A non-terminal run object may include ` + "`awaiting_agent: parked <duration>`" + ` immediately after ` + "`status`" + `; that means the run is parked at an ` + "`awaiting_approval`" + `, ` + "`awaiting_agent_retry`" + `, ` + "`fix_review`" + `, or ` + "`awaiting_triage`" + ` gate awaiting your ` + "`axi respond`" + `.
+- A run object with a ` + "`running`" + ` or ` + "`fixing`" + ` step may include an ` + "`active_steps`" + ` table. Use it to see the active duration, latest activity, native agent PID, and current execution or fix round.
 - The ` + "`help`" + ` list at the bottom of most responses tells you the next commands to run.
 - Errors are printed as ` + "`error: ...`" + ` on stdout with a ` + "`help`" + ` list; act on the suggestion.
 - Exit codes: ` + "`0`" + ` success, no-op, or normal decision gates, ` + "`1`" + ` failed or cancelled final outcomes, ` + "`2`" + ` bad usage.
@@ -344,10 +365,13 @@ note: Review auto-fix is disabled by default (auto_fix.review: 0; a repo or glob
 findings[2]{id,severity,source,file,action,description}:
   r1,warning,codex,internal/pipeline/executor.go,auto-fix,Error from os.Remove is ignored
   r2,error,claude,cmd/no-mistakes/main.go,ask-user,New --force flag bypasses the confirm prompt
-help[3]:
-  no-mistakes axi respond --action fix --findings r1
-  no-mistakes axi respond --action approve
-  A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a gate, respond; loop until an outcome.
+help[6]:
+  Run ` + "`no-mistakes axi respond --action approve`" + ` to accept this step and continue
+  Run ` + "`no-mistakes axi respond --action fix --findings <ids>`" + ` to have the pipeline fix the selected findings (do not edit files yourself)
+  Run ` + "`no-mistakes axi respond --action skip`" + ` to skip this step
+  Run ` + "`no-mistakes axi logs --step review --full`" + ` to read the full step log
+  A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a ` + "`gate:`" + `, respond; loop until an ` + "`outcome:`" + `.
+  When you make an additional fix after a gate round has already produced fix commits, commit it on top of the existing branch and run ` + "`no-mistakes axi run --intent \"...\"`" + ` with the original user intent. Never abort-and-restart, reset the branch, or open a new branch in a way that drops prior gate-fix commits. A fresh run re-validates the branch's current state, so already-resolved findings do not re-surface.
 ` + "```" + `
 
 Read the ` + "`action`" + ` column per row: decide ` + "`r1`" + ` (auto-fix) on your own

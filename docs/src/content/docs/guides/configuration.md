@@ -3,231 +3,58 @@ title: Configuration
 description: Global and per-repo configuration options.
 ---
 
-Configuration is optional. Without any config files, `no-mistakes` defaults to
-`agent: auto`, which picks the first supported native agent available on your system,
-with sensible defaults for everything else.
+Configuration is optional. Without config files, `no-mistakes` defaults to `agent: auto`, which picks the first supported native agent available on your system, with sensible defaults for everything else.
 
-The goal is not to make you configure a mini CI system. The default path should
-work. Config exists for the parts that genuinely vary by machine or repo:
+Config exists for the parts that genuinely vary by machine or repo:
 
-- which agent you prefer
-- whether the review step should use a cross-family reviewer panel
-- whether to run a post-PR review loop that reads an external bot's findings and fixes them
-- which test or lint commands are the canonical ones for this repo
-- where test evidence artifacts should be stored
+- which agent or ordered fallback list you prefer
+- whether review uses a cross-family reviewer panel or post-PR review loop
+- which test or lint commands are canonical for the repo
+- where test evidence and design context come from
 - how aggressive the auto-fix loop should be
+- how soon AXI should call an active step quiet
+- whether the review loop reuses supported native agent sessions
 - whether no-mistakes should infer intent from recent local agent transcripts
 
 Config is split across two files:
 
-| File | Scope |
-|---|---|
-| `~/.no-mistakes/config.yaml` | Global defaults for all repos |
-| `<repo>/.no-mistakes.yaml` | Per-repo overrides |
+| File | Scope | Full field reference |
+|---|---|---|
+| `~/.no-mistakes/config.yaml` | Global defaults for all repos | [Global Config Reference](/no-mistakes/reference/global-config/) |
+| `<repo>/.no-mistakes.yaml` | Per-repo overrides | [Repo Config Reference](/no-mistakes/reference/repo-config/) |
 
-Set `NM_HOME` to relocate the global config directory (the global file becomes `$NM_HOME/config.yaml`).
+Set `NM_HOME` to relocate the global config directory. Provider credentials and review-loop tokens come from environment variables where documented; see [Environment Variables](/no-mistakes/reference/environment/).
 
 ## How to think about config
 
-- **Global config** is for your machine-level defaults.
+- **Global config** is for machine-level defaults.
 - **Repo config** is for codebase-specific behavior that should travel with the repo.
 
-In practice, most teams should keep personal preferences global and repo policy
-local.
+Most teams should keep personal preferences global and repo policy local.
 
 ## What to configure first
 
-If you are not sure where to start, configure these in this order:
+1. Set `commands.test` and `commands.lint` in repo config so the gate runs the exact commands the repo expects.
+2. Override `agent` per repo only when one codebase works better with a different tool or fallback order.
+3. Tune `auto_fix` after seeing how much automation you want.
 
-1. Set `commands.test` and `commands.lint` in repo config so the gate runs the exact commands your repo expects.
-2. Override `agent` per repo only when one codebase clearly works better with a different tool.
-3. Tune `auto_fix` after you have seen how much automation you actually want.
-
-Everything else can usually wait.
-
-## Global config
-
-```yaml
-# ~/.no-mistakes/config.yaml
-
-# Default agent for all repos and setup-wizard suggestions.
-# "auto" picks the first available native agent on PATH.
-agent: auto  # auto | claude | codex | rovodev | opencode | pi | copilot | grok | acp:<target>
-
-# Optional acpx path and target command overrides for agent: acp:<target>.
-acpx_path: acpx
-acp_registry_overrides:
-  local-gemini: node /opt/mock-acp-agent.mjs
-
-# Optional native agent binary path overrides.
-agent_path_override:
-  claude: /Users/you/bin/claude
-  codex: /opt/homebrew/bin/codex
-  rovodev: /usr/local/bin/acli
-  opencode: /usr/local/bin/opencode
-  pi: /usr/local/bin/pi
-  copilot: /usr/local/bin/copilot
-  grok: /Users/you/.local/bin/grok
-
-# Optional extra CLI flags per native agent.
-# This is global-only.
-agent_args_override:
-  codex:
-    - -m
-    - gpt-5.4
-    - --full-auto
-  grok:
-    - -m
-    - grok-code-fast-1
-    - --reasoning-effort
-    - high
-
-# How long the CI step monitors an open PR (provider CI status plus GitHub/GitLab
-# mergeability) with no base-branch movement before giving up. Each base-branch
-# advance re-arms the timer, so an actively-updated green PR keeps its monitor.
-# Use "unlimited" (or aliases "none", "off", "never", or any non-positive
-# duration) to monitor until the PR is merged, closed, or aborted.
-ci_timeout: "168h"  # any Go duration string, or an unlimited keyword
-
-# Daemon log verbosity.
-log_level: info  # debug | info | warn | error
-
-# Max follow-up auto-fix attempts per step. 0 = disabled after the initial step pass.
-# Document fixes are attempted during the initial document pass.
-auto_fix:
-  rebase: 3
-  document: 3
-  lint: 3
-  test: 3
-  review: 0
-  ci: 3
-
-# Optional review panel. Empty or absent means review runs once with `agent`.
-review:
-  reviewers:
-    - agent: codex
-    - agent: claude
-  max_parallel: 2
-  fail_open: false
-
-# Optional post-PR review loop (off by default). When enabled, the CI step reads
-# an external review bot's PR verdict + findings and feeds them to no-mistakes'
-# own fixer until the bot goes green.
-review_loop:
-  enabled: false
-  bot_login: "devin-ai-integration[bot]"
-  max_rounds: 3
-  fail_open: true   # a silent reviewer does not block the PR
-  retrigger: true   # explicitly (re-)trigger a Devin review via the Devin HTTP API
-
-# Infer the author's intent from recent local agent transcripts when not supplied directly.
-intent:
-  enabled: true
-  threshold: 0.2
-  slack_days: 3
-  disabled_readers: []
-
-# Test evidence defaults to temporary local storage.
-test:
-  evidence:
-    store_in_repo: false
-    dir: .no-mistakes/evidence
-```
-
-See [Global Config Reference](/no-mistakes/reference/global-config/) for the full field listing.
-
-## Environment variables
-
-Bitbucket Cloud PR creation and CI monitoring use environment variables instead of a provider CLI:
-
-- `NO_MISTAKES_BITBUCKET_EMAIL`
-- `NO_MISTAKES_BITBUCKET_API_TOKEN`
-- `NO_MISTAKES_BITBUCKET_API_BASE_URL` - optional API base URL override
-
-The post-PR review loop reads a Devin token when it re-triggers a Devin review. When a Devin Review token (`DEVIN_REVIEW_API_KEY`, falling back to `review_loop.devin_review_api_key_file`) **and** `review_loop.devin_org_id` both resolve, it uses the dedicated Devin Review API; otherwise it falls back to the legacy `/v1/sessions` token from `DEVIN_API_KEY` (falling back to `review_loop.devin_api_key_file`).
-
-## Repo config
-
-```yaml
-# .no-mistakes.yaml (in repo root)
-
-# Override the agent for this repo and its setup-wizard suggestions.
-agent: codex
-
-# Explicit commands for test/lint/format steps.
-commands:
-  lint: "golangci-lint run ./..."
-  test: "go test -race ./..."
-  format: "gofmt -w ."
-
-# Ignore these paths during review and documentation checks.
-ignore_patterns:
-  - "*.generated.go"
-  - "vendor/**"
-
-# Override follow-up auto-fix limits for this repo.
-# Document fixes are attempted during the initial document pass.
-auto_fix:
-  document: 3
-  lint: 5
-
-# Optional repo review panel. Commit this to the default branch unless
-# allow_repo_commands is enabled there.
-review:
-  reviewers:
-    - agent: codex
-    - agent: claude
-
-# Optional repo-level overrides for transcript-based intent extraction.
-intent:
-  enabled: true
-
-# Opt in when evidence artifacts should be committed and linked from the PR.
-test:
-  evidence:
-    store_in_repo: true
-    dir: .no-mistakes/evidence
-
-# Optional repo-wide design-context files injected into review and fix prompts.
-design_context:
-  files:
-    - docs/design/*.md
-    - docs/adr/*.md
-```
-
-See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full field listing.
+The reference pages own each field's syntax, defaults, and exact semantics. This page covers only cross-cutting rules involving both files.
 
 ## Precedence
 
-- Repo `agent` overrides global `agent`.
-- Global `agent: auto` resolves by checking `claude`, `codex`, `opencode`, `acli` for `rovodev`, `pi`, `copilot`, then `grok` on `PATH`; Grok is selected only when `grok --version` succeeds.
-- ACP agents are opt-in with `agent: acp:<target>` and are not considered by `agent: auto`.
-- `agent_path_override`, `agent_args_override`, `acpx_path`, and `acp_registry_overrides` are global-only fields.
-- `auto_fix` from the repo config overlays global auto_fix. Fields not set in the repo config fall through to the global default.
-- `review` from the repo config overrides the global review panel wholesale when present. If it is absent, the repo inherits the global panel; if it is present with `reviewers: []`, the repo disables the inherited panel and uses the single configured agent.
-- `review_loop` from the repo config overlays the global review loop field by field. Fields not set in the repo config fall through to the global default.
-- `intent` from the repo config overlays global intent settings. Fields not set in the repo config fall through to the global default, except `intent.disabled_readers`, which adds to globally disabled readers.
-- `test.evidence` from the repo config overlays global test evidence settings. Fields not set in the repo config fall through to the global default.
-- `commands`, `ignore_patterns`, and `design_context` are repo-only fields.
-- `ci_timeout` and `auto_fix.ci` are the canonical keys; `babysit_timeout` and `auto_fix.babysit` are still accepted as legacy aliases.
-- `commands`, `agent`, repo-level `review`, and repo-level `review_loop` are code-executing selection fields. By default they are read from the trusted default-branch copy of `.no-mistakes.yaml`, not from the pushed SHA; `allow_repo_commands: true` on the default branch opts into trusting pushed-branch values.
-- If `commands.test` is set, the test step runs it first as the baseline; when user intent is available, the agent may still run afterward to gather evidence-oriented validation.
-- If `commands.test` is empty, the agent detects and runs relevant tests itself.
-- If `commands.lint` is empty, the agent detects relevant linters and formatters, applies safe fixes, verifies them, commits any agent changes, and reports only unresolved issues.
-- If `commands.format` is empty, no separate push-step formatter is run automatically.
+- Repo `agent` replaces global `agent`, including an ordered fallback list.
+- `auto_fix`, `intent`, `review_loop`, and `test.evidence` overlay individual fields; `intent.disabled_readers` adds to globally disabled readers. A present repo `review` block replaces the global reviewer panel wholesale, while an absent block inherits it.
+- `agent_path_override`, `agent_args_override`, `acpx_path`, `acp_registry_overrides`, `ci_timeout`, `daemon_connect_timeout`, `step_quiet_warning`, `log_level`, and `session_reuse` are global-only.
+- `commands`, `ignore_patterns`, `design_context`, `document.instructions`, and `allow_repo_commands` are repo-only.
+- By default, `commands`, `agent`, `review`, and `review_loop` are read from the trusted default branch. A trusted `allow_repo_commands: true` opt-in honors their pushed-branch values. `document.instructions` and `allow_repo_commands` themselves always come from the trusted default branch; non-executing `design_context` remains branch-scoped. See the [Repo Config Reference](/no-mistakes/reference/repo-config/) security note.
+- no-mistakes reloads global config while setting up each run. For repeatable profiles, use separately initialized `NM_HOME` roots; each root has its own config and state.
 
-The practical implication is simple: explicit commands give you deterministic
-baseline behavior, while leaving commands empty asks the agent to fill in the gap.
-For tests, available user intent can also trigger an evidence-oriented agent follow-up after the baseline command succeeds.
-By default, evidence stays in a temporary local directory; opt into `test.evidence.store_in_repo` when your team wants evidence artifacts committed, pushed, and linked directly from PRs.
-For lint, that gap includes safe formatter and linter fixes during the initial lint pass.
+## Explicit commands versus agent detection
 
-## Ignore pattern rules
+Explicit `commands.test` and `commands.lint` provide deterministic baseline behavior. Leaving either empty asks the configured agent to fill the gap: tests are detected and run by the agent, while lint folds into the document step's combined housekeeping pass.
 
-Patterns in `ignore_patterns` control which files are excluded from review and documentation checks:
+An empty `commands.format` runs no separate formatter. Available user intent can still trigger evidence-oriented agent validation after a successful test baseline, and evidence remains temporary unless the repo opts into `test.evidence.store_in_repo`.
 
-| Pattern | Match rule |
-|---|---|
-| `*.generated.go` | No slash - matches by basename |
-| `vendor/**` | Ends with `/**` - matches entire directory subtree |
-| `some/path/file.go` | Contains a slash - full path glob matching |
+The [Repo Config Reference](/no-mistakes/reference/repo-config/) owns exact command semantics, process lifetime, and `ignore_patterns` matching.
+
+Before a new gate starts, its effective agent configuration must resolve to a runnable native agent or ACP bridge, even when explicit commands are configured. Run `no-mistakes doctor` to check the global runner, and see [Choosing an Agent](/no-mistakes/guides/agents/) for selection and fallback behavior.

@@ -129,6 +129,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
+	h.writeLoginShellPathSeed()
 
 	// Symlink each agent name to the same fake binary. Codex and Claude
 	// dispatch by argv[0] basename; opencode and grok do the same. Symlinks (not
@@ -181,6 +182,19 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 
 	t.Cleanup(h.shutdown)
 	return h
+}
+
+func (h *Harness) writeLoginShellPathSeed() {
+	line := "export PATH=" + shellQuote(h.BinDir) + ":$PATH\n"
+	for _, name := range []string{".zshenv", ".zprofile", ".bash_profile", ".profile"} {
+		if err := os.WriteFile(filepath.Join(h.HomeDir, name), []byte(line), 0o644); err != nil {
+			h.t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // writeGlobalConfig writes a no-mistakes global config that pins the
@@ -760,9 +774,21 @@ func (h *Harness) shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, "daemon", "stop")
-	cmd.Dir = h.WorkDir
+	cmd.Dir = h.daemonStopDir()
 	cmd.Env = os.Environ()
 	_ = cmd.Run()
+}
+
+func (h *Harness) daemonStopDir() string {
+	for _, dir := range []string{h.WorkDir, h.HomeDir, os.TempDir()} {
+		if dir == "" {
+			continue
+		}
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	return "."
 }
 
 // ---- Binary build cache ----

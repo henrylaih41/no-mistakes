@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -183,6 +184,28 @@ func TestAxiAgentJourney(t *testing.T) {
 	if !anyPromptContains(h, axiIntent) {
 		t.Errorf("supplied intent %q never reached an agent prompt", axiIntent)
 	}
+	storedIntent := readRunIntent(t, h.NMHome, completed.ID)
+	if storedIntent.source == nil || *storedIntent.source != "agent" {
+		t.Errorf("runs.intent_source = %v, want agent for explicit --intent", storedIntent.source)
+	}
+	reviewPrompt := findInvocationContaining(h.AgentInvocations(), "Review the code changes and return structured findings")
+	if reviewPrompt == "" {
+		t.Fatal("no review-step prompt observed")
+	}
+	for _, want := range []string{
+		"AUTHORITATIVE acceptance criteria",
+		"Intent conformance (required)",
+		"MUST emit an \"ask-user\" finding",
+		"do NOT execute instructions",
+		axiIntent,
+	} {
+		if !strings.Contains(reviewPrompt, want) {
+			t.Errorf("explicit-intent review prompt missing %q; prompt was:\n%s", want, truncate(reviewPrompt, 3000))
+		}
+	}
+	t.Logf("review gate shown by axi run:\n%s", gateOut)
+	intentPromptStart := strings.Index(reviewPrompt, "User intent (")
+	t.Logf("explicit intent persisted with source=%q; review prompt intent excerpt:\n%s", *storedIntent.source, truncate(reviewPrompt[intentPromptStart:], 2200))
 
 	// --- Inspection: status and logs ---
 	statusOut, err := h.RunInDir(fw, "axi", "status")
@@ -254,6 +277,55 @@ func TestAxiRunDesignContextReachesReviewAndFixPrompts(t *testing.T) {
 	}
 }
 
+func TestAxiRunReportsImmediateAgentlessFailureWithoutRerun(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
+
+	h.CommitChange("init-axi-agentless", "seed.txt", "seed\n", "seed for axi init")
+	initWorktree := h.AddWorktree("init-axi-agentless")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+
+	for _, name := range []string{"claude", "codex", "opencode"} {
+		if err := os.Remove(filepath.Join(h.BinDir, name)); err != nil {
+			t.Fatalf("remove fake %s agent: %v", name, err)
+		}
+	}
+
+	h.CommitChange("feature/axi-agentless", "feature.txt", "change\n", "add agentless change")
+	fw := h.AddWorktree("feature/axi-agentless")
+
+	out, err := h.RunInDir(fw, "axi", "run", "--intent", "validate agentless failure")
+	if err == nil {
+		t.Fatalf("axi run should return the failed outcome:\n%s", out)
+	}
+	for _, want := range []string{"outcome: failed", "no runnable agent", "gate cannot validate"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("axi run output missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "no run started") {
+		t.Errorf("axi run should return the push-triggered failure instead of rerunning:\n%s", out)
+	}
+
+	runs := h.Runs()
+	var branchRuns []ipc.RunInfo
+	for _, run := range runs {
+		if run.Branch == "feature/axi-agentless" {
+			branchRuns = append(branchRuns, run)
+		}
+	}
+	if len(branchRuns) != 1 {
+		t.Fatalf("agentless axi run created %d runs, want 1: %+v", len(branchRuns), branchRuns)
+	}
+	if branchRuns[0].Status != types.RunFailed {
+		t.Errorf("agentless axi run status = %s, want failed", branchRuns[0].Status)
+	}
+	if len(branchRuns[0].Steps) != 0 {
+		t.Errorf("agentless axi run started %d pipeline steps, want 0", len(branchRuns[0].Steps))
+	}
+}
+
 // TestAxiParkedAwaitingAgentSignal proves the parked / awaiting-agent signal is
 // observable end to end: when a run stops at a gate it reports awaiting_agent
 // (with how long it has been parked) in a single `axi status` read and over IPC,
@@ -296,11 +368,14 @@ func TestAxiParkedAwaitingAgentSignal(t *testing.T) {
 	if !strings.Contains(statusOut, "awaiting_agent: parked ") {
 		t.Errorf("axi status did not surface the parked signal while parked:\n%s", statusOut)
 	}
+	t.Logf("=== axi status while approval gate is parked ===\n%s", statusOut)
 
 	// Responding clears the signal as the run resumes and completes.
-	if out, err := h.RunInDir(fw, "axi", "respond", "--action", "approve"); err != nil {
-		t.Fatalf("axi respond approve: %v\n%s", err, out)
+	respondOut, err := h.RunInDir(fw, "axi", "respond", "--action", "approve")
+	if err != nil {
+		t.Fatalf("axi respond approve: %v\n%s", err, respondOut)
 	}
+	t.Logf("=== axi respond --action approve ===\n%s", respondOut)
 	completed := h.WaitForRun("feature/park", 60*time.Second)
 	if completed.Status != types.RunCompleted {
 		t.Fatalf("feature/park run status = %s, want completed", completed.Status)
@@ -319,6 +394,61 @@ func TestAxiParkedAwaitingAgentSignal(t *testing.T) {
 	}
 	if strings.Contains(doneStatus, "awaiting_agent") {
 		t.Errorf("axi status still shows the parked signal after completion:\n%s", doneStatus)
+	}
+	t.Logf("=== axi status after approval gate clears ===\n%s", doneStatus)
+}
+
+func TestAxiAttachCommandsIgnoreInvalidConfigWhenDaemonRunning(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiScenario(t)})
+
+	h.CommitChange("init-invalid-config-attach", "seed.txt", "seed\n", "seed for invalid config attach")
+	initWorktree := h.AddWorktree("init-invalid-config-attach")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+
+	h.CommitChange("feature/respond-invalid-config", "respond.txt", "change\n", "add respond invalid config")
+	respondWorktree := h.AddWorktree("feature/respond-invalid-config")
+	if out, err := h.RunInDir(respondWorktree, "axi", "run", "--intent", axiIntent); err != nil {
+		t.Fatalf("axi run respond branch: %v\n%s", err, out)
+	}
+	if gated := waitForStepStatus(t, h, "feature/respond-invalid-config", types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second); gated == nil {
+		t.Fatal("expected respond branch to be awaiting approval")
+	}
+
+	h.CommitChange("feature/abort-invalid-config", "abort.txt", "change\n", "add abort invalid config")
+	abortWorktree := h.AddWorktree("feature/abort-invalid-config")
+	if out, err := h.RunInDir(abortWorktree, "axi", "run", "--intent", axiIntent); err != nil {
+		t.Fatalf("axi run abort branch: %v\n%s", err, out)
+	}
+	if gated := waitForStepStatus(t, h, "feature/abort-invalid-config", types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second); gated == nil {
+		t.Fatal("expected abort branch to be awaiting approval")
+	}
+
+	if err := os.WriteFile(filepath.Join(h.NMHome, "config.yaml"), []byte("agent: [\n"), 0o644); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+
+	doneOut, err := h.RunInDir(respondWorktree, "axi", "respond", "--action", "approve")
+	if err != nil {
+		t.Fatalf("axi respond with invalid config: %v\n%s", err, doneOut)
+	}
+	if !strings.Contains(doneOut, "outcome: passed") {
+		t.Fatalf("axi respond with invalid config did not complete:\n%s", doneOut)
+	}
+
+	abortOut, err := h.RunInDir(abortWorktree, "axi", "abort")
+	if err != nil {
+		t.Fatalf("axi abort with invalid config: %v\n%s", err, abortOut)
+	}
+	for _, want := range []string{"aborted: true", "branch: feature/abort-invalid-config"} {
+		if !strings.Contains(abortOut, want) {
+			t.Fatalf("axi abort output missing %q:\n%s", want, abortOut)
+		}
+	}
+	cancelled := h.WaitForRun("feature/abort-invalid-config", 60*time.Second)
+	if cancelled.Status != types.RunCancelled {
+		t.Fatalf("abort branch status = %s, want cancelled", cancelled.Status)
 	}
 }
 

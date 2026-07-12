@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -46,6 +48,11 @@ type Executor struct {
 	skips     map[types.StepName]bool
 
 	onEvent EventFunc
+
+	// sessions manages this run's durable review-loop agent sessions; shared
+	// carries run-scoped step-to-step results. Both are created per Execute.
+	sessions *RunSessions
+	shared   *RunShared
 
 	mu                   sync.Mutex
 	approvalCh           chan approvalResponse // buffered channel for approval responses
@@ -197,6 +204,8 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
 
+	e.initializeRunScopes(run.ID)
+
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
 	for _, step := range e.steps {
@@ -221,7 +230,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusSkipped), "", "", "", nil)
 			continue
 		}
-		skipRemaining, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir)
+		skipRemaining, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, stepExecutionState{})
 		if err != nil {
 			return e.failRun(run, repo, err, ctx)
 		}
@@ -247,22 +256,306 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	return nil
 }
 
+func (e *Executor) initializeRunScopes(runID string) {
+	sessionsEnabled := e.config != nil && e.config.SessionReuse && e.agent != nil
+	e.sessions = NewRunSessions(e.db, runID, e.agent, sessionsEnabled)
+	e.shared = &RunShared{}
+}
+
+type stepExecutionState struct {
+	fixing           bool
+	previousFindings string
+	roundNum         int
+	autoFixAttempts  int
+	executionMS      int64
+	currentRoundID   string
+}
+
+type recoveredGate struct {
+	index       int
+	step        Step
+	stepResult  *db.StepResult
+	findings    string
+	round       int
+	autoFixes   int
+	lastRoundID string
+}
+
+func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
+	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+		return fmt.Errorf("run is not a recoverable parked run")
+	}
+	_, err := (&Executor{db: database, steps: steps}).recoveredGate(run.ID)
+	return err
+}
+
+// Resume restores a run that was durably parked at an approval gate when the
+// daemon stopped. It only accepts a fully recorded gate and otherwise returns
+// an error so startup recovery can fail the run rather than guessing.
+func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
+	if repo == nil {
+		return fmt.Errorf("recovered run has no repository")
+	}
+	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
+		return err
+	}
+	gate, err := e.recoveredGate(run.ID)
+	if err != nil {
+		return err
+	}
+	logDir := e.paths.RunLogDir(run.ID)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
+	}
+	e.initializeRunScopes(run.ID)
+
+	e.mu.Lock()
+	e.waiting = true
+	e.waitingStep = gate.step.Name()
+	e.mu.Unlock()
+	e.emitStepEventWithFindingsDiffAndError(
+		ipc.EventStepCompleted,
+		run,
+		repo,
+		gate.step.Name(),
+		string(gate.stepResult.Status),
+		gate.findings,
+		"",
+		"",
+		gate.stepResult.DurationMS,
+	)
+
+	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
+	response, err := e.waitForApproval(ctx, gate.step.Name(), nil, 0)
+	parkedMS := time.Since(parkStart).Milliseconds()
+	duration := recoveredStepDuration(gate.stepResult)
+	if err != nil {
+		err = e.failApprovalGate(ctx, run.ID, gate.stepResult.ID, parkedMS, err)
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "", err.Error(), &duration)
+		return e.failRun(run, repo, fmt.Errorf("step %s: waiting for approval: %w", gate.step.Name(), err), ctx)
+	}
+	exitStatus, exitReason := approvalGateExitState(response.action)
+	if err := e.exitApprovalGate(ctx, run.ID, gate.stepResult.ID, exitStatus, parkedMS, exitReason); err != nil {
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "", err.Error(), &duration)
+		return e.failRun(run, repo, fmt.Errorf("step %s: leave recovered approval gate: %w", gate.step.Name(), err), ctx)
+	}
+
+	approvalFields := telemetry.Fields{
+		"step":       string(gate.step.Name()),
+		"action":     string(response.action),
+		"fix_review": gate.stepResult.Status == types.StepStatusFixReview,
+	}
+	if agentName := e.telemetryAgentName(); agentName != "" {
+		approvalFields["agent"] = agentName
+	}
+	if selectedCount := selectedFindingCount(gate.findings, response.findingIDs); selectedCount > 0 {
+		approvalFields["selected_findings_count"] = selectedCount
+	}
+	telemetry.Track("approval", approvalFields)
+	switch response.action {
+	case types.ActionApprove:
+		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusCompleted, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err), ctx)
+		}
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", "", &duration)
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
+	case types.ActionSkip:
+		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
+		}
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusSkipped), "", "", "", &duration)
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
+	case types.ActionAbort:
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "", "aborted by user", &duration)
+		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
+	case types.ActionFix:
+		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
+		selected := filterFindingsJSON(gate.findings, response.findingIDs)
+		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
+		if gate.lastRoundID != "" {
+			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, merged)
+			if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
+				if dbErr := e.db.SetStepRoundSelection(gate.lastRoundID, &idsJSON, db.RoundSelectionSourceUser); dbErr != nil {
+					slog.Warn("failed to record recovered selected finding ids", "step", gate.step.Name(), "round", gate.round, "error", dbErr)
+				}
+			}
+			if merged != "" && merged != selected {
+				if dbErr := e.db.SetStepRoundUserFindings(gate.lastRoundID, &merged); dbErr != nil {
+					slog.Warn("failed to record recovered user findings", "step", gate.step.Name(), "round", gate.round, "error", dbErr)
+				}
+			}
+		}
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", "", nil)
+		skipRemaining, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{
+			fixing:           true,
+			previousFindings: merged,
+			roundNum:         gate.round,
+			autoFixAttempts:  gate.autoFixes,
+			executionMS:      duration,
+			currentRoundID:   gate.lastRoundID,
+		})
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		if skipRemaining {
+			return e.skipRecoveredRemainder(run, repo, gate.index+1)
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
+	default:
+		return e.failRun(run, repo, fmt.Errorf("step %s: unsupported approval action %q", gate.step.Name(), response.action), ctx)
+	}
+}
+
+func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
+	results, err := e.db.GetStepsByRun(runID)
+	if err != nil {
+		return nil, fmt.Errorf("get recovered steps: %w", err)
+	}
+	if len(results) != len(e.steps) {
+		return nil, fmt.Errorf("recovered run has %d step records for %d steps", len(results), len(e.steps))
+	}
+
+	var gate *recoveredGate
+	for index, result := range results {
+		if result.StepName != e.steps[index].Name() {
+			return nil, fmt.Errorf("recovered step %d is %q, want %q", index, result.StepName, e.steps[index].Name())
+		}
+		if result.Status == types.StepStatusAwaitingApproval || result.Status == types.StepStatusFixReview {
+			if gate != nil || result.FindingsJSON == nil || result.StartedAt == nil || result.DurationMS == nil || result.AgentPID != nil {
+				return nil, fmt.Errorf("recovered approval gate is incomplete")
+			}
+			rounds, err := e.db.GetRoundsByStep(result.ID)
+			if err != nil || len(rounds) == 0 {
+				return nil, fmt.Errorf("recovered approval gate has no complete round")
+			}
+			latest := rounds[len(rounds)-1]
+			if latest.FindingsJSON == nil || *latest.FindingsJSON != *result.FindingsJSON {
+				return nil, fmt.Errorf("recovered approval gate findings are incomplete")
+			}
+			autoFixes := 0
+			for _, round := range rounds {
+				if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
+					autoFixes++
+				}
+			}
+			gate = &recoveredGate{
+				index:       index,
+				step:        e.steps[index],
+				stepResult:  result,
+				findings:    *result.FindingsJSON,
+				round:       latest.Round,
+				autoFixes:   autoFixes,
+				lastRoundID: latest.ID,
+			}
+			continue
+		}
+		if gate == nil {
+			if result.Status != types.StepStatusCompleted && result.Status != types.StepStatusSkipped {
+				return nil, fmt.Errorf("recovered step %s is %s before approval gate", result.StepName, result.Status)
+			}
+			continue
+		}
+		if result.Status != types.StepStatusPending {
+			return nil, fmt.Errorf("recovered step %s is %s after approval gate", result.StepName, result.Status)
+		}
+	}
+	if gate == nil {
+		return nil, fmt.Errorf("recovered run has no approval gate")
+	}
+	return gate, nil
+}
+
+func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, start int) error {
+	results, err := e.db.GetStepsByRun(run.ID)
+	if err != nil {
+		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
+	}
+	for index := start; index < len(e.steps); index++ {
+		if ctx.Err() != nil {
+			return e.failRun(run, repo, context.Cause(ctx), ctx)
+		}
+		if index >= len(results) || results[index].StepName != e.steps[index].Name() || results[index].Status != types.StepStatusPending {
+			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
+		}
+		skipRemaining, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, stepExecutionState{})
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		if skipRemaining {
+			return e.skipRecoveredRemainder(run, repo, index+1)
+		}
+	}
+	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		return fmt.Errorf("complete recovered run: %w", err)
+	}
+	run.Status = types.RunCompleted
+	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	return nil
+}
+
+func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int) error {
+	results, err := e.db.GetStepsByRun(run.ID)
+	if err != nil {
+		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err))
+	}
+	for index := start; index < len(e.steps); index++ {
+		if index >= len(results) || results[index].StepName != e.steps[index].Name() || results[index].Status != types.StepStatusPending {
+			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index))
+		}
+		if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err))
+		}
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", "", nil)
+	}
+	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		return fmt.Errorf("complete recovered run: %w", err)
+	}
+	run.Status = types.RunCompleted
+	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	return nil
+}
+
+func recoveredStepDuration(step *db.StepResult) int64 {
+	if step != nil && step.DurationMS != nil {
+		return *step.DurationMS
+	}
+	return 0
+}
+
+func recoveredExitCode(step *db.StepResult) int {
+	if step != nil && step.ExitCode != nil {
+		return *step.ExitCode
+	}
+	return 0
+}
+
+func recoveredLogPath(step *db.StepResult) string {
+	if step != nil && step.LogPath != nil {
+		return *step.LogPath
+	}
+	return ""
+}
+
 // executeStep runs a single step with approval coordination.
 // Returns (skipRemaining, error).
-func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string) (bool, error) {
+func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, error) {
 	stepName := step.Name()
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
+	autoFixLimit := 0
+	if e.config != nil {
+		autoFixLimit = e.config.AutoFixLimit(stepName)
+	}
 
 	// Mark step as running
-	if err := e.db.StartStep(sr.ID); err != nil {
+	if err := e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit); err != nil {
 		return false, fmt.Errorf("start step %s: %w", stepName, err)
 	}
 	e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
 
 	// Track execution-only time, excluding approval wait periods.
 	phaseStart := time.Now()
-	var executionMS int64
+	executionMS := state.executionMS
 	var durationOverrideMS int64 // sum of step-reported overrides (demo mode)
 
 	// Open log file for persistent step logging
@@ -277,8 +570,18 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// so Log knows whether it needs a leading \n to flush a streaming partial.
 	lastChunkNewline := true
 	userIntent := ""
-	if run != nil && run.Intent != nil {
-		userIntent = *run.Intent
+	userIntentSource := ""
+	if run != nil {
+		if run.Intent != nil {
+			userIntent = *run.Intent
+		}
+		// Propagate provenance alongside the text so steps can distinguish an
+		// explicit, authoritative `--intent` (Source=="agent") from a
+		// transcript-inferred hint. Dropping this is the provenance-erasure
+		// bug that let an authoritative intent be demoted to an ignorable hint.
+		if run.IntentSource != nil {
+			userIntentSource = *run.IntentSource
+		}
 	}
 	designContext := types.DesignContext{}
 	if run != nil && run.DesignContextJSON != nil {
@@ -288,60 +591,123 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		designContext = parsed
 	}
-	// Default the review panel to the single impl agent when none is
-	// configured, so every step (including review) is byte-identical to the
-	// pre-panel behavior.
+	lastLogActivityAt := time.Time{}
+	touchLogActivity := func(text string, force bool) {
+		if activity := stepActivityFromLog(text); activity != "" {
+			now := time.Now()
+			if !force && !lastLogActivityAt.IsZero() && now.Sub(lastLogActivityAt) < stepActivityThrottleInterval {
+				return
+			}
+			lastLogActivityAt = now
+			if dbErr := e.db.TouchStepActivity(sr.ID, activity); dbErr != nil {
+				slog.Warn("failed to touch step activity in db", "step", stepName, "error", dbErr)
+			}
+		}
+	}
+	writeLog := func(text string) {
+		if text != "" {
+			prefix := ""
+			if !lastChunkNewline {
+				prefix = "\n"
+			}
+			text = prefix + strings.TrimRight(text, "\n") + "\n\n"
+			lastChunkNewline = true
+		}
+		e.emitLogChunk(run, repo, stepName, text)
+		fmt.Fprint(logFile, text)
+		touchLogActivity(text, true)
+	}
+	writeLogChunk := func(text string) {
+		if text != "" {
+			lastChunkNewline = strings.HasSuffix(text, "\n")
+		}
+		e.emitLogChunk(run, repo, stepName, text)
+		fmt.Fprint(logFile, text)
+		touchLogActivity(text, strings.Contains(text, "\n"))
+	}
+	onAgentLifecycle := func(event agent.LifecycleEvent) {
+		text := event.Message
+		if text == "" {
+			text = fmt.Sprintf("%s %s", event.Agent, event.Phase)
+		}
+		switch event.Phase {
+		case agent.LifecyclePhaseStart:
+			pid := event.PID
+			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, &pid); dbErr != nil {
+				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
+			}
+		case agent.LifecyclePhaseExit:
+			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
+				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
+			}
+		default:
+			if dbErr := e.db.TouchStepActivity(sr.ID, text); dbErr != nil {
+				slog.Warn("failed to touch step activity in db", "step", stepName, "error", dbErr)
+			}
+		}
+		writeLog(text)
+	}
+	// roundNum is shared with the perf wrapper's round closure below: an
+	// invocation during execution of round N+1 sees roundNum still at N.
+	autoFixAttempts := state.autoFixAttempts
+	roundNum := state.roundNum
+
+	stepAgent := e.agent
+	if stepAgent != nil {
+		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
+		stepAgent = &perfRecordingAgent{
+			inner:    stepAgent,
+			db:       e.db,
+			runID:    run.ID,
+			stepName: stepName,
+			round:    func() int { return roundNum + 1 },
+		}
+	}
+	// Default the review panel to the single implementation agent when none is
+	// configured. Wrap configured reviewers too so their subprocess lifecycle
+	// contributes to the same step activity signal.
 	reviewers := e.reviewers
 	if len(reviewers) == 0 {
-		reviewers = []agent.Agent{e.agent}
+		reviewers = []agent.Agent{stepAgent}
+	} else {
+		wrapped := make([]agent.Agent, 0, len(reviewers))
+		for _, reviewer := range reviewers {
+			wrapped = append(wrapped, &lifecycleAgent{inner: reviewer, onLifecycle: onAgentLifecycle})
+		}
+		reviewers = wrapped
 	}
 	sctx := &StepContext{
-		Ctx:           ctx,
-		Run:           run,
-		Repo:          repo,
-		WorkDir:       workDir,
-		Agent:         e.agent,
-		Reviewers:     reviewers,
-		Config:        e.config,
-		DB:            e.db,
-		StepResultID:  sr.ID,
-		UserIntent:    userIntent,
-		DesignContext: designContext,
-		Log: func(text string) {
-			if text != "" {
-				prefix := ""
-				if !lastChunkNewline {
-					prefix = "\n"
-				}
-				text = prefix + strings.TrimRight(text, "\n") + "\n\n"
-				lastChunkNewline = true
-			}
-			e.emitLogChunk(run, repo, stepName, text)
-			fmt.Fprint(logFile, text)
-		},
-		LogChunk: func(text string) {
-			if text != "" {
-				lastChunkNewline = strings.HasSuffix(text, "\n")
-			}
-			e.emitLogChunk(run, repo, stepName, text)
-			fmt.Fprint(logFile, text)
-		},
+		Ctx:              ctx,
+		Run:              run,
+		Repo:             repo,
+		WorkDir:          workDir,
+		Agent:            stepAgent,
+		Reviewers:        reviewers,
+		Config:           e.config,
+		DB:               e.db,
+		StepResultID:     sr.ID,
+		UserIntent:       userIntent,
+		DesignContext:    designContext,
+		IntentSource:     userIntentSource,
+		Sessions:         e.sessions,
+		Shared:           e.shared,
+		Fixing:           state.fixing,
+		PreviousFindings: state.previousFindings,
+		Log:              writeLog,
+		LogChunk:         writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
+			touchLogActivity(text, true)
 		},
 	}
 
-	// Determine auto-fix limit for this step
-	autoFixLimit := 0
-	if e.config != nil {
-		autoFixLimit = e.config.AutoFixLimit(stepName)
-	}
-	autoFixAttempts := 0
-	roundNum := 0
 	nextTrigger := "initial"
+	if sctx.Fixing {
+		nextTrigger = "auto_fix"
+	}
 	skipRemaining := false
 	stepSkipped := false
-	var currentRoundID string // id of the most recently inserted round
+	currentRoundID := state.currentRoundID
 
 	// Execute with possible fix loop
 	for {
@@ -366,32 +732,34 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				e.waitingMaxFixRounds = 0
 				e.mu.Unlock()
 
-				if dbErr := e.db.SetRunAwaitingAgent(run.ID); dbErr != nil {
-					slog.Warn("failed to set awaiting-agent marker in db", "step", stepName, "run", run.ID, "error", dbErr)
-				}
-				if dbErr := e.db.ParkStep(sr.ID, types.StepStatusAwaitingRetry, reason, executionMS); dbErr != nil {
-					slog.Warn("failed to park step in db", "step", stepName, "status", types.StepStatusAwaitingRetry, "error", dbErr)
+				parkStart := time.Now()
+				if _, dbErr := e.db.EnterApprovalGate(ctx, run.ID, sr.ID, types.StepStatusAwaitingRetry, executionMS, &reason); dbErr != nil {
+					e.resetApprovalWait()
+					gateErr := fmt.Errorf("step %s: enter agent retry gate: %w", stepName, dbErr)
+					if failErr := e.db.FailStep(sr.ID, gateErr.Error(), executionMS); failErr != nil {
+						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", failErr)
+					}
+					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", gateErr.Error(), &executionMS)
+					return false, gateErr
 				}
 				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusAwaitingRetry), "", "", reason, &executionMS)
 
 				response, waitErr := e.waitForApproval(ctx, stepName, nil, 0)
-				if dbErr := e.db.ClearRunAwaitingAgent(run.ID); dbErr != nil {
-					slog.Warn("failed to clear awaiting-agent marker in db", "step", stepName, "run", run.ID, "error", dbErr)
-				}
+				parkedMS := time.Since(parkStart).Milliseconds()
 				if waitErr != nil {
-					if dbErr := e.db.FailStep(sr.ID, waitErr.Error(), executionMS); dbErr != nil {
-						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
-					}
+					waitErr = e.failApprovalGate(ctx, run.ID, sr.ID, parkedMS, waitErr)
 					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", waitErr.Error(), &executionMS)
 					return false, fmt.Errorf("step %s: waiting for agent retry: %w", stepName, waitErr)
 				}
 				if response.action != types.ActionRetry {
 					retryErr := fmt.Errorf("step %s: agent transient park requires retry action, got %s", stepName, response.action)
-					if dbErr := e.db.FailStep(sr.ID, retryErr.Error(), executionMS); dbErr != nil {
-						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
-					}
+					retryErr = e.failApprovalGate(ctx, run.ID, sr.ID, parkedMS, retryErr)
 					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", retryErr.Error(), &executionMS)
 					return false, retryErr
+				}
+				if dbErr := e.exitApprovalGate(ctx, run.ID, sr.ID, types.StepStatusRunning, parkedMS, nil); dbErr != nil {
+					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", dbErr.Error(), &executionMS)
+					return false, fmt.Errorf("step %s: leave agent retry gate: %w", stepName, dbErr)
 				}
 				trigger := db.RoundTriggerAgentManualRetry
 				if response.autoRetry {
@@ -413,9 +781,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 					"label": transient.Label,
 				})
 				phaseStart = time.Now()
-				if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusRunning); dbErr != nil {
-					slog.Warn("failed to update step status in db", "step", stepName, "status", "running", "error", dbErr)
-				}
 				e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
 				continue
 			}
@@ -424,6 +789,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// stderr from a rejected push); without this the step log shows the
 			// work starting but never why it stopped.
 			fmt.Fprintf(logFile, "\nerror: %s\n", err.Error())
+			touchLogActivity("error: "+err.Error(), true)
 			if dbErr := e.db.FailStep(sr.ID, err.Error(), durationMS); dbErr != nil {
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
@@ -484,6 +850,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
 				slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
 				executionMS += time.Since(phaseStart).Milliseconds()
+				fixCount := findingsCount(fixableFindings)
+				writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
 				if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusFixing); dbErr != nil {
 					slog.Warn("failed to update step status in db", "step", stepName, "status", "fixing", "error", dbErr)
 				}
@@ -548,34 +916,47 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.waitingMaxFixRounds = reviewMaxFixRounds
 		e.mu.Unlock()
 
-		// Surface the park as a pollable, run-level signal so a supervisor can
-		// tell in one `axi status` read that the run is waiting for the agent
-		// to drive this gate (versus actively running/fixing/ci). Observability
-		// only: it does not change the wait below. Cleared once the wait ends.
-		if dbErr := e.db.SetRunAwaitingAgent(run.ID); dbErr != nil {
-			slog.Warn("failed to set awaiting-agent marker in db", "step", stepName, "run", run.ID, "error", dbErr)
-		}
+		// Parking starts before the gate becomes observable. This includes the
+		// small handoff from publishing the gate to receiving a response, and
+		// prevents a prompt response from being omitted from the parked total.
+		parkStart := time.Now()
 
-		// Step needs approval - store execution-only duration and wait for user action.
-		if dbErr := e.db.UpdateStepStatusWithDuration(sr.ID, approvalStatus, executionMS); dbErr != nil {
-			slog.Warn("failed to update step status and duration in db", "step", stepName, "status", approvalStatus, "error", dbErr)
+		if _, dbErr := e.db.EnterApprovalGate(ctx, run.ID, sr.ID, approvalStatus, executionMS, nil); dbErr != nil {
+			e.resetApprovalWait()
+			gateErr := fmt.Errorf("step %s: enter approval gate: %w", stepName, dbErr)
+			if failErr := e.db.FailStep(sr.ID, gateErr.Error(), executionMS); failErr != nil {
+				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", failErr)
+			}
+			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", gateErr.Error(), &executionMS)
+			return false, gateErr
 		}
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, diffText, "", &executionMS)
 
 		response, err := e.waitForApproval(ctx, stepName, outcome.ApprovalAutoResolve, outcome.ApprovalAutoResolveInterval)
-		// The wait has ended (the agent responded, an external resolver cleared
-		// the gate, or it was cancelled): the run is no longer parked awaiting
-		// the agent. Clear the pollable marker before resuming so
-		// awaiting_agent_since is non-nil only while parked.
-		if dbErr := e.db.ClearRunAwaitingAgent(run.ID); dbErr != nil {
-			slog.Warn("failed to clear awaiting-agent marker in db", "step", stepName, "run", run.ID, "error", dbErr)
-		}
+		parkedMS := time.Since(parkStart).Milliseconds()
 		if err != nil {
-			if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {
-				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
-			}
+			err = e.failApprovalGate(ctx, run.ID, sr.ID, parkedMS, err)
 			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", err.Error(), &executionMS)
 			return false, fmt.Errorf("step %s: waiting for approval: %w", stepName, err)
+		}
+		if response.action == types.ActionFix && response.fixOverrideReason != "" {
+			var persistErr error
+			if currentRoundID == "" {
+				persistErr = fmt.Errorf("step %s: cannot persist fix override reason (no round record); refusing unattributed override fix round", stepName)
+			} else if dbErr := e.db.SetStepRoundFixOverrideReason(currentRoundID, response.fixOverrideReason); dbErr != nil {
+				persistErr = fmt.Errorf("step %s: persist fix override reason: %w", stepName, dbErr)
+			}
+			if persistErr != nil {
+				persistErr = e.failApprovalGate(ctx, run.ID, sr.ID, parkedMS, persistErr)
+				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", persistErr.Error(), &executionMS)
+				return false, persistErr
+			}
+			slog.Info("review fix override accepted", "step", stepName, "round", roundNum, "max_fix_rounds", reviewMaxFixRounds, "reason", response.fixOverrideReason)
+		}
+		exitStatus, exitReason := approvalGateExitState(response.action)
+		if dbErr := e.exitApprovalGate(ctx, run.ID, sr.ID, exitStatus, parkedMS, exitReason); dbErr != nil {
+			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", dbErr.Error(), &executionMS)
+			return false, fmt.Errorf("step %s: leave approval gate: %w", stepName, dbErr)
 		}
 
 		approvalFields := telemetry.Fields{
@@ -610,36 +991,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return false, nil
 
 		case types.ActionAbort:
-			if dbErr := e.db.FailStep(sr.ID, "aborted by user", executionMS); dbErr != nil {
-				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
-			}
 			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", "aborted by user", &executionMS)
 			return false, fmt.Errorf("step %s: aborted by user", stepName)
 
 		case types.ActionFix:
-			// An override fix round runs after the review max_fix_rounds cap was
-			// already consumed, so it must be attributable to a triage ruling
-			// before it starts (approved rider / ruling #11). Persist the reason
-			// first and refuse the extra round if it cannot be recorded, rather
-			// than launching an unattributable cap-exceeding fix. currentRoundID
-			// is empty only when the round row failed to insert above; that is
-			// just as unattributable, so it is fatal too.
-			if response.fixOverrideReason != "" {
-				var persistErr error
-				if currentRoundID == "" {
-					persistErr = fmt.Errorf("step %s: cannot persist fix override reason (no round record); refusing unattributed override fix round", stepName)
-				} else if dbErr := e.db.SetStepRoundFixOverrideReason(currentRoundID, response.fixOverrideReason); dbErr != nil {
-					persistErr = fmt.Errorf("step %s: persist fix override reason: %w", stepName, dbErr)
-				}
-				if persistErr != nil {
-					if dbErr := e.db.FailStep(sr.ID, persistErr.Error(), executionMS); dbErr != nil {
-						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
-					}
-					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", persistErr.Error(), &executionMS)
-					return false, persistErr
-				}
-				slog.Info("review fix override accepted", "step", stepName, "round", roundNum, "max_fix_rounds", reviewMaxFixRounds, "reason", response.fixOverrideReason)
-			}
 			fixFields := e.fixTelemetryFields("user", stepName, selectedFindingCount(outcome.Findings, response.findingIDs), 0)
 			if response.fixOverrideReason != "" {
 				fixFields["override"] = true
@@ -647,9 +1002,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			telemetry.Track("fix", fixFields)
 			// Fix - mark step as fixing, resume execution timer, re-execute.
 			phaseStart = time.Now()
-			if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusFixing); dbErr != nil {
-				slog.Warn("failed to update step status in db", "step", stepName, "status", "fixing", "error", dbErr)
-			}
+			selectedCount := selectedFindingCount(outcome.Findings, response.findingIDs)
+			writeLog(fmt.Sprintf("user-fix round starting after round %d (%d %s selected)", roundNum, selectedCount, pluralize(selectedCount, "finding", "findings")))
 			sctx.Fixing = true
 			selectedFindings := filterFindingsJSON(outcome.Findings, response.findingIDs)
 			mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
@@ -739,26 +1093,153 @@ func (e *Executor) reviewFixRoundCapReached(stepName types.StepName, stepResultI
 	return count >= max, count, max, nil
 }
 
+type lifecycleAgent struct {
+	inner       agent.Agent
+	onLifecycle func(agent.LifecycleEvent)
+}
+
+func (a *lifecycleAgent) Name() string {
+	return a.inner.Name()
+}
+
+func (a *lifecycleAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	previous := opts.OnLifecycle
+	opts.OnLifecycle = func(event agent.LifecycleEvent) {
+		if previous != nil {
+			previous(event)
+		}
+		if a.onLifecycle != nil {
+			a.onLifecycle(event)
+		}
+	}
+	return a.inner.Run(ctx, opts)
+}
+
+func (a *lifecycleAgent) Close() error {
+	return a.inner.Close()
+}
+
+// SupportsSessionResume forwards the wrapped adapter's session capability so
+// wrapping never hides it from the review loop's session manager.
+func (a *lifecycleAgent) SupportsSessionResume() bool {
+	return agent.SupportsSessionResume(a.inner)
+}
+
+func (a *lifecycleAgent) SupportsSessionProvider(provider string) bool {
+	return agent.SupportsSessionProvider(a.inner, provider)
+}
+
+func (a *lifecycleAgent) ReportsAgentAttempts() bool {
+	return agent.ReportsAgentAttempts(a.inner)
+}
+
+const (
+	maxStepActivityText          = 240
+	stepActivityThrottleInterval = time.Second
+)
+
+func stepActivityFromLog(text string) string {
+	end := len(text)
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(text[:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		end -= size
+	}
+	if end == 0 {
+		return ""
+	}
+	start := strings.LastIndexByte(text[:end], '\n') + 1
+	line := strings.TrimSpace(text[start:end])
+	return "log: " + truncateActivity(line)
+}
+
+func truncateActivity(text string) string {
+	if len(text) <= maxStepActivityText {
+		return text
+	}
+	runeCount := 0
+	for i := range text {
+		if runeCount == maxStepActivityText {
+			return text[:i] + "..."
+		}
+		runeCount++
+	}
+	return text
+}
+
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
+}
+
+func approvalGateExitState(action types.ApprovalAction) (types.StepStatus, *string) {
+	switch action {
+	case types.ActionApprove:
+		return types.StepStatusCompleted, nil
+	case types.ActionFix:
+		return types.StepStatusFixing, nil
+	case types.ActionSkip:
+		return types.StepStatusSkipped, nil
+	case types.ActionAbort:
+		reason := "aborted by user"
+		return types.StepStatusFailed, &reason
+	default:
+		reason := fmt.Sprintf("unsupported approval action %q", action)
+		return types.StepStatusFailed, &reason
+	}
+}
+
+func (e *Executor) exitApprovalGate(ctx context.Context, runID, stepResultID string, status types.StepStatus, parkedMS int64, reason *string) error {
+	cleanupCtx := context.Background()
+	if ctx != nil {
+		cleanupCtx = context.WithoutCancel(ctx)
+	}
+	if err := e.db.ExitApprovalGate(cleanupCtx, runID, stepResultID, status, parkedMS, reason); err != nil {
+		transitionErr := fmt.Errorf("exit approval gate: %w", err)
+		if cleanupErr := e.db.FailApprovalGate(cleanupCtx, runID, stepResultID, parkedMS, transitionErr.Error()); cleanupErr != nil {
+			return fmt.Errorf("%w; terminal cleanup: %v", transitionErr, cleanupErr)
+		}
+		return transitionErr
+	}
+	return nil
+}
+
+func (e *Executor) failApprovalGate(ctx context.Context, runID, stepResultID string, parkedMS int64, cause error) error {
+	cleanupCtx := context.Background()
+	if ctx != nil {
+		cleanupCtx = context.WithoutCancel(ctx)
+	}
+	if err := e.db.FailApprovalGate(cleanupCtx, runID, stepResultID, parkedMS, cause.Error()); err != nil {
+		return fmt.Errorf("%w; terminal approval gate cleanup: %v", cause, err)
+	}
+	return cause
+}
+
+func (e *Executor) resetApprovalWait() {
+	e.mu.Lock()
+	e.waiting = false
+	e.waitingStep = ""
+	e.waitingStepResultID = ""
+	e.waitingAgentRetry = false
+	e.waitingAtFixRoundCap = false
+	e.waitingFixRoundCount = 0
+	e.waitingMaxFixRounds = 0
+	e.mu.Unlock()
+	select {
+	case <-e.approvalCh:
+	default:
+	}
+}
+
 // waitForApproval blocks until a user action arrives, an external resolver
 // clears the parked gate, or context is cancelled.
 // The caller must set e.waiting and e.waitingStep before calling this method.
 func (e *Executor) waitForApproval(ctx context.Context, stepName types.StepName, autoResolve func(context.Context) bool, autoResolveInterval time.Duration) (approvalResponse, error) {
-	defer func() {
-		e.mu.Lock()
-		e.waiting = false
-		e.waitingStep = ""
-		e.waitingStepResultID = ""
-		e.waitingAgentRetry = false
-		e.waitingAtFixRoundCap = false
-		e.waitingFixRoundCount = 0
-		e.waitingMaxFixRounds = 0
-		e.mu.Unlock()
-		// Drain any stale response that arrived after context cancellation
-		select {
-		case <-e.approvalCh:
-		default:
-		}
-	}()
+	defer e.resetApprovalWait()
 
 	if autoResolve != nil && autoResolve(ctx) {
 		return approvalResponse{action: types.ActionApprove}, nil

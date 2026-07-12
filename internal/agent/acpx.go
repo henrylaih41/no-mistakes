@@ -23,6 +23,8 @@ type acpxAgent struct {
 
 func (a *acpxAgent) Name() string { return "acp:" + a.target }
 
+func (a *acpxAgent) ReportsAgentAttempts() bool { return true }
+
 func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, a.Name(), opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
@@ -35,45 +37,46 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
-	// Run in a dedicated process group so cancelling ctx reaps the acpx CLI
-	// and any subprocesses it spawns, not just the direct child.
 	shellenv.ConfigureShellCommand(cmd)
 
-	stdout, err := cmd.StdoutPipe()
+	started, err := startNativeAgentCommand(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("acpx stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("acpx stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("acpx start: %w", err)
 	}
+	defer started.closePipes()
+	pid := started.pid()
+	emitAgentStarted(opts, a.Name(), pid)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
 	stderrWG.Add(1)
 	go func() {
 		defer stderrWG.Done()
-		stderrBuf, _ = io.ReadAll(stderr)
+		stderrBuf, _ = io.ReadAll(started.stderr)
 	}()
 
 	var usage TokenUsage
-	text, stdoutErr, err := parseAcpxJSONEvents(ctx, stdout, opts.OnChunk, &usage)
-	stderrWG.Wait()
+	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage)
 	if err != nil {
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("acpx parse events: %w", err)
+		err = started.waitAfterParseError(err)
+		stderrWG.Wait()
+		retErr := fmt.Errorf("acpx parse events: %w", err)
+		emitAgentExited(opts, a.Name(), pid, retErr)
+		return nil, retErr
 	}
-	if err := cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("acpx exited: %w: %s", err, acpxProcessErrorOutput(stderrBuf, stdoutErr))
+	waitErr := started.wait()
+	stderrWG.Wait()
+	if waitErr != nil {
+		retErr := fmt.Errorf("acpx exited: %w: %s", waitErr, acpxProcessErrorOutput(stderrBuf, stdoutErr))
+		emitAgentExited(opts, a.Name(), pid, retErr)
+		return nil, retErr
 	}
 	if usage.OutputTokens == 0 {
 		usage.OutputTokens = estimateAcpxTokens(len(text))
 	}
-	return finalizeTextResult(a.Name(), text, opts.JSONSchema, usage)
+	res, err := finalizeTextResult(a.Name(), text, opts.JSONSchema, usage)
+	emitAgentExited(opts, a.Name(), pid, err)
+	return res, err
 }
 
 func (a *acpxAgent) Close() error { return nil }
