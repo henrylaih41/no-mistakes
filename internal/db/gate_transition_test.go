@@ -272,6 +272,33 @@ func TestExitApprovalGate_AtomicallyClearsMarkerAndStepStatus(t *testing.T) {
 	}
 }
 
+func TestExitApprovalGate_MissingMarkerReturnsGuardedDiagnostic(t *testing.T) {
+	database, _ := openGateTransitionTestDB(t)
+	run, step := gateTransitionFixture(t, database)
+	if _, err := database.EnterApprovalGate(context.Background(), run.ID, step.ID, types.StepStatusFixReview, 144, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.sql.Exec(`UPDATE runs SET awaiting_agent_since = NULL WHERE id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	err := database.ExitApprovalGate(context.Background(), run.ID, step.ID, types.StepStatusFixing, 250, nil)
+	if err == nil || !strings.Contains(err.Error(), "clear approval gate marker affected 0 rows") {
+		t.Fatalf("ExitApprovalGate error = %v, want guarded missing-marker diagnostic", err)
+	}
+	if strings.Contains(err.Error(), "converting NULL to int64") {
+		t.Fatalf("ExitApprovalGate returned driver conversion error: %v", err)
+	}
+
+	observedStep, err := database.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observedStep.Status != types.StepStatusFixReview {
+		t.Fatalf("step status = %s after rollback, want %s", observedStep.Status, types.StepStatusFixReview)
+	}
+}
+
 func TestGetRunSnapshot_IsGateConsistentDuringConcurrentTransition(t *testing.T) {
 	database, path := openGateTransitionTestDB(t)
 	run, step := gateTransitionFixture(t, database)
