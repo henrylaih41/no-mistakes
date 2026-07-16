@@ -33,7 +33,7 @@ Each port was completed as a logical tested commit (or a small code/docs series)
 ### Upstream-equivalent decisions
 
 - v1.37 parked-gate reconciliation is preserved as the substrate; atomic enter/exit wraps its one `waitForApprovalOrReconcile` path rather than adding a competing wait loop.
-- v1.37 reviewer lifecycle/performance/session wrappers are preserved for every panel member; fan-out occurs across wrapped step agents.
+- Panel fan-out preserves the lifecycle wrapper for each configured panel member. Performance recording remains implementation-agent scoped, while the durable reviewer session applies to the default single-reviewer path, matching the fork end state.
 - No checklist guarantee was replaced by a weaker upstream behavior.
 - No fork-delta path is absent from the re-port head.
 

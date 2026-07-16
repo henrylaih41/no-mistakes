@@ -120,10 +120,14 @@ func (d *DB) ExitApprovalGate(parent context.Context, runID, stepResultID string
 	transitionID := newID()
 	started := time.Now()
 	fields := d.gateLogFields(transitionID, "exit", runID, stepResultID, status)
-	var since int64
+	var since sql.NullInt64
 	defer func() {
+		var markerSince any
+		if since.Valid {
+			markerSince = since.Int64
+		}
 		fields = append(fields,
-			"awaiting_agent_since", since,
+			"awaiting_agent_since", markerSince,
 			"elapsed_ms", time.Since(started).Milliseconds(),
 		)
 		if err != nil {
@@ -186,7 +190,7 @@ func (d *DB) ExitApprovalGate(parent context.Context, runID, stepResultID string
 		return fmt.Errorf("commit approval gate exit transaction: %w", err)
 	}
 	slog.Info("approval gate transition committed", append(fields,
-		"awaiting_agent_since", since,
+		"awaiting_agent_since", since.Int64,
 		"parked_ms", parkedMS,
 		"run_rows_affected", 1,
 		"step_rows_affected", 1,
