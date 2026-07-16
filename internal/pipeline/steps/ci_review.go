@@ -58,15 +58,15 @@ const (
 // reviewed the current head and either left a native CHANGES_REQUESTED state or
 // posted any severe file-scoped finding on it (rolled up at the read layer). A
 // PENDING/NONE verdict means the bot has NOT reviewed this head — it reviewed an
-// older one. The findings returned alongside a PENDING/NONE verdict come from
-// GetBotFindings, which does NOT filter by head SHA, so they are STALE threads
-// from a previous head (the one the loop just fixed). Treating those stale
-// severe findings as NotGreen drove a redundant fix round on every poll until
-// MaxRounds, posting a new "Addressed in <sha>" reply on the same thread for
-// each push (observed on a real PR: 7 replies across 7 commits on one thread).
-// The loop must WAIT for the bot to re-review the new head instead of re-fixing
-// stale findings. Within the grace window that wait is "pending"; past it,
-// fail-open turns it into a checks-only green and fail-closed keeps it pending.
+// older one. GetBotFindings now filters threads by originalCommit.oid == headSHA
+// (see the head-SHA filter in github.go), so a PENDING/NONE verdict carries no
+// head-matching findings — the stale threads from the previous head are filtered
+// at the read layer. This gate is a belt-and-suspenders safety net: even if a
+// future host implementation doesn't filter by head, treating PENDING/NONE as
+// "wait for re-review" (within the grace window) rather than NotGreen prevents
+// re-fixing stale findings. Within the grace window that wait is "pending"; past
+// it, fail-open turns it into a checks-only green and fail-closed keeps it
+// pending.
 func evalDevinGate(verdict scm.ReviewVerdict, findings []scm.ReviewComment, cfg config.ReviewLoop, elapsed time.Duration) devinGateDecision {
 	if !cfg.Enabled {
 		return devinDecisionDisabled

@@ -493,7 +493,7 @@ type ghUser struct {
 // first:100 window. On a busy PR a newest live severe finding could land past
 // the first page, get truncated, and wrongly read as APPROVED, so GetBotFindings
 // walks every page (after:$cursor) before filtering.
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login __typename} databaseId path line originalLine body url}}}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login __typename} databaseId path line originalLine body url originalCommit{oid}}}}}}}}`
 
 // ghReviewThreadsResponse is the `gh api graphql` payload for reviewThreadsQuery.
 type ghReviewThreadsResponse struct {
@@ -524,14 +524,19 @@ type ghReviewThread struct {
 
 // ghThreadComment is a single comment node within a review thread. DatabaseID is
 // the comment's REST id, used as ReviewComment.ID so the loop can reply to it.
+// OriginalCommit.OID is the head SHA the thread was originally posted on, used by
+// GetBotFindings to filter stale threads from older heads (see the headSHA filter).
 type ghThreadComment struct {
-	Author       ghThreadAuthor `json:"author"`
-	DatabaseID   int64          `json:"databaseId"`
-	Path         string         `json:"path"`
-	Line         int            `json:"line"`
-	OriginalLine int            `json:"originalLine"`
-	Body         string         `json:"body"`
-	URL          string         `json:"url"`
+	Author         ghThreadAuthor `json:"author"`
+	DatabaseID     int64          `json:"databaseId"`
+	Path           string         `json:"path"`
+	Line           int            `json:"line"`
+	OriginalLine   int            `json:"originalLine"`
+	Body           string         `json:"body"`
+	URL            string         `json:"url"`
+	OriginalCommit struct {
+		OID string `json:"oid"`
+	} `json:"originalCommit"`
 }
 
 // ghThreadAuthor is the author of a GraphQL review-thread comment. GraphQL
@@ -619,8 +624,11 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 	// Fail-safe: without a head SHA we cannot confirm we are reading the current
 	// commit's review state, so report no findings rather than risk surfacing a
 	// stale thread. Mirrors GetReviewVerdict's empty-head short-circuit and keeps
-	// the two consistent (and short-circuits before any gh round-trip).
-	if strings.TrimSpace(headSHA) == "" {
+	// the two consistent (and short-circuits before any gh round-trip). Trim once
+	// here so the originalCommit.oid comparison below is symmetric with the
+	// (also-trimmed) oid (a callers-can't-be-trusted defensive normalization).
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" {
 		return nil, nil
 	}
 
@@ -672,6 +680,32 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 			continue
 		}
 		if !botLoginMatch(first.Author.Login, botLogin) {
+			continue
+		}
+		// Filter stale findings from older heads: a (bot) thread whose
+		// originalCommit.oid does not match the current headSHA was posted on a
+		// previous commit the loop already fixed. This runs after the bot-identity
+		// checks above because findings are exclusively bot threads — "stale
+		// finding" only has meaning among the bot's own threads, so the head-SHA
+		// scope belongs here, not before the author filter. GitHub only marks a
+		// thread isOutdated when the anchored lines changed, so a fix that touched
+		// different lines leaves the thread live — but it is stale (Devin chose not
+		// to re-post it on the new head). Without this filter, stale threads drive
+		// redundant fix rounds and get redundant "Addressed in <sha>" replies on
+		// every push (observed on a real PR: 4 replies across 4 commits on one
+		// thread). A thread with an empty originalCommit.oid (a host or API version
+		// that doesn't expose the field) is treated as current-head (fail-safe:
+		// don't suppress findings when the metadata is absent).
+		//
+		// Tradeoff: this assumes Devin re-posts still-applicable findings as NEW
+		// threads on each head it reviews. If Devin instead reviews only the
+		// inter-head diff and does NOT re-surface a still-valid finding whose
+		// anchored lines were untouched, this filter silently drops a genuinely-
+		// unaddressed finding and the loop could converge to APPROVED with a real
+		// bug unfixed. The CI idle timeout / human escalation provide a backstop.
+		// Empirically (observed across multiple repos), Devin posts fresh review
+		// threads on each head it reviews, so this assumption holds in practice.
+		if oid := strings.TrimSpace(first.OriginalCommit.OID); oid != "" && !strings.EqualFold(oid, headSHA) {
 			continue
 		}
 		if strings.TrimSpace(first.Path) == "" {
@@ -728,8 +762,11 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 	// Rather than letting an empty SHA act as a wildcard that matches every review
 	// in the PR's history, report not-yet-reviewed so the caller's grace window /
 	// fail policy decides. This also keeps GetReviewVerdict and GetBotFindings
-	// consistent (GetBotFindings likewise returns nothing on an empty head).
-	if strings.TrimSpace(headSHA) == "" {
+	// consistent (GetBotFindings likewise returns nothing on an empty head). Trim
+	// once here so every downstream comparison — and the GetBotFindings call below —
+	// uses the normalized value (a callers-can't-be-trusted defensive normalization).
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" {
 		return scm.VerdictNone, nil, nil
 	}
 
@@ -742,7 +779,6 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 		return "", nil, fmt.Errorf("parse PR reviews: %w", err)
 	}
 
-	head := strings.TrimSpace(headSHA)
 	reviewedAny, reviewedHead, headChangesRequested := false, false, false
 	// Track the most recent bot review targeting the head (by submitted_at) so its
 	// state — not the OR of every state in the head's history — decides the native
@@ -763,7 +799,7 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 			continue
 		}
 		reviewedAny = true
-		if !strings.EqualFold(strings.TrimSpace(r.CommitID), head) {
+		if !strings.EqualFold(strings.TrimSpace(r.CommitID), headSHA) {
 			continue
 		}
 		reviewedHead = true
