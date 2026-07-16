@@ -1026,7 +1026,7 @@ func validateReviewerSpec(i int, spec ReviewerSpec) error {
 		return fmt.Errorf("invalid review.reviewers[%d]: missing agent", i)
 	}
 	if spec.Agent != types.AgentAuto && !isACPAgent(spec.Agent) && !isNativeAgent(spec.Agent) {
-		return fmt.Errorf("invalid review.reviewers[%d]: unknown agent %q (valid: auto, claude, codex, rovodev, opencode, pi, acp:<target>)", i, name)
+		return fmt.Errorf("invalid review.reviewers[%d]: unknown agent %q (valid: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target>)", i, name)
 	}
 	for j, arg := range spec.Args {
 		if strings.TrimSpace(arg) == "" {

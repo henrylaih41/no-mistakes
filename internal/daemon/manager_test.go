@@ -369,7 +369,10 @@ func TestRerunFallsBackWhenStoredRouteDeleted(t *testing.T) {
 	})
 
 	repo, headSHA := setupTestGitRepo(t, p, d, "rerun-deleted-route-repo")
-	if _, err := d.AddRoute(repo.ID, "parent", "https://github.com/parent/repo.git", ""); err != nil {
+	// Use a readable local base: v1.37 deliberately fails closed when the
+	// trusted config for a selected route cannot be fetched, while this test is
+	// about the later deleted-route fallback rather than network failure.
+	if _, err := d.AddRoute(repo.ID, "parent", repo.WorkingPath, ""); err != nil {
 		t.Fatalf("add route: %v", err)
 	}
 
