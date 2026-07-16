@@ -259,18 +259,20 @@ type ReviewerSpec struct {
 // pointer, so an explicit empty list disables an inherited global panel while an
 // absent block inherits it (see RepoConfig.Review and Merge).
 type ReviewRaw struct {
-	Reviewers   []ReviewerSpec `yaml:"reviewers"`
-	MaxParallel int            `yaml:"max_parallel"`
-	FailOpen    *bool          `yaml:"fail_open"`
+	Reviewers    []ReviewerSpec `yaml:"reviewers"`
+	MaxParallel  int            `yaml:"max_parallel"`
+	FailOpen     *bool          `yaml:"fail_open"`
+	MaxFixRounds *int           `yaml:"max_fix_rounds"`
 }
 
 // Review is the resolved multi-reviewer panel config. FailOpen defaults to
 // false (fail-closed): a reviewer error fails the review step rather than
 // silently dropping a reviewer.
 type Review struct {
-	Reviewers   []ReviewerSpec
-	MaxParallel int
-	FailOpen    bool
+	Reviewers    []ReviewerSpec
+	MaxParallel  int
+	FailOpen     bool
+	MaxFixRounds int
 }
 
 // DefaultReviewLoopBotLogin is the GitHub account whose PR reviews the post-PR
@@ -537,6 +539,7 @@ auto_fix:
 #     - agent: claude
 #   max_parallel: 2   # bound concurrent reviewers; 0 = all at once
 #   fail_open: false  # any reviewer error fails the step (safe default)
+#   max_fix_rounds: 0 # 0 = unlimited; set 3 to enforce ruling #13
 
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,
@@ -1212,7 +1215,7 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.AutoFix = raw.AutoFix
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
-	if err := validateReviewers(raw.Review.Reviewers); err != nil {
+	if err := validateReview(raw.Review); err != nil {
 		return nil, err
 	}
 	cfg.Review = raw.Review
@@ -1284,7 +1287,7 @@ func LoadRepoFromBytes(data []byte) (*RepoConfig, error) {
 		return nil, err
 	}
 	if cfg.Review != nil {
-		if err := validateReviewers(cfg.Review.Reviewers); err != nil {
+		if err := validateReview(*cfg.Review); err != nil {
 			return nil, err
 		}
 	}
@@ -1480,11 +1483,47 @@ func resolveReview(raw ReviewRaw) Review {
 	if raw.FailOpen != nil {
 		failOpen = *raw.FailOpen
 	}
-	return Review{
-		Reviewers:   raw.Reviewers,
-		MaxParallel: raw.MaxParallel,
-		FailOpen:    failOpen,
+	maxFixRounds := 0
+	if raw.MaxFixRounds != nil {
+		maxFixRounds = *raw.MaxFixRounds
 	}
+	return Review{
+		Reviewers:    raw.Reviewers,
+		MaxParallel:  raw.MaxParallel,
+		FailOpen:     failOpen,
+		MaxFixRounds: maxFixRounds,
+	}
+}
+
+func validateReview(raw ReviewRaw) error {
+	if err := validateReviewers(raw.Reviewers); err != nil {
+		return err
+	}
+	if raw.MaxFixRounds != nil && *raw.MaxFixRounds < 0 {
+		return fmt.Errorf("invalid review.max_fix_rounds: %d (must be >= 0)", *raw.MaxFixRounds)
+	}
+	return nil
+}
+
+// ValidateEffectiveRepoConfig validates the repo config after EffectiveRepoConfig
+// has selected the copy that will actually drive a run. The pushed-branch
+// LoadRepo path intentionally avoids validating trusted-only fields so an
+// invalid review/review_loop block that will be stripped cannot fail a run. Once
+// allow_repo_commands opts in to the pushed copy, those fields are live and must
+// be validated before Merge.
+func ValidateEffectiveRepoConfig(repo *RepoConfig) error {
+	if repo == nil {
+		return nil
+	}
+	if repo.Review != nil {
+		if err := validateReview(*repo.Review); err != nil {
+			return err
+		}
+	}
+	if err := validateReviewLoop(repo.ReviewLoop); err != nil {
+		return err
+	}
+	return nil
 }
 
 // reviewLoopDefaults returns the default post-PR review-loop settings. The loop
@@ -1644,7 +1683,11 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	// review block to the trusted default-branch copy).
 	review := resolveReview(global.Review)
 	if repo.Review != nil {
-		review = resolveReview(*repo.Review)
+		repoReview := resolveReview(*repo.Review)
+		if repo.Review.MaxFixRounds == nil {
+			repoReview.MaxFixRounds = review.MaxFixRounds
+		}
+		review = repoReview
 	}
 
 	reviewLoop := reviewLoopDefaults()

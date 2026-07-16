@@ -154,9 +154,9 @@ branch, marking the remaining steps as skipped.
 3. If blocking findings remain, or any finding has `action: ask-user`, pause and wait for user action
 4. `action: no-op` findings are informational only; the user can approve, fix selected findings, skip, or cancel the run when the step pauses
 
-A step can attach an auto-resolver to an approval gate so it clears without user action once the external condition that forced the pause resolves on its own - for example the CI idle-timeout or Devin manual-verify gate when the PR is merged or closed out-of-band.
+A step can implement bounded approval-gate reconciliation so a stale gate clears without user action once the external condition that forced the pause resolves on its own - for example a CI idle-timeout or Devin manual-verify gate after the PR is merged or closed out-of-band.
 
-While the executor is paused at an approval or fix-review gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
+While the executor is paused at an approval, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
 That timestamp is observability only and does not alter approval behavior.
 When the wait ends, it atomically clears the marker and adds the elapsed wall time to the run's local parked-time total, so a crash cannot leave that time undercounted.
 While a step is running or fixing, the executor also records the latest meaningful step activity from log lines and native subprocess lifecycle events.
@@ -169,7 +169,7 @@ Communication between the CLI and daemon uses JSON-RPC 2.0 over the Unix socket.
 ### Database
 
 SQLite at `~/.no-mistakes/state.sqlite` tracks repos, runs, step results, step rounds, derived intent summaries, local agent invocation performance, and the minimum session metadata needed to resume review-loop roles.
-Step rounds record each execution attempt (initial, auto-fix) with its own findings and duration, plus selected finding IDs, whether the selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and the one-line fix summary for fix rounds.
+Step rounds record each execution attempt (initial, auto-fix) with its own findings and duration, plus selected finding IDs, whether the selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and the one-line fix summary for fix rounds. A review round that overrides `review.max_fix_rounds` also stores the master triage reason that authorized it.
 Step results also store the last active timestamp, last activity text, native agent PID while a subprocess is active, and the effective auto-fix limit used by AXI status.
 That merged payload can include per-finding user notes and user-authored findings from the TUI or AXI interface.
 Intent stores the summary, source, session ID, and match score on each run when transcript matching is used, plus cached summaries for matching transcript sessions.

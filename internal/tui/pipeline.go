@@ -29,9 +29,7 @@ func stepStatusIndicator(status types.StepStatus, spinnerFrame int) string {
 			spinnerFrame = 0
 		}
 		return spinnerFrames[spinnerFrame%len(spinnerFrames)]
-	case types.StepStatusAwaitingApproval:
-		return "⏸"
-	case types.StepStatusFixReview:
+	case types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusAwaitingTriage:
 		return "⏸"
 	case types.StepStatusCompleted:
 		return "✓"
@@ -49,7 +47,7 @@ func stepStatusStyle(status types.StepStatus) lipgloss.Style {
 	switch status {
 	case types.StepStatusRunning, types.StepStatusFixing:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(ansiBlue))
-	case types.StepStatusAwaitingApproval, types.StepStatusFixReview:
+	case types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusAwaitingTriage:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(ansiYellow))
 	case types.StepStatusCompleted:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(ansiGreen))
@@ -162,6 +160,8 @@ func renderPipelineView(run *ipc.RunInfo, steps []ipc.StepResultInfo, width int,
 		switch step.Status {
 		case types.StepStatusAwaitingApproval:
 			line += " " + dimStyle.Render("- awaiting approval")
+		case types.StepStatusAwaitingTriage:
+			line += " " + dimStyle.Render("- awaiting triage")
 		case types.StepStatusFailed:
 			if step.Error != nil {
 				errText := "- " + *step.Error
@@ -219,6 +219,8 @@ func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allo
 	prompt := fmt.Sprintf("%s awaiting action:", stepLabel(step.StepName))
 	if step.Status == types.StepStatusFixReview {
 		prompt = fmt.Sprintf("%s - review fix:", stepLabel(step.StepName))
+	} else if step.Status == types.StepStatusAwaitingTriage {
+		prompt = fmt.Sprintf("%s - awaiting triage:", stepLabel(step.StepName))
 	}
 	b.WriteString(promptStyle.Render(prompt))
 	b.WriteString("\n")
@@ -437,7 +439,7 @@ func renderHelpOverlay(width int, run *ipc.RunInfo, hasAwaitingStep bool, showDi
 // awaitingStep returns the step that is currently awaiting user action, if any.
 func awaitingStep(steps []ipc.StepResultInfo) *ipc.StepResultInfo {
 	for i := range steps {
-		if steps[i].Status == types.StepStatusAwaitingApproval || steps[i].Status == types.StepStatusFixReview {
+		if steps[i].Status == types.StepStatusAwaitingApproval || steps[i].Status == types.StepStatusFixReview || steps[i].Status == types.StepStatusAwaitingTriage {
 			return &steps[i]
 		}
 	}

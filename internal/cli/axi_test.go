@@ -48,6 +48,21 @@ func TestRunViewFromDBAwaitingStep(t *testing.T) {
 	}
 }
 
+func TestRunViewAwaitingStepIncludesAwaitingTriage(t *testing.T) {
+	run := &db.Run{ID: "r1", Branch: "feature/x", HeadSHA: "abcdef1234567890", Status: types.RunRunning}
+	steps := []*db.StepResult{
+		{StepName: types.StepReview, Status: types.StepStatusAwaitingTriage, FindingsJSON: strptr(`{"findings":[],"summary":"at cap"}`)},
+	}
+	rv := runViewFromDB(run, steps)
+	gate, ok := rv.awaitingStep()
+	if !ok {
+		t.Fatal("expected awaiting_triage to render as an awaiting gate")
+	}
+	if gate.Name != string(types.StepReview) {
+		t.Errorf("gate.Name = %q, want review", gate.Name)
+	}
+}
+
 func TestFindingsTally(t *testing.T) {
 	rv := runView{Steps: []stepView{
 		{FindingsJSON: findingsJSON(t, []types.Finding{
@@ -300,6 +315,29 @@ func TestWriteGateShape(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("gate missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestWriteGateShapeAwaitingTriage(t *testing.T) {
+	gate := stepView{
+		Name:   "review",
+		Status: "awaiting_triage",
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "review-1", Severity: "error", Source: "codex", File: "main.go", Action: types.ActionAutoFix, Description: "still wrong"},
+		}, "review fix-round cap reached"),
+	}
+	out := axiDoc(gateFields(gate)...)
+
+	for _, want := range []string{
+		"status: awaiting_triage",
+		"review fix-round cap reached",
+		"master triage",
+		"--fix-override",
+		"--override-reason",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("triage gate missing %q in:\n%s", want, out)
 		}
 	}
 }

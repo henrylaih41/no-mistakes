@@ -183,7 +183,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 // At most one step awaits at a time, so the first match is the active gate.
 func (rv runView) awaitingStep() (stepView, bool) {
 	for _, s := range rv.Steps {
-		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview) {
+		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview) || s.Status == string(types.StepStatusAwaitingTriage) {
 			return s, true
 		}
 	}
@@ -449,6 +449,9 @@ func gateFields(gate stepView) []toon.Field {
 	if gate.Name == string(types.StepReview) {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."})
 	}
+	if gate.Status == string(types.StepStatusAwaitingTriage) {
+		gfields = append(gfields, toon.Field{Key: "triage", Value: "Review max_fix_rounds has been reached. Residual findings require master triage: approve accepted/follow-up residuals, or use a one-round override only for a merge-blocking ruling."})
+	}
 	rows := make([]findingRow, 0, len(parsed.Items))
 	for _, f := range parsed.Items {
 		rows = append(rows, findingRow{
@@ -462,16 +465,28 @@ func gateFields(gate stepView) []toon.Field {
 	}
 	gfields = append(gfields, toon.Field{Key: "findings", Value: rows})
 
+	help := []string{
+		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
+	}
+	if gate.Status == string(types.StepStatusAwaitingTriage) {
+		help = append(help,
+			"Run `no-mistakes axi respond --action fix --fix-override --override-reason \"<master triage reason>\" --findings <ids>` only after master rules a residual merge-blocking",
+		)
+	} else {
+		help = append(help,
+			"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
+		)
+	}
+	help = append(help,
+		"Run `no-mistakes axi respond --action skip` to skip this step",
+		fmt.Sprintf("Run `no-mistakes axi logs --step %s --full` to read the full step log", gate.Name),
+		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
+		preserveGateFixCommitsGuidance,
+	)
+
 	return []toon.Field{
 		{Key: "gate", Value: toon.NewObject(gfields...)},
-		{Key: "help", Value: []string{
-			"Run `no-mistakes axi respond --action approve` to accept this step and continue",
-			"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
-			"Run `no-mistakes axi respond --action skip` to skip this step",
-			fmt.Sprintf("Run `no-mistakes axi logs --step %s --full` to read the full step log", gate.Name),
-			"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
-			preserveGateFixCommitsGuidance,
-		}},
+		{Key: "help", Value: help},
 	}
 }
 

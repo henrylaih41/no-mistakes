@@ -71,7 +71,7 @@ Step status icons:
 |---|---|
 | `○` | Pending |
 | (spinner) | Running / Fixing |
-| `⏸` | Awaiting approval / Fix review |
+| `⏸` | Awaiting approval / Fix review / Awaiting triage |
 | `✓` | Completed |
 | `–` | Skipped |
 | `✗` | Failed |
@@ -205,6 +205,7 @@ Reviewer-sourced findings can be selected and annotated like any other pipeline 
 Press `y` to toggle yolo mode when you want paused approval gates to resolve automatically.
 Yolo fixes gates with `auto-fix` and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
 It approves gates with no findings or only `action: no-op` findings as-is, and fixes each step at most once so unresolved findings do not loop forever.
+Yolo does not resolve a review step parked at `awaiting_triage`: when `review.max_fix_rounds` is reached the gate waits for a triage decision instead of auto-resolving.
 
 ## Outcome banner
 

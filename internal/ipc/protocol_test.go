@@ -219,10 +219,11 @@ func TestSubscribeParams(t *testing.T) {
 
 func TestRespondParams(t *testing.T) {
 	params := RespondParams{
-		RunID:      "run123",
-		Step:       types.StepReview,
-		Action:     types.ActionApprove,
-		FindingIDs: []string{"review-1", "review-2"},
+		RunID:             "run123",
+		Step:              types.StepReview,
+		Action:            types.ActionApprove,
+		FindingIDs:        []string{"review-1", "review-2"},
+		FixOverrideReason: "master triage: merge-blocking",
 	}
 	data, _ := json.Marshal(params)
 	var got RespondParams
@@ -240,6 +241,9 @@ func TestRespondParams(t *testing.T) {
 	}
 	if len(got.FindingIDs) != 2 || got.FindingIDs[0] != "review-1" || got.FindingIDs[1] != "review-2" {
 		t.Errorf("finding_ids = %#v, want %#v", got.FindingIDs, []string{"review-1", "review-2"})
+	}
+	if got.FixOverrideReason != "master triage: merge-blocking" {
+		t.Errorf("fix_override_reason = %q, want persisted reason", got.FixOverrideReason)
 	}
 }
 

@@ -214,6 +214,8 @@ The full driving protocol - how to read the home view and `gate:` objects, when 
 Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
 The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 
+If review reaches `review.max_fix_rounds`, it parks as `awaiting_triage`; `--yes` stops there. Report the residual findings for master triage. Only after master rules a residual merge-blocking may an agent send `axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <ids>`; the reason is persisted on the triggering round.
+
 ## Binary resolution
 
 When the daemon is running through a managed service, its `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories; on Windows it reuses the current process environment.

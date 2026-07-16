@@ -78,6 +78,8 @@ AI code review of your diff.
 
 **Approval:** required if any finding has severity `error` or `warning`. Findings with `action: ask-user` pause for approval instead of entering the normal auto-fix loop. This is for findings that challenge the author's intent, not routine correctness, reliability, or security fixes that may need to re-add a small amount of deleted logic. With the default `auto_fix.review: 0`, blocking review findings park for approval even when their action is `auto-fix`; setting repo or global `auto_fix.review` above `0` re-enables the automatic review fix loop for eligible `auto-fix` findings. Findings with `action: no-op` are informational only. The shared [finding-action model](/no-mistakes/concepts/auto-fix/#finding-actions) owns the behavior for a missing `action`.
 
+`review.max_fix_rounds` caps review fix/rereview rounds, including automatic and owner-approved fixes. The default `0` is unlimited. At the cap the step parks at `awaiting_triage` with residual findings intact; one additional round requires `--fix-override --override-reason "<master triage reason>"`, and the reason is persisted.
+
 **Auto-fix:** the pipeline agent receives the selected previous findings, including reviewer `source` labels when a panel produced them, plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and which findings the user left unselected.
 The fixer applies all selected fixes before running one focused verification limited to the changed area, and it is instructed not to run the complete repository test or lint suite during the fix round.
 The dedicated Test and Lint steps after review remain the authoritative gates, although their coverage may be focused when commands are unconfigured.
@@ -254,11 +256,12 @@ Each step progresses through these statuses:
 | `fixing` | Agent is auto-fixing issues |
 | `awaiting_approval` | Paused, waiting for user action |
 | `fix_review` | Paused after a fix cycle, showing results for review |
+| `awaiting_triage` | Review fix-round cap reached; residual findings require master triage |
 | `completed` | Finished successfully |
 | `skipped` | Pre-skipped for the run, skipped by the user, or skipped automatically by the pipeline |
 | `failed` | Step failed; the step log includes the returned error message so command stderr and provider errors are visible in the per-step log, not only in the daemon log |
 
-When a non-terminal run has a step in `awaiting_approval` or `fix_review`, AXI run objects also expose `awaiting_agent: parked <duration>` as a run-level observability signal.
+When a non-terminal run has a step in `awaiting_approval`, `fix_review`, or `awaiting_triage`, AXI run objects also expose `awaiting_agent: parked <duration>` as a run-level observability signal.
 The signal clears as soon as the approval wait ends, including `axi respond` and cancellation, and does not change how gates resolve.
 When a step is `running` or `fixing`, AXI run objects expose an `active_steps` table with active duration, latest activity, native subprocess PID when present, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
 If the latest activity is older than `step_quiet_warning`, AXI prefixes it with `quiet` to make possible wedges visible without changing the run state.
