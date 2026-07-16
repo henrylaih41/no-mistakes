@@ -259,7 +259,7 @@ A review panel pushed only on a feature branch is ignored unless `allow_repo_com
 ### review_loop
 
 Override the post-PR review loop for this repo.
-The schema matches global [`review_loop`](/no-mistakes/reference/global-config/#review_loop): `enabled`, `bot_login`, `max_rounds`, `fail_open`, `reply_on_fix`, `retrigger`, and `devin_api_key_file`.
+The schema matches global [`review_loop`](/no-mistakes/reference/global-config/#review_loop): `enabled`, `bot_login`, `max_rounds`, `fail_open`, `reply_on_fix`, `retrigger`, `devin_api_key_file`, `devin_review_api_key_file`, and `devin_org_id`.
 
 | Field | Type | Default |
 |---|---|---|
@@ -270,6 +270,8 @@ The schema matches global [`review_loop`](/no-mistakes/reference/global-config/#
 | `review_loop.reply_on_fix` | `bool` | Inherits from global (default `true`) |
 | `review_loop.retrigger` | `bool` | Inherits from global (default `true`) |
 | `review_loop.devin_api_key_file` | `string` | Inherits from global (default `~/.config/devin/api_key`) |
+| `review_loop.devin_review_api_key_file` | `string` | Inherits from global (default `~/.config/devin/review_api_key`) |
+| `review_loop.devin_org_id` | `string` | Inherits from global (default empty) |
 
 Fields not set here overlay onto the global review loop, and then the built-in defaults.
 Because the review loop gates CI, names the bot login whose comments become fix-prompt content, bounds how many fix rounds run, and points at a secret key file, repo-level `review_loop` is treated like `commands`, `agent`, and `review`: by default it is read only from the trusted default-branch copy of `.no-mistakes.yaml`.

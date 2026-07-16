@@ -95,3 +95,36 @@ func TestResolveAPIKey_WhitespaceEnvFallsThroughToFile(t *testing.T) {
 		t.Errorf("ResolveAPIKey() = %q, want file key (whitespace env ignored)", got)
 	}
 }
+
+func TestResolveReviewAPIKey_EnvPrecedence(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "review_api_key")
+	if err := os.WriteFile(keyFile, []byte("file-token-should-be-ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvReviewAPIKey, "  "+keyResolutionFakeKey+"\n")
+
+	if got := ResolveReviewAPIKey(keyFile); got != keyResolutionFakeKey {
+		t.Errorf("ResolveReviewAPIKey() = %q, want trimmed env token %q", got, keyResolutionFakeKey)
+	}
+}
+
+func TestResolveReviewAPIKey_FileFallbackTrimmed(t *testing.T) {
+	t.Setenv(EnvReviewAPIKey, "")
+	keyFile := filepath.Join(t.TempDir(), "review_api_key")
+	if err := os.WriteFile(keyFile, []byte("\n  "+keyResolutionFakeKey+"  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := ResolveReviewAPIKey(keyFile); got != keyResolutionFakeKey {
+		t.Errorf("ResolveReviewAPIKey() = %q, want trimmed file token %q", got, keyResolutionFakeKey)
+	}
+}
+
+func TestResolveReviewAPIKey_BothAbsentReturnsEmpty(t *testing.T) {
+	t.Setenv(EnvReviewAPIKey, "")
+	missing := filepath.Join(t.TempDir(), "absent_review_key")
+
+	if got := ResolveReviewAPIKey(missing); got != "" {
+		t.Errorf("ResolveReviewAPIKey() = %q, want \"\" when env empty and file absent", got)
+	}
+}

@@ -74,6 +74,125 @@ func TestTriggerReview_PostsSessionWithBearerAndPrompt(t *testing.T) {
 	}
 }
 
+func TestTriggerPRReview_PostsToReviewAPIWithBearer(t *testing.T) {
+	t.Parallel()
+
+	const prURL = "https://github.com/acme/widgets/pull/42"
+	const orgID = "org-abc-123"
+
+	var (
+		gotMethod string
+		gotPath   string
+		gotAuth   string
+		gotCT     string
+		gotPRURL  string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotCT = r.Header.Get("Content-Type")
+		var req struct {
+			PRURL string `json:"pr_url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		gotPRURL = req.PRURL
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"pending","pr_number":42,"commit_sha":"abc"}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTPClient: srv.Client(), BaseURL: srv.URL}
+	status, commitSHA, err := c.TriggerPRReview(context.Background(), testAPIKey, orgID, prURL)
+	if err != nil {
+		t.Fatalf("TriggerPRReview() error = %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("status = %q, want pending", status)
+	}
+	if commitSHA != "abc" {
+		t.Errorf("commitSHA = %q, want abc", commitSHA)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if want := "/v3/organizations/" + orgID + "/pr-reviews"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if gotAuth != "Bearer "+testAPIKey {
+		t.Errorf("Authorization = %q, want Bearer <token>", gotAuth)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotCT)
+	}
+	if gotPRURL != prURL {
+		t.Errorf("pr_url = %q, want %q", gotPRURL, prURL)
+	}
+}
+
+func TestTriggerPRReview_Non2xxIsError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"detail":"out_of_quota"}`)
+	}))
+	defer srv.Close()
+	c := &Client{HTTPClient: srv.Client(), BaseURL: srv.URL}
+	if _, _, err := c.TriggerPRReview(context.Background(), testAPIKey, "org", "https://github.com/o/r/pull/1"); err == nil {
+		t.Fatal("expected error on 403 response")
+	}
+}
+
+func TestTriggerPRReview_MissingCommitSHAIsError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"pending","pr_number":42}`)
+	}))
+	defer srv.Close()
+	c := &Client{HTTPClient: srv.Client(), BaseURL: srv.URL}
+	_, _, err := c.TriggerPRReview(context.Background(), testAPIKey, "org", "https://github.com/o/r/pull/1")
+	if err == nil {
+		t.Fatal("expected error on 2xx response missing commit_sha")
+	}
+	if !strings.Contains(err.Error(), "commit_sha") {
+		t.Errorf("error should mention commit_sha, got: %v", err)
+	}
+}
+
+func TestTriggerPRReview_MissingStatusIsError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"pr_number":42,"commit_sha":"abc"}`)
+	}))
+	defer srv.Close()
+	c := &Client{HTTPClient: srv.Client(), BaseURL: srv.URL}
+	_, _, err := c.TriggerPRReview(context.Background(), testAPIKey, "org", "https://github.com/o/r/pull/1")
+	if err == nil {
+		t.Fatal("expected error on 2xx response missing status")
+	}
+	if !strings.Contains(err.Error(), "status") {
+		t.Errorf("error should mention status, got: %v", err)
+	}
+}
+
+func TestTriggerPRReview_RequiresAllInputs(t *testing.T) {
+	t.Parallel()
+	c := &Client{}
+	if _, _, err := c.TriggerPRReview(context.Background(), "", "org", "u"); err == nil {
+		t.Error("expected error on empty token")
+	}
+	if _, _, err := c.TriggerPRReview(context.Background(), "tok", "", "u"); err == nil {
+		t.Error("expected error on empty org id")
+	}
+	if _, _, err := c.TriggerPRReview(context.Background(), "tok", "org", ""); err == nil {
+		t.Error("expected error on empty PR URL")
+	}
+}
+
 func TestTriggerReview_Non2xxIsError(t *testing.T) {
 	t.Parallel()
 
