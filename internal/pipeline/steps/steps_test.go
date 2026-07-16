@@ -308,6 +308,18 @@ func fakeCIGHHandler(args []string) {
 		fmt.Println(checksJSON)
 		os.Exit(0)
 	}
+	// Review loop: REST pulls/{n}/reviews and GraphQL reviewThreads. The CI
+	// step's review loop calls these via the real github.Host read layer, so
+	// serving them here exercises the full loop (login normalization, verdict
+	// derivation, gate decision, fix driving) end-to-end with mocked gh output.
+	if strings.Contains(joined, "api graphql") {
+		fmt.Println(os.Getenv("FAKE_CLI_REVIEW_THREADS"))
+		os.Exit(0)
+	}
+	if strings.Contains(joined, "pulls/") && strings.Contains(joined, "/reviews") {
+		fmt.Println(os.Getenv("FAKE_CLI_REVIEWS"))
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "run view") {
 		fmt.Println("error log output")
 		os.Exit(0)

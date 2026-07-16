@@ -364,6 +364,63 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, _ *scm.PR, branch, head
 // duplicated deliberately.
 const DefaultBotLogin = "devin-ai-integration[bot]"
 
+// botLoginSuffix is the type-marker REST glues onto a bot actor's login to
+// fit it into the User namespace. GraphQL's Bot type does NOT carry it (the
+// __typename field carries the type instead), so the same bot has two login
+// strings across the two APIs. normalizeBotLogin strips it from both sides
+// before comparison so a config in either form matches an API value in
+// either form.
+const botLoginSuffix = "[bot]"
+
+// normalizeBotLogin strips a trailing "[bot]" (case-insensitive) and lowercases
+// the rest, returning the bare app slug for a bot or the bare login for a
+// human. GitHub reserves app slugs — a human cannot register a bot's slug — so
+// slug equality is a safe identity match. Trimming the suffix on both sides
+// means a config value "devin-ai-integration[bot]" (REST form) and a GraphQL
+// author login "devin-ai-integration" (slug form) compare equal, and a
+// slug-form config also matches a REST "[bot]" login.
+func normalizeBotLogin(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(strings.ToLower(s), botLoginSuffix) {
+		s = s[:len(s)-len(botLoginSuffix)]
+	}
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// botLoginMatch reports whether apiLogin identifies the same actor as
+// configuredLogin, normalizing the REST "[bot]" suffix on both sides. Use this
+// instead of a bare strings.EqualFold against a bot login: GitHub's REST and
+// GraphQL APIs return different login strings for the same bot (REST glues a
+// "[bot]" type-marker into the login; GraphQL's Bot type does not), so an
+// exact comparison silently never matches the GraphQL form — the root cause of
+// the false-green bug where every bot thread was skipped and the verdict read
+// as APPROVED with zero findings.
+func botLoginMatch(apiLogin, configuredLogin string) bool {
+	return strings.EqualFold(normalizeBotLogin(apiLogin), normalizeBotLogin(configuredLogin))
+}
+
+// actorKind returns "bot" if the API actor is a Bot-type actor, "human" if it
+// is a User, or "" if the type is unknown/missing. GraphQL exposes the actor
+// type as __typename; REST exposes it as user.type. This is the positive
+// bot-vs-human discriminator GitHub designed for exactly this purpose —
+// stronger than inferring from a "[bot]" suffix on the login, and it does not
+// rely on app-slug reservation as the sole guarantee. Callers should require
+// the actor to be a bot (actorKind == "bot") before honoring its findings as
+// review-bot findings.
+func actorKind(typename, restType string) string {
+	t := strings.TrimSpace(typename)
+	if t == "" {
+		t = strings.TrimSpace(restType)
+	}
+	switch strings.ToLower(t) {
+	case "bot":
+		return "bot"
+	case "user":
+		return "human"
+	}
+	return ""
+}
+
 // apiArgs builds the args for `gh api repos/{owner}/{repo}/<suffix>`. The repo
 // slug is embedded in the path because `gh api` (unlike `gh pr`) does not accept
 // --repo; this is the gh-api equivalent of repoArgs(). When the slug is unknown
@@ -388,6 +445,9 @@ func (h *Host) paginatedAPIArgs(suffix string) []string {
 
 type ghUser struct {
 	Login string `json:"login"`
+	// Type carries the actor type ("Bot" or "User") from the REST API. GraphQL
+	// does not populate it (it uses __typename instead); see ghThreadAuthor.
+	Type string `json:"type,omitempty"`
 }
 
 // reviewThreadsQuery reads the PR's review threads together with their
@@ -405,7 +465,7 @@ type ghUser struct {
 // first:100 window. On a busy PR a newest live severe finding could land past
 // the first page, get truncated, and wrongly read as APPROVED, so GetBotFindings
 // walks every page (after:$cursor) before filtering.
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login} databaseId path line originalLine body url}}}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login __typename} databaseId path line originalLine body url}}}}}}}`
 
 // ghReviewThreadsResponse is the `gh api graphql` payload for reviewThreadsQuery.
 type ghReviewThreadsResponse struct {
@@ -437,13 +497,22 @@ type ghReviewThread struct {
 // ghThreadComment is a single comment node within a review thread. DatabaseID is
 // the comment's REST id, used as ReviewComment.ID so the loop can reply to it.
 type ghThreadComment struct {
-	Author       ghUser `json:"author"`
-	DatabaseID   int64  `json:"databaseId"`
-	Path         string `json:"path"`
-	Line         int    `json:"line"`
-	OriginalLine int    `json:"originalLine"`
-	Body         string `json:"body"`
-	URL          string `json:"url"`
+	Author       ghThreadAuthor `json:"author"`
+	DatabaseID   int64          `json:"databaseId"`
+	Path         string         `json:"path"`
+	Line         int            `json:"line"`
+	OriginalLine int            `json:"originalLine"`
+	Body         string         `json:"body"`
+	URL          string         `json:"url"`
+}
+
+// ghThreadAuthor is the author of a GraphQL review-thread comment. GraphQL
+// returns the actor type as __typename ("Bot" or "User"), NOT as a `type`
+// field like REST does. The login for a Bot is the bare app slug (no "[bot]"
+// suffix); see normalizeBotLogin for why both forms must compare equal.
+type ghThreadAuthor struct {
+	Login    string `json:"login"`
+	Typename string `json:"__typename"`
 }
 
 // ownerName resolves the repo slug into its owner and name. When the slug is
@@ -564,7 +633,17 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 			continue
 		}
 		first := t.Comments.Nodes[0]
-		if !strings.EqualFold(strings.TrimSpace(first.Author.Login), botLogin) {
+		// Only the configured review bot's threads are findings. Match the
+		// author by normalized login (handles the REST "[bot]" vs GraphQL
+		// bare-slug inconsistency) AND positively assert the actor is a Bot —
+		// defense in depth so a human who happens to share a slug (impossible
+		// in practice since GitHub reserves app slugs, but asserted anyway)
+		// can never inject findings. GraphQL carries the actor type as
+		// __typename (Typename here); REST carries it as user.type.
+		if actorKind(first.Author.Typename, "") != "bot" {
+			continue
+		}
+		if !botLoginMatch(first.Author.Login, botLogin) {
 			continue
 		}
 		if strings.TrimSpace(first.Path) == "" {
@@ -644,7 +723,15 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 	var latestHeadAt time.Time
 	var haveLatestHead bool
 	for _, r := range reviews {
-		if !strings.EqualFold(strings.TrimSpace(r.User.Login), botLogin) {
+		// Same identity check as GetBotFindings: normalized login match plus a
+		// positive Bot-type assertion. REST carries the type as user.type
+		// (e.g. "Bot"); the login carries the "[bot]" suffix. Both signals are
+		// checked so a non-bot review (a human's) is never counted as the
+		// configured review bot's verdict even if logins collided.
+		if actorKind("", r.User.Type) != "bot" {
+			continue
+		}
+		if !botLoginMatch(r.User.Login, botLogin) {
 			continue
 		}
 		reviewedAny = true
