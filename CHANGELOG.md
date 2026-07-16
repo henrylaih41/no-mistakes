@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.37.0](https://github.com/kunchenguid/no-mistakes/compare/v1.36.0...v1.37.0) (2026-07-13)
+
+
+### Features
+
+* **agent:** record session-fidelity telemetry ([#457](https://github.com/kunchenguid/no-mistakes/issues/457)) ([8ec98db](https://github.com/kunchenguid/no-mistakes/commit/8ec98db2a39a054a90071dfd0c8175785c6343a9))
+* **agent:** suppress project settings for gate agents ([#463](https://github.com/kunchenguid/no-mistakes/issues/463)) ([2d02c90](https://github.com/kunchenguid/no-mistakes/commit/2d02c90cc964c280a6b849380dab26d3224b4549))
+
+
+### Bug Fixes
+
+* **pipeline:** prevent clobbered HEAD from shipping unreviewed fixes ([#462](https://github.com/kunchenguid/no-mistakes/issues/462)) ([a7e71ea](https://github.com/kunchenguid/no-mistakes/commit/a7e71ea92f83ea4a597580dd4c30099d084f79de))
+
+## [1.36.0](https://github.com/kunchenguid/no-mistakes/compare/v1.35.0...v1.36.0) (2026-07-12)
+
+
+### Features
+
+* Developer ID sign macOS release artifacts ([#455](https://github.com/kunchenguid/no-mistakes/issues/455)) ([776088d](https://github.com/kunchenguid/no-mistakes/commit/776088d179d06ebce78a932ab49373405fb35c0f))
+
+
+### Bug Fixes
+
+* **git:** resolve main repo root inside submodules ([#454](https://github.com/kunchenguid/no-mistakes/issues/454)) ([fc22899](https://github.com/kunchenguid/no-mistakes/commit/fc228993bd7c6ef873de01e07a57c69743dbdc5a))
+* **pipeline:** enforce explicit intent during review ([#448](https://github.com/kunchenguid/no-mistakes/issues/448)) ([5b0cb40](https://github.com/kunchenguid/no-mistakes/commit/5b0cb40cccd7ee95a03c7199965dfd5c419bed08))
+* **pipeline:** focus review fixer verification ([#453](https://github.com/kunchenguid/no-mistakes/issues/453)) ([bb0b6bd](https://github.com/kunchenguid/no-mistakes/commit/bb0b6bd6d1c6af9f74ca5c10c03866f85837fbc2))
+
 ## [1.35.0](https://github.com/kunchenguid/no-mistakes/compare/v1.34.2...v1.35.0) (2026-07-11)
 
 

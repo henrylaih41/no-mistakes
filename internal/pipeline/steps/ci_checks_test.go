@@ -1,13 +1,11 @@
 package steps
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
-	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -63,65 +61,6 @@ func TestDevinFailureOutcomeMapsSeveritiesAndBlocks(t *testing.T) {
 	// high/medium/low severities it would not.
 	if !hasBlockingFindings(parsed.Items) {
 		t.Error("expected mapped findings to be blocking")
-	}
-}
-
-func TestCITimeoutAutoResolverClearsMergedOrClosedPR(t *testing.T) {
-	t.Parallel()
-
-	for _, state := range []scm.PRState{scm.PRStateMerged, scm.PRStateClosed} {
-		state := state
-		t.Run(string(state), func(t *testing.T) {
-			t.Parallel()
-			host := &fakeReviewHost{state: state}
-			resolver := ciPRClosedAutoResolver(&pipeline.StepContext{Log: func(string) {}}, host, &scm.PR{Number: "42"})
-			if !resolver(context.Background()) {
-				t.Fatalf("resolver returned false for PR state %s", state)
-			}
-		})
-	}
-
-	host := &fakeReviewHost{state: scm.PRStateOpen}
-	resolver := ciPRClosedAutoResolver(&pipeline.StepContext{Log: func(string) {}}, host, &scm.PR{Number: "42"})
-	if resolver(context.Background()) {
-		t.Fatal("resolver returned true for an open PR")
-	}
-}
-
-// TestDevinManualReviewOutcomeAutoResolvesMergedOrClosedPR is the review-claude-1-1
-// regression: the body-only "manual verify" park must self-heal if the PR is
-// merged or closed externally while parked, exactly like the CI-timeout gate
-// (nm#11). Because every manual-review park is built by devinManualReviewOutcome,
-// asserting the resolver here covers both call sites (the inline loop and
-// handleDevinFixRound).
-func TestDevinManualReviewOutcomeAutoResolvesMergedOrClosedPR(t *testing.T) {
-	t.Parallel()
-	sctx := &pipeline.StepContext{Log: func(string) {}}
-	pr := &scm.PR{Number: "42"}
-
-	for _, state := range []scm.PRState{scm.PRStateMerged, scm.PRStateClosed} {
-		state := state
-		t.Run(string(state), func(t *testing.T) {
-			t.Parallel()
-			outcome := devinManualReviewOutcome(sctx, &fakeReviewHost{state: state}, pr, "manual verify")
-			if outcome == nil || !outcome.NeedsApproval {
-				t.Fatalf("expected a NeedsApproval park, got %+v", outcome)
-			}
-			if outcome.ApprovalAutoResolve == nil {
-				t.Fatal("manual-review outcome must carry an ApprovalAutoResolve (nm#11)")
-			}
-			if !outcome.ApprovalAutoResolve(context.Background()) {
-				t.Fatalf("auto-resolver must clear the parked gate for PR state %s", state)
-			}
-		})
-	}
-
-	outcome := devinManualReviewOutcome(sctx, &fakeReviewHost{state: scm.PRStateOpen}, pr, "manual verify")
-	if outcome.ApprovalAutoResolve == nil {
-		t.Fatal("manual-review outcome must carry an ApprovalAutoResolve even for an open PR")
-	}
-	if outcome.ApprovalAutoResolve(context.Background()) {
-		t.Fatal("auto-resolver must not clear the gate while the PR is still open")
 	}
 }
 

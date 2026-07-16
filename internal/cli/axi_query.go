@@ -74,7 +74,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 	if err != nil {
 		return "", emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
 	}
-	rv := runViewFromDBWithCounts(env.d, run, steps)
+	rv := runViewFromDB(run, steps)
 	annotateRunView(env, &rv)
 	fields := []toon.Field{runObjectField(rv)}
 	if gate, ok := rv.awaitingStep(); ok {
@@ -124,6 +124,9 @@ func annotateRunView(env *axiEnv, rv *runView) {
 				step.RoundCount = stats.TotalRounds
 				step.FixRoundCount = stats.FixRounds
 				step.PendingFixSource = stats.PendingFixSource
+			}
+			if retries, err := env.d.CountStepAgentAutoRetries(step.ID); err == nil {
+				step.AgentAutoRetries = retries
 			}
 		}
 		if step.LastActivityAt == nil {

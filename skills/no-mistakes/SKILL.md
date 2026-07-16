@@ -323,9 +323,9 @@ A `gate:` waiting on you looks roughly like this - a `gate:` line naming the ste
 ```
 gate: review
 note: Review auto-fix is disabled by default (auto_fix.review: 0; a repo or global auto_fix.review > 0 override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed.
-findings[2]{id,severity,source,file,action,description}:
-  r1,warning,codex,internal/pipeline/executor.go,auto-fix,Error from os.Remove is ignored
-  r2,error,claude,cmd/no-mistakes/main.go,ask-user,New --force flag bypasses the confirm prompt
+findings[2]{id,severity,source,file,line,action,description}:
+  r1,warning,codex,internal/pipeline/executor.go,,auto-fix,Error from os.Remove is ignored
+  r2,error,claude,cmd/no-mistakes/main.go,,ask-user,New --force flag bypasses the confirm prompt
 help[6]:
   Run `no-mistakes axi respond --action approve` to accept this step and continue
   Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)

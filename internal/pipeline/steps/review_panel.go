@@ -22,10 +22,10 @@ type reviewerReport struct {
 // runReviewPanel fans the review prompt out across every reviewer concurrently
 // and merges their reports into a single attributed union. opts carries the
 // shared review prompt/schema/CWD; its OnChunk is forced to nil because
-// StepContext.Log/LogChunk mutate shared state and are not goroutine-safe, so
-// all logging and merging happen serially on this goroutine after FanOut
-// returns. It enforces the fail policy: a reviewer error fails the step unless
-// review.fail_open is set.
+// streaming reviewer output would be interleaved. Lifecycle logging is
+// synchronized by the executor, while result logging and merging happen on
+// this goroutine after FanOut returns. It enforces the fail policy: a reviewer
+// error fails the step unless review.fail_open is set.
 //
 // Reviewers are READ-ONLY by contract: they inspect the diff and return
 // findings, and never write to the worktree. The shared CWD is therefore

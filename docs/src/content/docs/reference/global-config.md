@@ -26,18 +26,17 @@ agent_path_override:
 
 agent_args_override:
   codex:
-    - -m
-    - gpt-5.4
-    - --full-auto
-    - -c
-    - service_tier="priority"
-    - -c
-    - model_reasoning_effort="low"
+	- -m
+	- gpt-5.4
+	- -c
+	- service_tier="priority"
+	- -c
+	- model_reasoning_effort="low"
   grok:
-    - -m
-    - grok-code-fast-1
-    - --reasoning-effort
-    - high
+	- -m
+	- grok-code-fast-1
+	- --reasoning-effort
+	- high
 
 ci_timeout: "168h"
 
@@ -98,13 +97,15 @@ test:
 
 Default agent for all repos and setup-wizard suggestions. Can be overridden per-repo.
 
-| | |
-|---|---|
-| Type | `string` or `string[]` |
-| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok`, `acp:<target>` |
-| Default | `auto` |
+|         |                                                                                   |
+| ------- | --------------------------------------------------------------------------------- |
+| Type    | `string` or `string[]`                                                            |
+| Values  | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok`, `acp:<target>` |
+| Default | `auto`                                                                            |
 
-`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `grok` (when `grok --version` succeeds).
+`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `grok`.
+As a pipeline-agent candidate, Rovo Dev is runnable only when `acli rovodev --help` succeeds, and Grok is runnable only when `grok --version` succeeds.
+Those support probes apply to explicit selections and fallback lists as well as `auto`: an unsupported list entry is skipped, while an unsupported sole selection fails gate setup.
 `acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`.
 ACP agents are opt-in and are not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
@@ -168,31 +169,31 @@ Default native binary names when no override is set:
 | `codex`    | `codex`    |
 | `rovodev`  | `acli`     |
 | `opencode` | `opencode` |
-| `pi` | `pi` |
-| `copilot` | `copilot` |
-| `grok` | `grok` |
+| `pi`       | `pi`       |
+| `copilot`  | `copilot`  |
+| `grok`     | `grok`     |
 
 ### agent_args_override
 
 Extra CLI flags to pass to each native agent.
 Use this to set model selection, service tier, reasoning effort, permission mode, or any other flag the underlying agent supports.
 
-| | |
-|---|---|
-| Type | `map[string][]string` |
-| Keys | `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok` |
-| Default | Empty (no extra flags) |
+|         |                                                           |
+| ------- | --------------------------------------------------------- |
+| Type    | `map[string][]string`                                     |
+| Keys    | `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok` |
+| Default | Empty (no extra flags)                                    |
 
 User-supplied flags are inserted ahead of no-mistakes' managed flags, so your choices usually take precedence. A few flags are reserved because no-mistakes depends on them to communicate with the agent - setting any of these returns a config error on load:
 
-| Agent | Reserved flags |
-|---|---|
-| `claude` | `-p`, `--print`, `--verbose`, `--output-format`, `--json-schema`, `-r`, `--resume`, `--session-id`, `-c`, `--continue`, `--fork-session` |
-| `codex` | `exec`, `resume`, `--resume`, `--session`, `--session-id`, `--thread`, `--thread-id`, `--last`, `--json`, `--color` |
-| `rovodev` | `rovodev`, `serve`, `--disable-session-token` |
-| `opencode` | `serve`, `--hostname`, `--port`, `--print-logs` |
-| `pi` | `--mode`, `--no-session` |
-| `copilot` | `-p`, `--prompt`, `--output-format`, `--no-color` |
+| Agent      | Reserved flags                                                                                              |
+| ---------- | ----------------------------------------------------------------------------------------------------------- |
+| `claude`   | `-p`, `--print`, `--verbose`, `--output-format`, `--json-schema`, `-r`, `--resume`, `--session-id`, `-c`, `--continue`, `--fork-session` |
+| `codex`    | `exec`, `resume`, `--resume`, `--session`, `--session-id`, `--thread`, `--thread-id`, `--last`, `--json`, `--color` |
+| `rovodev`  | `rovodev`, `serve`, `--disable-session-token`                                                               |
+| `opencode` | `serve`, `--hostname`, `--port`, `--print-logs`                                                             |
+| `pi`       | `--mode`, `--no-session`                                                                                    |
+| `copilot`  | `-p`, `--prompt`, `--output-format`, `--no-color`                                                          |
 | `grok` | `-p`, `--single`, `--prompt-file`, `--prompt-json`, `--output-format`, `--json-schema`, `--permission-mode`, `--always-approve`, `--cwd` |
 
 For structured `codex` runs, no-mistakes also appends its own `--output-schema <tempfile>` after your overrides. Treat that flag as managed even though config validation does not currently reject it.
@@ -257,7 +258,9 @@ Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
 So an actively-updated green PR keeps its monitor no matter how long it stays open.
 If it later develops an actual GitHub, GitLab, or Azure DevOps merge conflict, the CI auto-fix path rebases and re-pushes it, while a clean behind PR needs no command.
-A genuinely idle/abandoned PR is still reaped after the timeout elapses.
+A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
+While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
+If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for a user decision.
 
 Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to monitor until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`.
 
@@ -310,12 +313,13 @@ Per-run, per-role agent session reuse for the review loop.
 | Type    | `bool` |
 | Default | `true` |
 
-When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), each run keeps one durable reviewer session across the initial full review and every full rereview, and a separate durable fixer session across review-fix turns.
-The roles never share a session, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
+When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), the default single-reviewer path keeps one durable reviewer session across the initial full review and every full rereview, and the pipeline agent keeps a separate durable fixer session across review-fix turns.
+Configured `review.reviewers` panel members remain independent cold reviewers because each member can use a different family, binary, or model override; only the pipeline agent's fixer role is eligible for reuse in panel mode.
+Reviewer and fixer roles never share a session, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 Every review turn still performs a full review of the complete branch diff; only the reviewer's own prior context is carried.
 When resume is unavailable or fails, the invocation falls back to a cold run or a fresh same-role session and the fallback is recorded in the local `agent_invocations` performance record.
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts.
-After a daemon restart, no-mistakes resumes only fully recorded parked approval gates; incomplete or ambiguous active runs fail closed through normal crash recovery.
+The [daemon crash-recovery reference](/no-mistakes/concepts/daemon/#crash-recovery) owns which parked gates can resume or reconcile after a restart.
 Set `false` to force every agent invocation cold.
 
 ### auto_fix
@@ -460,4 +464,4 @@ These are global defaults. Per-repo config can override either field.
 
 ## Environment variables
 
-See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, `NM_DAEMON_CONNECT_TIMEOUT`, Bitbucket Cloud credentials, the `DEVIN_API_KEY` and `DEVIN_REVIEW_API_KEY` review-loop tokens, and update-check suppression.
+See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, `NM_DAEMON_CONNECT_TIMEOUT`, provider credentials, the `DEVIN_API_KEY` and `DEVIN_REVIEW_API_KEY` review-loop tokens, and update-check suppression.

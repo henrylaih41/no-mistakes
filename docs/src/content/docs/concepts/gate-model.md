@@ -140,8 +140,8 @@ The `-y` / `--yes` flag answers that executable-path prompt non-interactively; i
 If the daemon executable path cannot be determined, `update` aborts before replacing anything.
 You can also manage it explicitly with `no-mistakes daemon start|stop|restart|status`; `daemon stop` and `daemon restart` apply the same active-run guard and `--force` override.
 
-On startup, the daemon first reconstructs only unambiguous runs that were fully recorded as parked at an approval gate, including their local reviewer/fixer session metadata when available.
-It fails every other stuck or incomplete active run closed as a crash recovery, reaps orphaned managed agent servers, cleans up orphaned worktrees (never one whose run is still pending or running), refreshes legacy no-mistakes-managed `post-receive` hooks, enables push options for older gate repos, and reapplies gate hook-path isolation when Git supports `config --worktree`.
+On startup, the daemon validates crash-recovery state before resuming work.
+[Daemon & Worktrees](/no-mistakes/concepts/daemon/#crash-recovery) owns the exact restart, parked-gate reconciliation, cleanup, and fail-closed behavior.
 
 ### Pipeline executor
 
@@ -154,33 +154,35 @@ branch, marking the remaining steps as skipped.
 3. If blocking findings remain, or any finding has `action: ask-user`, pause and wait for user action
 4. `action: no-op` findings are informational only; the user can approve, fix selected findings, skip, or cancel the run when the step pauses
 
-A step can attach an auto-resolver to an approval gate so it clears without user action once the external condition that forced the pause resolves on its own - for example the CI idle-timeout or Devin manual-verify gate when the PR is merged or closed out-of-band.
+A step can implement bounded approval-gate reconciliation so a stale gate clears without user action once the external condition that forced the pause resolves on its own - for example a CI idle-timeout or Devin manual-verify gate after the PR is merged or closed out-of-band.
 
 While the executor is paused at an approval, agent-retry, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
-The executor publishes that marker and the step's gate status in one bounded SQLite transaction; AXI-facing daemon queries likewise read the run and its steps from one snapshot, so clients cannot observe half of a gate transition.
 That timestamp is observability only and does not alter approval behavior.
-When the wait ends, one transaction moves the step to its next durable state, clears the marker, and adds the elapsed wall time to the run's local parked-time total.
-If gate entry cannot be committed, the executor fails closed instead of waiting at an invisible gate; if an exit cannot be committed, it attempts a terminal cleanup transaction that fails the step and run together and clears the marker.
+The executor publishes the timestamp together with the step's gate status, execution duration, and any retry reason in one bounded SQLite transaction.
+If that transaction cannot update exactly one run and one step, it rolls back, clears the in-memory waiter, and fails the step instead of entering a gate that status clients cannot see.
+When the wait ends, another transaction atomically moves the step to its next durable state, clears the marker, and adds the elapsed wall time to the run's local parked-time total.
+If that exit cannot commit, a bounded terminal-cleanup transaction fails the step and run together and clears the marker, so a failed run does not retain a live-looking gate.
 While a step is running or fixing, the executor also records the latest meaningful step activity from log lines and native subprocess lifecycle events.
 AXI renders that activity in `active_steps`, including a quiet prefix when no activity has arrived for longer than the configured `step_quiet_warning`.
 
 ### IPC
 
 Communication between the CLI and daemon uses JSON-RPC 2.0 over the Unix socket. The `subscribe` method streams real-time events (step progress, log chunks, findings) to the TUI, while the `axi` commands use request/response IPC for non-interactive agent control.
+Run-state responses (`get_run`, `get_runs`, exact-head run lists, and `get_active_run`) read each run and its steps in one SQLite snapshot, so a response cannot combine the run marker from one side of a gate transition with step state from the other.
 
 ### Database
 
 SQLite at `~/.no-mistakes/state.sqlite` tracks repos, runs, step results, step rounds, derived intent summaries, local agent invocation performance, and the minimum session metadata needed to resume review-loop roles.
-Step rounds record each execution attempt (initial, auto-fix) with its own findings and duration, plus selected finding IDs, whether the selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and the one-line fix summary for fix rounds.
+Step rounds record each execution attempt (initial, auto-fix) with its own findings and duration, plus selected finding IDs, whether the selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and the one-line fix summary for fix rounds. A review round that overrides `review.max_fix_rounds` also stores the master triage reason that authorized it.
 Step results also store the last active timestamp, last activity text, native agent PID while a subprocess is active, and the effective auto-fix limit used by AXI status.
 That merged payload can include per-finding user notes and user-authored findings from the TUI or AXI interface.
-A review round that overrode the `review.max_fix_rounds` cap also records the master triage reason that authorized it.
 Intent stores the summary, source, session ID, and match score on each run when transcript matching is used, plus cached summaries for matching transcript sessions.
 An agent-supplied AXI intent is stored directly on the run.
 Raw transcript text is not stored in this database.
 Legacy `user_fix` rounds are still read as `auto-fix` for backward compatibility.
 Run records also store the nullable `awaiting_agent_since` timestamp used only to render the AXI parked signal while a gate is waiting for the driving agent, plus accumulated `parked_ms` for local performance reporting.
-Each agent invocation records local-only purpose, provider/model metadata, session mode and a truncated session-identity hash, timing, failure category, and token usage; prompts, outputs, diffs, and credentials are never stored there.
+Recorded pipeline-agent invocations retain local-only purpose, provider/model metadata, session mode and a truncated session-identity hash, timing, failure category, and token usage; prompts, outputs, diffs, and credentials are never stored there.
+The [environment reference](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) owns the exact recording scope and local/remote boundary.
 Use `no-mistakes stats --agents` for aggregates or `no-mistakes stats --run <id>` for a run timeline and parked time.
 Repo records store the parent `upstream_url` and an optional `fork_url`; branch pushes use `fork_url` when present, while PR and CI provider context stays anchored to the parent.
 Local push [routes](/no-mistakes/reference/cli/#no-mistakes-route) live in their own table keyed by repo, each a named base/fork pair, with an optional per-repo default route; the route a run resolved to is recorded on the run so reruns re-resolve the same target. Routes are read only from this local database, never from a pushed branch.

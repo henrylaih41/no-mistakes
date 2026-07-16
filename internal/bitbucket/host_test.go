@@ -9,14 +9,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
-func TestReplyToReviewCommentUnsupported(t *testing.T) {
-	t.Parallel()
-	h := &Host{}
-	if err := h.ReplyToReviewComment(context.Background(), 1, 2, "body"); !errors.Is(err, scm.ErrUnsupported) {
-		t.Fatalf("ReplyToReviewComment() error = %v, want ErrUnsupported", err)
-	}
-}
-
 func TestNormalizePRState(t *testing.T) {
 	tests := []struct {
 		name string
@@ -396,5 +388,13 @@ func TestFailedPipelineUUIDs(t *testing.T) {
 				t.Fatalf("failedPipelineUUIDs keys = %v, want %v", keys, want)
 			}
 		})
+	}
+}
+
+func TestReplyToReviewCommentUnsupported(t *testing.T) {
+	t.Parallel()
+	h := &Host{}
+	if err := h.ReplyToReviewComment(context.Background(), 1, 2, "body"); !errors.Is(err, scm.ErrUnsupported) {
+		t.Fatalf("ReplyToReviewComment() error = %v, want ErrUnsupported", err)
 	}
 }

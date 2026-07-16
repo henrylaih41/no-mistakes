@@ -68,9 +68,8 @@ func captureReviewers(t *testing.T, ag agent.Agent, configure func(*Executor)) [
 	}
 }
 
-// TestExecutor_ReviewersDefaultAndOrder pins the PR1 invariant: with no
-// SetReviewers the review panel defaults to the single impl agent, and after
-// SetReviewers([a, b]) the two reviewers retain their configured order.
+// TestExecutor_ReviewersDefaultAndOrder pins the panel invariant while allowing
+// the executor to wrap agents for lifecycle and performance instrumentation.
 func TestExecutor_ReviewersDefaultAndOrder(t *testing.T) {
 	t.Run("DefaultsToSingleImplAgent", func(t *testing.T) {
 		impl := &stubReviewer{name: "impl"}

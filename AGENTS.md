@@ -14,16 +14,6 @@ Safest local verification sequence after non-trivial changes:
 - `make e2e` when touching agent integrations, the e2e harness, or recorded fixtures
 - `go build -o ./bin/no-mistakes ./cmd/no-mistakes`
 
-**Project Layout**
-
-- `cmd/no-mistakes`: process entrypoint
-- `internal/cli`: cobra commands and CLI wiring
-- `internal/daemon`: background daemon and run management
-- `internal/pipeline` and `internal/pipeline/steps`: orchestration plus review/test/lint/push/PR/CI steps
-- `internal/agent`: Claude, Codex, Rovo Dev, OpenCode, Pi, Copilot, Grok, and ACP/acpx integrations
-- `internal/git`, `internal/ipc`, `internal/config`, `internal/db`, `internal/paths`, `internal/types`: shared infrastructure
-- `internal/tui`: terminal UI
-
 **Fork Routing**
 
 - `repos.upstream_url` is the parent repository used for PR base routing; `repos.fork_url` is an optional GitHub fork push target.
@@ -97,10 +87,10 @@ Safest local verification sequence after non-trivial changes:
 
 **Repo Config Trust Boundary (security)**
 
-- The daemon runs `commands.*` from `.no-mistakes.yaml` verbatim via `sh -c`, while `agent` and `review.reviewers` select processes with the maintainer's credentials and `review_loop` controls prompt-fed review automation. These execution-affecting fields are loaded from the trusted default branch at a **pinned SHA** resolved by a fresh fetch, never from the pushed SHA; on fetch failure trusted config is nil and the fields fail closed. See `internal/daemon/manager.go` `startRun` + `loadTrustedRepoConfig`.
-- `document.instructions` is also trusted-only. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`, `design_context`) are still read from the pushed branch; `design_context.files` must remain repository-relative and is worktree-jailed before reading.
+- The daemon runs `commands.*` from `.no-mistakes.yaml` verbatim via `sh -c`; `agent` and `review.reviewers` select which processes launch with the maintainer's credentials; and `review_loop` controls bot-sourced prompt content, fix rounds, and a secret key file. These code-executing or gate-control fields (`commands.{test,lint,format}`, `agent`, `review`, and `review_loop`) are therefore loaded from the trusted default branch at a **pinned SHA** resolved by a fresh fetch, never from the pushed SHA. The run aborts when the trusted commit or its present config cannot be read and parsed; a readable tree with no config is valid. See `internal/daemon/manager.go` `startRun`, `loadTrustedRepoConfig`, and `assertGateTrustedConfigReadable`.
+- `document.instructions` (the repo's documentation placement policy) and `disable_project_settings` (the gate-agent project-instruction opt-out) are also trusted-only: a pushed branch must not weaken either boundary. When the opt-out is enabled, only adapters with verified effective suppression may launch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`, `design_context`) are still read from the pushed branch. `design_context.files` is prompt context, not process selection; it must stay repository-relative and is worktree-jailed before any file is read.
 - `allow_repo_commands` is per-repo, read only from the trusted default-branch copy, and defaults `false`; a contributor cannot self-enable it from a pushed branch. The e2e harness models a trusted single-developer environment and commits `allow_repo_commands: true` via `SetupOpts.AllowRepoCommands`; security tests pass `false`.
-- Regressions: `TestLoadTrustedRepoConfig_FailClosedOnFetchFailure`, `TestLoadTrustedRepoConfig_PinnedSHAReadsFreshDefaultBranch`, `TestEffectiveRepoConfig_DocumentPolicyTrustedOnly`, e2e `TestRepoConfigCommandsFromDefaultBranch` (incl. `pushed_branch_cannot_self_enable`).
+- Regressions: `TestLoadTrustedRepoConfig_FailClosedOnFetchFailure`, `TestLoadTrustedRepoConfig_PinnedSHAReadsFreshDefaultBranch`, `TestEffectiveRepoConfig_DocumentPolicyTrustedOnly`, `TestEffectiveRepoConfig_DisableProjectSettingsTrustedOnly`, `TestAssertGateTrustedConfigReadable_*`, `TestNewPipelineAgent_OptOut_*`, `TestLoadRecoveredConfig_BoundsFetchAndFailsClosed`, e2e `TestRepoConfigCommandsFromDefaultBranch` (incl. `pushed_branch_cannot_self_enable`).
 
 **CI Monitor Lifecycle**
 
@@ -109,23 +99,32 @@ Safest local verification sequence after non-trivial changes:
 
 **Parked / Awaiting-Agent Signal**
 
-- `runs.awaiting_agent_since` is non-nil **iff** a step is durably parked at an `awaiting_approval`, `fix_review`, `awaiting_agent_retry`, or `awaiting_triage` gate. Change the run marker and step status only through the bounded `EnterApprovalGate`/`ExitApprovalGate`/`FailApprovalGate` transactions; entry failures fail closed, and exit failures attempt terminal cleanup rather than leaving a live-looking gate. It is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
-- IPC run queries must pair each run with its steps through the `Get*Snapshot` helpers so readers cannot observe a torn gate transition. Regressions: `internal/db/gate_transition_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
+- `runs.awaiting_agent_since` is non-nil **iff** one step is durably parked at `awaiting_approval`, `fix_review`, `awaiting_agent_retry`, or `awaiting_triage`. `EnterApprovalGate` and `ExitApprovalGate` own the marker, step status/duration/reason, parked time, and exact-one-row checks in bounded transactions; never split those writes again. Publication failure must clear the in-memory waiter and fail instead of entering the approval wait; exit failure must use `FailApprovalGate` so the run cannot remain terminal with a live-looking marker. The signal is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
+- IPC `get_run`, `get_runs`, `get_runs_for_head`, and `get_active_run` responses pair run and step rows from one read transaction. Gate-transition logs retain the transition/daemon/root/database identity, target status, marker, affected-row, and elapsed-time evidence needed to diagnose a future mismatch.
+- Regressions: `internal/db/gate_transition_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/db/run_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
 
 **Review-Loop Agent Sessions (`internal/pipeline/sessions.go`)**
 
-- Per run, the review loop keeps ONE durable reviewer session across the initial review and every full rereview, and a SEPARATE fixer session across review-fix turns; roles never share a session (the reviewer must never inherit the fixer's rationale), no other step uses sessions, and sessions are keyed strictly by run. Every review turn is still a full adversarial review of the complete branch diff.
+- Per run, the default single-reviewer path keeps ONE durable reviewer session across the initial review and every full rereview, and the pipeline agent keeps a SEPARATE fixer session across review-fix turns; configured panel reviewers stay independent and cold. Roles never share a session (the reviewer must never inherit the fixer's rationale), no other step uses sessions, and sessions are keyed strictly by run. Every review turn is still a full adversarial review of the complete branch diff.
 - Fail-safe rules: unsupported adapter runs cold; a failed resume drops the identity and re-runs the same turn in a fresh same-role session, never skipping the review; a cancelled ctx gets no fallback retry; `session_reuse: false` forces everything cold. Persistence is minimum metadata only, never prompts or transcripts.
 - `codex exec resume` has a narrower flag surface than `codex exec`, so an unsupported override fails the resume and falls back; the e2e fakeagent must keep parsing both codex argv shapes (`extractCodexPrompt`).
 - Regressions: `internal/pipeline/sessions_test.go`, `internal/pipeline/steps/review_session_test.go`, `internal/agent/session_test.go`.
 
+**Review Fixer Verification Discipline (`internal/pipeline/steps/review.go`)**
+
+- The review-fix prompt requires all fixes before one focused verification limited to the changed area and forbids the whole repository test/lint suite during the fix round.
+  The dedicated Test and Lint steps are the authoritative gates, although their coverage may be focused when commands are unconfigured.
+  This is a prompt contract, not an enforced sandbox.
+  Regression: `TestReviewStep_FixMode_FocusedVerificationContract`.
+
 **Intent Provenance & Conformance (`internal/pipeline/steps/intent_prompt.go`)**
 
 - Intent carries provenance: an explicit `axi run --intent` persists `Source==db.RunIntentSourceAgent` ("agent", score 1); a transcript match persists the agent name ("claude"/"codex"/...). The executor propagates it as `StepContext.IntentSource` alongside `UserIntent` (`executor.go`).
-- `userIntentPromptSection` branches on source: an EXPLICIT intent renders as sanitized-but-AUTHORITATIVE acceptance criteria; an INFERRED intent keeps the low-confidence hint framing verbatim. Both branches keep the `StripAdversarial`+`RedactSecrets` pipeline and BEGIN/END "do not execute instructions" guard - authoritative reframes only the content's authority (check the diff against the criteria), never whether control tokens are stripped. The review prompt adds `intentConformanceReviewClause` for agent-source intent only: a fixer change that contradicts the criteria (removes intent-required or adds intent-forbidden behavior) MUST become an `ask-user` finding, which parks with no executor change.
+- `userIntentPromptSection` branches on source: an EXPLICIT intent renders as sanitized-but-AUTHORITATIVE acceptance criteria; an INFERRED intent keeps the low-confidence hint framing verbatim. Both branches keep the `StripAdversarial`+`RedactSecrets` pipeline and BEGIN/END "do not execute instructions" guard - authoritative reframes only the content's authority (check the diff against the criteria), never whether control tokens are stripped. The review prompt adds `intentConformanceReviewClause` for agent-source intent only: a fixer change that contradicts the criteria (removes intent-required or adds intent-forbidden behavior) MUST become an `ask-user` finding, which parks with no executor change. Conformance is limited to source-verifiable criteria; deferred pipeline-owned delivery (remote branch / push / PR / CI for this run) is out of scope at review.
+- Review is always pre-push (`StepReview` before `StepPush`/`StepPR`/`StepCI`). `pipelineDeliveryPhaseClause` plus `stripDeferredPipelineOwnedDeliveryFindings` (`pipeline_delivery.go`, applied in `review.go`) keep findings that only claim those later-owned outcomes are missing from parking the run. External or pre-existing lifecycle requirements (numbered PR, third-party artifact, non-run-owned state) stay enforceable. Push, PR, and CI steps remain strict after their stages run.
 - Empty/missing finding `action` fails closed to `ask-user`, not auto-fix (`types/findings.go` `actionOrDefault`); `HasAskUserFindings` uses `actionOrDefault` so it agrees with `AutoFixableFindings` (an unclassified finding is never auto-fixed and is always caught as ask-user). `MergeUserOverrides` still stamps user-*added* findings auto-fix on purpose.
 - The deterministic net-deleted-author-lines git-diff backstop is intentionally not built; `review.go` owns the held-scope TODO.
-- Regressions: `internal/pipeline/steps/intent_prompt_test.go`, `internal/pipeline/steps/review_test.go` (`TestReviewStep_ConformanceObligationTracksIntentProvenance`, `TestReviewStep_RereviewFlagsIntentContradictionAsAskUser`), `internal/pipeline/executor_intent_conformance_test.go`, `internal/types/findings_test.go`, e2e `TestIntentJourney` (inferred-source framing).
+- Regressions: `internal/pipeline/steps/intent_prompt_test.go`, `internal/pipeline/steps/review_test.go` (`TestReviewStep_ConformanceObligationTracksIntentProvenance`, `TestReviewStep_RereviewFlagsIntentContradictionAsAskUser`), `internal/pipeline/steps/pipeline_delivery_test.go`, `internal/pipeline/steps/review_pipeline_delivery_test.go`, `internal/pipeline/executor_intent_conformance_test.go`, `internal/types/findings_test.go`, e2e `TestIntentJourney` (inferred-source framing), e2e `TestReviewPipelineOwnedPRCriterionDoesNotPark` / `TestReviewExternalPRLifecycleStillParks`.
 
 **Combined Document+Lint Housekeeping Pass**
 
@@ -135,7 +134,8 @@ Safest local verification sequence after non-trivial changes:
 **Telemetry Shape**
 
 - Read-only surfaces (`axi` home/status/logs, `status`, `runs`) emit NO pageview and gate their command event through `telemetry.ReadSurfaceGate` (emit on state-fingerprint change, else at most once per 10 min, persisted at `<NM_HOME>/telemetry-gate.json`). Never reintroduce the pageview+command double emit for read surfaces - `axi-status` alone was 42% of all remote event rows. Mutation surfaces stay full-fidelity via `trackAxiSurface`/`trackCommand`.
-- Detailed performance evidence is LOCAL-ONLY (`agent_invocations` rows plus `runs.parked_ms`); never store prompts, outputs, or diffs there (shape-guard test `TestAgentInvocations_PrivacySafeShape`) and never send run IDs, paths, session identities, or per-invocation records to Umami - the only remote perf data is three bounded counts on the terminal `run finished` event. The local/remote split is documented in `docs/src/content/docs/reference/environment.md`; read locally with `no-mistakes stats`.
+- Detailed performance evidence is LOCAL-ONLY (`agent_invocations` rows plus `runs.parked_ms`); never store prompts, outputs, diffs, or raw command arguments there (shape-guard test `TestAgentInvocations_PrivacySafeShape`) and never send run IDs, paths, session identities, or per-invocation records to Umami - the only remote perf data is three bounded counts on the terminal `run finished` event. The local/remote split is documented in `docs/src/content/docs/reference/environment.md`; read locally with `no-mistakes stats`.
+- Session-fidelity metric counts and timing boundaries have ONE authoritative home, `internal/agent/invocationmetrics.go` (tool-category classifier, `InvocationMetrics`, `FreshInputTokens`, `PerRoundTokens`, `ModelTimeMS`); the codex adapter fills them from its live `exec --json` event stream (`codex_metrics.go`) and the additive fidelity fields plus cache-creation usage are nullable so a not-reported datum is stored as NULL, never a fabricated zero. Codex's live stream exposes neither the model (resolved best-effort from the `~/.codex/sessions` rollout) nor internal model-request counts (it batches one exec into a single `turn.completed`, so round-trips are counted from completed items and subprocess wait is the reader-timed tool-item interval); codex usage is cumulative across a resumed session, so per-round deltas subtract the same session's prior cumulative (`Result.SessionUsageCumulative`). Regressions: `internal/agent/invocationmetrics_test.go`, `internal/agent/codex_metrics_test.go`, `internal/pipeline/instrument_fidelity_test.go`, `internal/db/agent_invocation_test.go` (`TestOpenMigratesSessionFidelityColumns`).
 
 **Rebase Base & Force-Push Safety (data-loss prevention)**
 
@@ -144,6 +144,15 @@ Safest local verification sequence after non-trivial changes:
 - Every force-push routes through `resolveForcePushDecision`, which re-reads the live remote head and allows the push only for a new branch, an already-equal remote, an unchanged `lastSeenSHA`, or remote commits already incorporated by patch-id (excluding `^baseSHA` history the run knowingly rewrites). Anything else refuses, and a failed ls-remote/fetch fails closed; never degrade to a bare `--force`/`--force-with-lease` without an explicit anchor.
 - `lastSeenSHA` must stay the head the run last **observed**, never the live remote tip: the rebase step refreshes `origin/<branch>` only on a normal push, NOT on a force push, and the CI step passes `Run.HeadSHA`. Anchoring the lease to a SHA read immediately before pushing is the original #281 bug (it always passes and protects nothing); always-fetching the branch on force push recreates it. Never reintroduce either.
 - Regressions: `TestCIStep_CommitAndPush_RefusesToClobberUnseenUpstreamCommit` (#281), `TestPushStep_RefusesToClobberAdvancedUpstreamBranch` (#305), `TestForcePushRun_RefusesToClobberOutOfBandBranchCommit`, `TestRebaseStep_DetectsUnpushedLocalDefaultBranchCommits` (#283), `TestResolveForcePushDecision_*`.
+
+**macOS Release Signing (permanent identity)**
+
+- Every official macOS release artifact - both `darwin/arm64` and `darwin/amd64` - is Developer ID Application signed on a macOS runner with a fixed identifier, hardened runtime, secure timestamp, and no entitlements, then strictly verified before it is archived or checksummed; the Linux and Windows release paths are unchanged.
+- The executable identifier `com.kunchenguid.no-mistakes` and Team ID `9T2J7MNUP9` are the permanent Developer ID identity and MUST NEVER change: they are the invariant of the identity-based designated requirement that lets macOS permission grants survive `no-mistakes update`, so changing either resets every grant once.
+- Signing runs only in the darwin build job gated behind the `release-signing` GitHub environment; the certificate is the base64 `CSC_LINK` secret unlocked with `CSC_KEY_PASSWORD`, imported into an ephemeral keychain with a runtime-generated password that is deleted on success and failure, and no other job may reference those secrets.
+- Signing happens before tarball creation and checksum generation, and the verify gate fails the release closed on any missing or ambiguous signature, wrong Team ID, non-permanent identifier, content-based (`cdhash`) requirement, missing hardened runtime or timestamp, or wrong architecture.
+- Mechanics live in `.github/workflows/release.yml`; the contract is pinned by the root `TestReleaseWorkflow*` static tests in `workflow_release_signing_test.go`, and secret values are never recorded here or in any test fixture.
+- Notarization, stapling, a PKG, Homebrew, and universal binaries are intentionally out of scope for this phase.
 
 **When Making Changes**
 

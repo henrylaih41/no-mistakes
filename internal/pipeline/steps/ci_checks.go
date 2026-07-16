@@ -143,20 +143,6 @@ func encodeLastFixedChecks(failing []string, mergeConflict bool) string {
 	return string(encoded)
 }
 
-// combinedFixKey is the anti-thrash key for the shared CI-fix path that handles
-// failing checks and/or merge conflicts. When the post-PR review loop has also
-// flagged the head (devinNotGreen), the head SHA and Devin finding fingerprints
-// are folded in so newly-posted review findings on still-failing checks are not
-// mistaken for an already-attempted fix and skipped — they reach the fixer
-// (which accepts them) instead. With no review findings the key is byte-identical
-// to encodeLastFixedChecks, preserving the review-loop-disabled anti-thrash.
-func combinedFixKey(failing []string, mergeConflict, devinNotGreen bool, headSHA string, devinPrints []string) string {
-	if devinNotGreen {
-		return encodeDevinFixKey(failing, mergeConflict, headSHA, devinPrints)
-	}
-	return encodeLastFixedChecks(failing, mergeConflict)
-}
-
 // encodeDevinFixKey builds the anti-thrash key for a post-PR review-loop fix
 // round. It folds the head SHA and the Devin finding fingerprints into the key
 // so a fix is treated as "already attempted" only until the head advances (a new
@@ -301,12 +287,10 @@ func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline
 // fabricate any file-scoped finding summary — it surfaces the single, honest
 // reason and hands the decision to a human (ruling #11).
 //
-// Like the CI-timeout gates, it carries an ApprovalAutoResolve so that if the PR
-// is merged or closed externally while the run is parked awaiting manual
-// verification, the gate self-heals instead of staying parked indefinitely
-// (nm#11); every manual-review park is constructed here so no call site can
-// forget to wire it.
-func devinManualReviewOutcome(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, reason string) *pipeline.StepOutcome {
+// Like every parked CI gate, this is reconciled by CIStep.ReconcileApprovalGate
+// against the PR's current state. A merge or close therefore self-heals through
+// v1.37's single bounded reconciliation path rather than a second waiter.
+func devinManualReviewOutcome(reason string) *pipeline.StepOutcome {
 	findings := Findings{
 		Summary: reason,
 		Items: []Finding{{
@@ -317,9 +301,8 @@ func devinManualReviewOutcome(sctx *pipeline.StepContext, host scm.Host, pr *scm
 	}
 	findingsJSON, _ := json.Marshal(findings)
 	return &pipeline.StepOutcome{
-		NeedsApproval:       true,
-		Findings:            string(findingsJSON),
-		ApprovalAutoResolve: ciPRClosedAutoResolver(sctx, host, pr),
+		NeedsApproval: true,
+		Findings:      string(findingsJSON),
 	}
 }
 

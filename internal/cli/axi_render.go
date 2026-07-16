@@ -149,10 +149,6 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 }
 
 func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
-	return runViewFromDBWithCounts(nil, r, steps)
-}
-
-func runViewFromDBWithCounts(d *db.DB, r *db.Run, steps []*db.StepResult) runView {
 	rv := runView{
 		ID:                 r.ID,
 		Branch:             r.Branch,
@@ -177,11 +173,6 @@ func runViewFromDBWithCounts(d *db.DB, r *db.Run, steps []*db.StepResult) runVie
 		}
 		if s.LastActivity != nil {
 			sv.LastActivity = *s.LastActivity
-		}
-		if d != nil {
-			if retries, err := d.CountStepAgentAutoRetries(s.ID); err == nil {
-				sv.AgentAutoRetries = retries
-			}
 		}
 		if s.DurationMS != nil {
 			sv.DurationMS = *s.DurationMS

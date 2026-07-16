@@ -14,9 +14,9 @@ In the TUI, yolo mode is an explicit override that auto-resolves paused steps: `
 Every pipeline agent invocation is prompt-steered to keep intentional writes inside the run worktree and avoid mutating system state outside it.
 This is a soft boundary, not OS-level sandbox enforcement.
 The steering still allows requested test evidence under the managed temporary `no-mistakes-evidence` directory or the configured in-repo evidence directory, plus incidental temp or cache writes from normal development tools.
+Configured shell commands and one-shot agent subprocesses are scoped to their step: when the invocation exits, fails, or is cancelled, no-mistakes terminates remaining child processes it spawned so background workers do not outlive the run.
 When a run is started with design context - via repeatable `--design-context` files or repo-config `design_context.files` - no-mistakes materializes that text once at run start and injects it into the review and fix prompts as the author's design contract for the agent to check the implementation against, not as instructions that override no-mistakes rules.
 See [Design context](/no-mistakes/guides/agents/#design-context-for-reviews-and-fixes).
-Configured shell commands and one-shot agent subprocesses are scoped to their step: when the invocation exits, fails, or is cancelled, no-mistakes terminates remaining child processes it spawned so background workers do not outlive the run.
 
 ## Intent
 
@@ -64,20 +64,27 @@ AI code review of your diff.
 **Behavior:**
 - Diffs the base commit against head
 - Filters out files matching `ignore_patterns` from the repo config
-- Sends the filtered diff to the configured agent, or to every reviewer in `review.reviewers`, with structured review instructions and a structured output schema
-- Includes user intent when the run supplied it or transcript matching found a relevant local agent session; detailed provenance semantics are documented in [Intent extraction](/no-mistakes/guides/agents/#intent-extraction)
+- Sends the filtered diff to the configured agent, or independently to every reviewer in `review.reviewers`, with structured review instructions and a structured output schema
+- Includes user intent when the run has supplied intent or transcript matching found a relevant local agent session; the detailed provenance semantics are documented in [Intent extraction](/no-mistakes/guides/agents/#intent-extraction)
+- Treats authoritative intent as enforceable for source-verifiable acceptance criteria, but does not report the absence of a remote branch, push, pull request, or CI state that this run's later Push, PR, or CI step owns
+- Removes any returned finding whose sole claim is that one of those same-run delivery outcomes is not present yet, while keeping findings about pre-existing or external pull requests, third-party artifacts, and lifecycle state that the current run does not own
+- Keeps the later Push, PR, and CI steps responsible for strictly validating their own outcomes after review completes
 - Each reviewer returns findings with severity (`error`, `warning`, `info`), file location, description, and an `action` (`no-op`, `auto-fix`, `ask-user`)
 - In review-panel mode, merged findings keep a reviewer `source`, get reviewer-namespaced IDs, concatenate reviewer summaries/rationales, and use the highest reported `risk_level`
 - `review.max_parallel` bounds concurrent reviewers; `review.fail_open: false` (the default) fails the review step on any reviewer error, while `true` drops failed reviewers if at least one reviewer succeeds
 - Also returns a `risk_level` (`low`, `medium`, `high`) and `risk_rationale`
-- With the default `session_reuse: true`, Claude and Codex reuse one reviewer session across the initial review and every full rereview, and a separate fixer session across review-fix turns
+- With the default `session_reuse: true`, the single-reviewer path can reuse one Claude or Codex reviewer session across the initial review and every full rereview, while the pipeline agent uses a separate fixer session across review-fix turns; configured panel reviewers run independently and cold
 - A resume failure retries the same turn in a fresh session for that role, never skips the full rereview, and unsupported agents run cold
 
 **Approval:** required if any finding has severity `error` or `warning`. Findings with `action: ask-user` pause for approval instead of entering the normal auto-fix loop. This is for findings that challenge the author's intent, not routine correctness, reliability, or security fixes that may need to re-add a small amount of deleted logic. With the default `auto_fix.review: 0`, blocking review findings park for approval even when their action is `auto-fix`; setting repo or global `auto_fix.review` above `0` re-enables the automatic review fix loop for eligible `auto-fix` findings. Findings with `action: no-op` are informational only. The shared [finding-action model](/no-mistakes/concepts/auto-fix/#finding-actions) owns the behavior for a missing `action`.
 
-`review.max_fix_rounds` caps all review fix/re-review rounds, including automatic review fixes and owner-approved `axi respond --action fix` rounds. The default `0` preserves unlimited behavior. When the cap is reached, the review step parks at `awaiting_triage` with residual findings intact. A plain fix response is refused; an additional fix round requires `--fix-override --override-reason "<master triage reason>"`, and that reason is persisted on the round.
+`review.max_fix_rounds` caps review fix/rereview rounds, including automatic and owner-approved fixes. The default `0` is unlimited. At the cap the step parks at `awaiting_triage` with residual findings intact; one additional round requires `--fix-override --override-reason "<master triage reason>"`, and the reason is persisted.
 
-**Auto-fix:** the configured pipeline agent receives the selected previous findings, including reviewer `source` labels when a panel produced them, plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and which findings the user left unselected. Follow-up review passes use the same single reviewer or review panel and use that history to avoid re-reporting user-ignored findings unless the code now has a materially different problem. Fix commits use `no-mistakes(review): <summary>`.
+**Auto-fix:** the pipeline agent receives the selected previous findings, including reviewer `source` labels when a panel produced them, plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and which findings the user left unselected.
+The fixer applies all selected fixes before running one focused verification limited to the changed area, and it is instructed not to run the complete repository test or lint suite during the fix round.
+The dedicated Test and Lint steps after review remain the authoritative gates, although their coverage may be focused when commands are unconfigured.
+Follow-up review passes use the history to avoid re-reporting user-ignored findings unless the code now has a materially different problem.
+Fix commits use `no-mistakes(review): <summary>`.
 
 **Default auto-fix limit:** `0`.
 
@@ -202,8 +209,8 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 
 **Behavior:**
 - Polls provider CI status at increasing intervals: every 30s for the first 5 minutes, every 60s for 5-15 minutes, every 120s after that
-- Continues monitoring an open PR until it is merged, closed, declined, or the configured `ci_timeout` idle window elapses, even after CI checks are currently healthy
-- Treats `ci_timeout` as an idle timeout: each upstream default-branch advance re-arms the timer, and `ci_timeout: "unlimited"` disables self-termination
+- Continues its normal monitoring loop until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses, then parks at an approval gate instead of ending the run
+- The [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) owns idle re-arming, unlimited monitoring, and fail-closed reconciliation while that gate is parked
 - On GitHub, GitLab, and Azure DevOps, polls provider mergeability alongside CI checks while the PR remains open
 - While the PR stays open, the TUI and terminal title show `Checks passed` once checks are green and known mergeability is clear, and `no-mistakes axi` returns `outcome: checks-passed` with successful-output reporting instructions so agents can summarize the run, ask the user to review and merge, and list any pipeline fixes instead of waiting
 - If the default branch moves after `checks-passed`, keeps watching the same PR; a clean behind PR needs no action, while an actual GitHub, GitLab, or Azure DevOps merge conflict is auto-fixed by rebasing onto the base and re-pushing through the force-push safety guard

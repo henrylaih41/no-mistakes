@@ -85,7 +85,7 @@ func newAxiRunCmd() *cobra.Command {
 			"--design-context is optional and repeatable: pass design notes, ADRs, or\n" +
 			"issue agreements that reviewers and fixers should check the change against.\n\n" +
 			"--review-loop=off disables only the auxiliary Devin review loop for this run;\n" +
-			"the CI step still monitors GitHub checks, merge, and close state.\n\n" +
+			"the CI step still monitors checks, merge, and close state.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary or a configured\n" +
 			"ACP target through acpx, and fails before the first step when none can run.\n\n" +

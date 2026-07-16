@@ -1389,9 +1389,6 @@ func TestCIStep_FailingCheckWithDevinManualReviewSurfacesBothAtTimeout(t *testin
 	if !strings.Contains(outcome.Findings, cimonitor.ReviewManualVerifyMsg) {
 		t.Errorf("park findings must also carry the Devin manual-verify signal, got %q", outcome.Findings)
 	}
-	if outcome.ApprovalAutoResolve == nil {
-		t.Error("timeout outcome must carry an ApprovalAutoResolve")
-	}
 }
 
 // TestCIStep_FailingCheckWithDevinManualReviewPendingWithinGraceSurfacesBoth is

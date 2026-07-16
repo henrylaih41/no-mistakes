@@ -6,7 +6,13 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, `agent` selects which processes launch there (including ordered fallback lists and `acp:` targets), `review.reviewers` selects extra reviewer processes, and `review_loop` gates the post-PR review loop, all with the maintainer's credentials. To prevent supply-chain attacks, the daemon reads **`commands`, `agent`, `review`, `review_loop`, and `document.instructions` from your default branch**, never from the pushed SHA, at the exact commit resolved by a fresh fetch. If the fetch fails, those trusted fields are forced empty or absent rather than falling back to a stale or hostile copy. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`, `design_context`) are still read from the pushed branch; `document.instructions` is trusted because it controls the documentation policy that evaluates that branch.
+`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, `agent` selects which process launches there (including ordered fallback lists and `acp:` targets), `review.reviewers` selects extra reviewer processes, and `review_loop` controls bot-sourced prompt content, fix rounds, and a secret key file, all with the maintainer's credentials.
+To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, `review`, and `review_loop` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
+The daemon also reads `document.instructions` and `disable_project_settings` only from that trusted copy.
+If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
+A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
+Commit the gate-control settings you want to your default branch.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`, `design_context`) are still read from the pushed branch. `design_context.files` is prompt context rather than process selection; paths must be repository-relative and are worktree-jailed before reading.
 
 If you genuinely want per-branch `commands`, `agent`, `review`, and `review_loop` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -29,6 +35,10 @@ ignore_patterns:
 document:
   instructions: |
     docs/ owns detailed product guidance; README.md owns the introduction.
+
+# For orchestration repos whose project instructions would misidentify gate agents.
+# Read only from the trusted default branch. Defaults to false.
+disable_project_settings: true
 
 auto_fix:
   rebase: 3
@@ -74,7 +84,8 @@ Override the default agent for this repo and its setup-wizard suggestions.
 | Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok`, `acp:<target>` |
 | Default | Inherits from global config |
 
-`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `grok` (when `grok --version` succeeds).
+`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `grok`.
+Rovo Dev and Grok pipeline-agent candidates must also pass the support probes documented by the global [`agent`](/no-mistakes/reference/global-config/#agent) field, whether selected explicitly, through `auto`, or from a fallback list.
 `acp:<target>` uses the user-installed `acpx` binary configured in global config.
 ACP agents are opt-in and are not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
@@ -102,6 +113,28 @@ Opt in to honoring the code-executing selection fields (`commands.{test,lint,for
 | Default | `false` |
 
 This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `agent`, `review`, and `review_loop` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick launched agents on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+
+### disable_project_settings
+
+Suppress project-level agent settings and instructions for every gate-agent start and resumed session.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `false` |
+
+This opt-in is intended for agent-orchestration repositories whose `AGENTS.md`, `CLAUDE.md`, or harness-specific project settings would give a validation agent an operator identity and authority that it must not adopt.
+When enabled, no-mistakes suppresses the target checkout's project settings for every agent-driven gate step while preserving user-level agent configuration.
+Codex and Claude are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, while Claude loads only its user setting source.
+The setting applies to both new and resumed sessions.
+
+The gate fails before launching an agent if any resolved agent or fallback lacks a verified suppression mechanism.
+It also fails if `agent_args_override` defeats suppression, such as a nonzero Codex `project_doc_max_bytes` or Claude setting sources that include `project` or `local`.
+When this option is `false`, missing, or `null`, all agents retain their existing project-setting behavior.
+
+This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
+A pushed branch cannot enable it or disable a trusted opt-in.
+If the trusted commit or its present config file cannot be read and parsed, the run aborts rather than guessing that the option is disabled.
 
 ### commands.test
 

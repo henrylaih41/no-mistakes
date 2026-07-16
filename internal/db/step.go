@@ -151,20 +151,6 @@ func (d *DB) FailStep(id string, errMsg string, durationMS int64) error {
 	return nil
 }
 
-// ParkStep marks a step as parked at a non-terminal gate with an explicit
-// reason. completed_at stays NULL so recovery can still distinguish it from a
-// finished step.
-func (d *DB) ParkStep(id string, status types.StepStatus, errMsg string, durationMS int64) error {
-	_, err := d.sql.Exec(
-		`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = NULL, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
-		status, errMsg, durationMS, now(), fmt.Sprintf("status: %s", status), id,
-	)
-	if err != nil {
-		return fmt.Errorf("park step: %w", err)
-	}
-	return nil
-}
-
 // TouchStepActivity records the latest meaningful activity for an active step
 // without changing its status or current agent pid.
 func (d *DB) TouchStepActivity(id string, text string) error {
@@ -181,6 +167,20 @@ func (d *DB) SetStepAgentActivity(id string, text string, agentPID *int) error {
 	_, err := d.sql.Exec(`UPDATE step_results SET last_activity_at = ?, last_activity = ?, agent_pid = ? WHERE id = ?`, now(), text, agentPID, id)
 	if err != nil {
 		return fmt.Errorf("set step agent activity: %w", err)
+	}
+	return nil
+}
+
+// ParkStep marks a step as parked at a non-terminal gate with an explicit
+// reason. completed_at stays NULL so recovery can still distinguish it from a
+// finished step.
+func (d *DB) ParkStep(id string, status types.StepStatus, errMsg string, durationMS int64) error {
+	_, err := d.sql.Exec(
+		`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = NULL, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
+		status, errMsg, durationMS, now(), fmt.Sprintf("status: %s", status), id,
+	)
+	if err != nil {
+		return fmt.Errorf("park step: %w", err)
 	}
 	return nil
 }

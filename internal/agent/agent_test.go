@@ -126,7 +126,7 @@ func TestParseAcpxJSONEventsParsesUsageFields(t *testing.T) {
 	if text != "done" {
 		t.Fatalf("text = %q, want done", text)
 	}
-	want := TokenUsage{InputTokens: 120, OutputTokens: 60, CacheReadTokens: 40, CacheCreationTokens: 15}
+	want := TokenUsage{InputTokens: 120, OutputTokens: 60, CacheReadTokens: 40, CacheCreationTokens: 15, Reported: true, CacheCreationReported: true}
 	if usage != want {
 		t.Fatalf("usage = %+v, want %+v", usage, want)
 	}
@@ -153,7 +153,7 @@ func TestParseAcpxJSONEventsParsesNormalizedCachedUsageFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseAcpxJSONEvents() error = %v", err)
 	}
-	want := TokenUsage{InputTokens: 5, OutputTokens: 3, CacheReadTokens: 11, CacheCreationTokens: 13}
+	want := TokenUsage{InputTokens: 5, OutputTokens: 3, CacheReadTokens: 11, CacheCreationTokens: 13, Reported: true, CacheCreationReported: true}
 	if usage != want {
 		t.Fatalf("usage = %+v, want %+v", usage, want)
 	}
@@ -167,7 +167,7 @@ func TestParseAcpxJSONEventsParsesResultUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseAcpxJSONEvents() error = %v", err)
 	}
-	want := TokenUsage{InputTokens: 21, OutputTokens: 8, CacheReadTokens: 5, CacheCreationTokens: 2}
+	want := TokenUsage{InputTokens: 21, OutputTokens: 8, CacheReadTokens: 5, CacheCreationTokens: 2, Reported: true, CacheCreationReported: true}
 	if usage != want {
 		t.Fatalf("usage = %+v, want %+v", usage, want)
 	}

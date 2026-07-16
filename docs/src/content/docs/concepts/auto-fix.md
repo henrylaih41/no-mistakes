@@ -57,9 +57,8 @@ In the TUI, yolo mode is an explicit override that auto-resolves paused steps by
 Steps with only `no-op` findings are approved as-is.
 
 The `review`, `test`, and configured-command `lint` steps use this shared model directly. The `document` step also uses the same `action` field, but unresolved documentation findings pause for approval because the initial document pass already attempted the documentation updates it could make safely.
-When `commands.lint` is empty, lint findings describe issues left after the agent already attempted safe fixes, so they pause for approval instead of remaining eligible for another automatic fix loop.
-When the review step uses a reviewer panel, each review finding also carries a `source` label such as `codex` or `claude`; the fix payload preserves that provenance so the fixing agent and user can reconcile agreements or contradictions.
 When `commands.lint` is empty, the combined housekeeping pass routes documentation and lint findings to their owning gates. Its unresolved lint findings describe issues left after safe fixes, so blocking findings pause for approval instead of remaining eligible for another automatic fix loop.
+When the review step uses a reviewer panel, each review finding also carries a `source` label such as `codex` or `claude`; the fix payload preserves that provenance so the fixing agent and user can reconcile agreements or contradictions.
 
 Documentation findings use the same approval UI, but the `document` step treats any finding as an unresolved documentation gap or judgment call that should pause for approval.
 
@@ -83,6 +82,9 @@ When `review.max_fix_rounds` is configured and reached, the review step parks at
 ## Fix commits
 
 Each auto-fix cycle commits its changes with a descriptive message. The combined document-and-lint housekeeping pass runs in the Document step, so its documentation and safe lint fixes use the Document prefix; configured-command lint fixes use the Lint prefix:
+
+Before a step-specific fix commit, the pipeline verifies that the live worktree HEAD still descends from the head recorded after its previous commit.
+It allows a legitimate forward commit made by an agent, but aborts the run if an out-of-band backward or divergent reset would drop the reviewed history.
 
 | Step | Commit prefix |
 |---|---|

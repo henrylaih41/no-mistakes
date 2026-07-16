@@ -28,6 +28,9 @@ const claudeScannerMaxTokenSize = 256 * 1024 * 1024
 type claudeAgent struct {
 	bin       string
 	extraArgs []string
+	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
+	// buildArgs suppresses claude's project-level settings/memory surface.
+	disableProjectSettings bool
 }
 
 func (a *claudeAgent) Name() string { return "claude" }
@@ -38,6 +41,22 @@ func (a *claudeAgent) Name() string { return "claude" }
 func (a *claudeAgent) SupportsSessionResume() bool { return true }
 
 func (a *claudeAgent) ReportsAgentAttempts() bool { return true }
+
+// NeutralizesGateInstructions reports whether claude is currently launched with
+// the target repo's project-level settings/memory suppressed. It is meaningful
+// only under the opt-out (disableProjectSettings): the gate only consults it
+// when the repo opted out. It is honest about the EFFECTIVE setting sources -
+// claude's project surface (project CLAUDE.md/AGENTS.md, .claude/settings.json,
+// and .claude/settings.local.json) is dropped iff the effective
+// --setting-sources excludes both `project` and `local`. buildArgs appends
+// `--setting-sources user` when the operator did not pin their own; an operator
+// override that re-adds `project`/`local` defeats neutralization, so this
+// returns false and the gate fails closed. Verified empirically: with project
+// memory loaded claude adopts the firstmate identity; with --setting-sources
+// user it does not.
+func (a *claudeAgent) NeutralizesGateInstructions() bool {
+	return a.disableProjectSettings && claudeEffectiveSettingSourcesNeutral(a.extraArgs)
+}
 
 func (a *claudeAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, "claude", opts, claudeMaxRetries, claudeRetryClassifier, nil, func() (*Result, error) {
@@ -102,6 +121,15 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 		res.SessionID = result.sessionID
 		res.Resumed = resumeID != ""
 		res.Model = result.model
+		// Claude reports cache-creation cost per message, so the accumulated
+		// value is meaningful (recorded as a real number, not unknown). Its
+		// stream-json usage is per-invocation, not cumulative across --resume,
+		// so SessionUsageCumulative stays false and per-round deltas equal the
+		// raw counters.
+		res.CacheCreationReported = res.UsageReported
+		if result.model != "" {
+			res.ModelProvider = "anthropic"
+		}
 	}
 	if errors.Is(err, errNoStructuredOutput) && opts.OnChunk != nil {
 		opts.OnChunk(fmt.Sprintf("structured output missing: subtype=%s, text_len=%d, input_tokens=%d, output_tokens=%d",
@@ -123,9 +151,11 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 	}
 
 	return &Result{
-		Output: result.StructuredOutput,
-		Text:   result.text,
-		Usage:  usage,
+		Output:                result.StructuredOutput,
+		Text:                  result.text,
+		Usage:                 usage,
+		UsageReported:         usage.Reported,
+		CacheCreationReported: usage.CacheCreationReported,
 	}, nil
 }
 
@@ -137,13 +167,26 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 // (never --fork-session: the session identity must stay stable so later
 // turns keep resuming the same conversation).
 func (a *claudeAgent) buildArgs(prompt string, schema json.RawMessage, resumeID string) []string {
-	args := make([]string, 0, len(a.extraArgs)+10)
+	args := make([]string, 0, len(a.extraArgs)+12)
 	args = append(args, a.extraArgs...)
 	args = append(args,
 		"-p", prompt,
 		"--verbose",
 		"--output-format", "stream-json",
 	)
+	// Project-settings opt-out (trusted-only; see config.DisableProjectSettings):
+	// load only user-level settings and memory, never the target repo's
+	// project/local CLAUDE.md/AGENTS.md, .claude/settings.json, or
+	// .claude/settings.local.json. In an agent-orchestration target (firstmate)
+	// the project memory otherwise installs a fleet-captain identity on the gate
+	// agent; `--setting-sources user` drops the project and local sources (the
+	// full project surface) while preserving the operator's own user-level config
+	// and auth. Suppressed only when the operator did not pin their own
+	// --setting-sources. When the repo did not opt out, nothing is added and
+	// claude loads its project memory exactly as before (backward-compat).
+	if a.disableProjectSettings && !claudeUserSetSettingSources(a.extraArgs) {
+		args = append(args, "--setting-sources", "user")
+	}
 	if resumeID != "" {
 		args = append(args, "--resume", resumeID)
 	}
@@ -154,6 +197,50 @@ func (a *claudeAgent) buildArgs(prompt string, schema json.RawMessage, resumeID 
 		args = append(args, "--dangerously-skip-permissions")
 	}
 	return args
+}
+
+// claudeUserSetSettingSources reports whether extraArgs pin --setting-sources at
+// all, in which case buildArgs does not add its own.
+func claudeUserSetSettingSources(extraArgs []string) bool {
+	_, pinned := claudeUserSettingSources(extraArgs)
+	return pinned
+}
+
+// claudeUserSettingSources returns the operator-pinned --setting-sources value
+// (last occurrence wins) and whether it was pinned. Handles `--setting-sources
+// <v>` and `--setting-sources=<v>`.
+func claudeUserSettingSources(extraArgs []string) (string, bool) {
+	value := ""
+	pinned := false
+	for i, arg := range extraArgs {
+		if arg == "--setting-sources" && i+1 < len(extraArgs) {
+			value = extraArgs[i+1]
+			pinned = true
+		} else if strings.HasPrefix(arg, "--setting-sources=") {
+			value = strings.TrimPrefix(arg, "--setting-sources=")
+			pinned = true
+		}
+	}
+	return value, pinned
+}
+
+// claudeEffectiveSettingSourcesNeutral reports whether the EFFECTIVE claude
+// setting sources drop the target repo's project and local surface: true when
+// the operator did not pin --setting-sources (buildArgs appends `user`) or
+// pinned a value that contains neither `project` nor `local`, and false when the
+// operator's value re-adds `project`/`local`.
+func claudeEffectiveSettingSourcesNeutral(extraArgs []string) bool {
+	value, pinned := claudeUserSettingSources(extraArgs)
+	if !pinned {
+		return true // buildArgs appends --setting-sources user
+	}
+	for _, src := range strings.Split(value, ",") {
+		switch strings.ToLower(strings.TrimSpace(src)) {
+		case "project", "local":
+			return false
+		}
+	}
+	return true
 }
 
 // claudeUserSetPermissionMode reports whether extraArgs already declare a
@@ -250,10 +337,12 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 				lastModel = msg.Model
 			}
 			usage.Add(TokenUsage{
-				InputTokens:         msg.Usage.InputTokens,
-				OutputTokens:        msg.Usage.OutputTokens,
-				CacheReadTokens:     msg.Usage.CacheReadInputTokens,
-				CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
+				InputTokens:           msg.Usage.InputTokens,
+				OutputTokens:          msg.Usage.OutputTokens,
+				CacheReadTokens:       msg.Usage.CacheReadInputTokens,
+				CacheCreationTokens:   msg.Usage.CacheCreationInputTokens,
+				Reported:              true,
+				CacheCreationReported: true,
 			})
 			for _, c := range msg.Content {
 				if c.Type == "text" && c.Text != "" {

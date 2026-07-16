@@ -87,37 +87,65 @@ type CIStep struct {
 
 func (s *CIStep) Name() types.StepName { return types.StepCI }
 
+// ReconcileApprovalGate re-checks the PR after the CI step has parked at an
+// approval gate. A PR can be merged or closed after a timeout/failure gate was
+// recorded; either terminal state supersedes the stale gate just as it does in
+// the normal CI polling loop. Open, unknown, and provider-error states remain
+// parked so reconciliation never guesses success.
+func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error) {
+	if err := sctx.Ctx.Err(); err != nil {
+		return false, err
+	}
+	provider := scm.DetectProvider(sctx.Repo.UpstreamURL)
+	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
+		provider = scm.DetectProvider(*sctx.Run.PRURL)
+	}
+	host, skipReason := buildHost(sctx, provider)
+	if host == nil {
+		return false, fmt.Errorf("cannot check PR state: %s", skipReason)
+	}
+	if err := host.Available(sctx.Ctx); err != nil {
+		return false, err
+	}
+
+	prURL := ""
+	if sctx.Run.PRURL != nil {
+		prURL = strings.TrimSpace(*sctx.Run.PRURL)
+	}
+	if prURL == "" {
+		return false, fmt.Errorf("run has no PR URL")
+	}
+	prNumber, err := scm.ExtractPRNumber(prURL)
+	if err != nil {
+		return false, fmt.Errorf("extract PR number: %w", err)
+	}
+	state, err := host.GetPRState(sctx.Ctx, &scm.PR{Number: prNumber, URL: prURL})
+	if err != nil {
+		return false, err
+	}
+	switch state {
+	case scm.PRStateMerged:
+		if sctx.Log != nil {
+			sctx.Log("PR has been merged; clearing stale CI approval gate")
+		}
+		return true, nil
+	case scm.PRStateClosed:
+		if sctx.Log != nil {
+			sctx.Log("PR has been closed; clearing stale CI approval gate")
+		}
+		return true, nil
+	case scm.PRStateOpen:
+		return false, nil
+	default:
+		return false, fmt.Errorf("PR state is unresolved: %q", state)
+	}
+}
+
 func (s *CIStep) gracePeriod() time.Duration {
 	if s.checksGracePeriod > 0 {
 		return s.checksGracePeriod
 	}
 	return defaultChecksGracePeriod
-}
-
-func ciPRClosedAutoResolver(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) func(context.Context) bool {
-	return func(ctx context.Context) bool {
-		state, err := host.GetPRState(ctx, pr)
-		if err != nil {
-			if ctx.Err() == nil && sctx.Log != nil {
-				sctx.Log(fmt.Sprintf("warning: could not re-check PR state while CI gate is parked: %v", err))
-			}
-			return false
-		}
-		switch state {
-		case scm.PRStateMerged:
-			if sctx.Log != nil {
-				sctx.Log("PR has been merged while CI gate was parked; clearing parked CI gate")
-			}
-			return true
-		case scm.PRStateClosed:
-			if sctx.Log != nil {
-				sctx.Log("PR has been closed while CI gate was parked; clearing parked CI gate")
-			}
-			return true
-		default:
-			return false
-		}
-	}
 }
 
 type reviewLoopActivation struct {
@@ -354,23 +382,18 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	timeoutFailingChecks := []string{}
 	timeoutMergeConflict := false
 	timeoutDevinManualReviewReason := ""
-	timeoutAutoResolve := ciPRClosedAutoResolver(sctx, host, pr)
 	lastMonitorLog := ""
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
 			outcome := ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present")
-			outcome.ApprovalAutoResolve = timeoutAutoResolve
 			return withDevinManualVerify(outcome, timeoutDevinManualReviewReason), nil
 		}
 		if mergeabilityBlockedReason != "" {
 			outcome := ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason)
-			outcome.ApprovalAutoResolve = timeoutAutoResolve
 			return withDevinManualVerify(outcome, timeoutDevinManualReviewReason), nil
 		}
-		outcome := ciMonitoringTimeoutOutcome()
-		outcome.ApprovalAutoResolve = timeoutAutoResolve
-		return withDevinManualVerify(outcome, timeoutDevinManualReviewReason), nil
+		return withDevinManualVerify(ciMonitoringTimeoutOutcome(), timeoutDevinManualReviewReason), nil
 	}
 
 	for {
@@ -547,7 +570,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// fabricate changes for a problem it cannot see, ruling #11).
 					lastMonitorLog = ""
 					sctx.Log(cimonitor.ReviewManualVerifyMsg)
-					return devinManualReviewOutcome(sctx, host, pr, cimonitor.ReviewManualVerifyMsg), nil
+					return devinManualReviewOutcome(cimonitor.ReviewManualVerifyMsg), nil
 				} else if loopActive && devinNotGreen && !hasFailures && !mergeConflict {
 					// Checks are clean but the review bot requested changes:
 					// run a bounded review-loop fix round. Anti-thrash keys on

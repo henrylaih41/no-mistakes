@@ -639,13 +639,13 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 	if summaries, err := d.StepFixSummaries(s.ID); err == nil {
 		info.FixSummaries = summaries
 	}
-	if retries, err := d.CountStepAgentAutoRetries(s.ID); err == nil {
-		info.AgentAutoRetries = retries
-	}
 	if rounds, err := d.StepRoundStats(s.ID); err == nil {
 		info.RoundCount = rounds.TotalRounds
 		info.FixRoundCount = rounds.FixRounds
 		info.PendingFixSource = rounds.PendingFixSource
+	}
+	if retries, err := d.CountStepAgentAutoRetries(s.ID); err == nil {
+		info.AgentAutoRetries = retries
 	}
 	return info
 }

@@ -26,8 +26,8 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
-- Configure `review.reviewers` when you want multiple agent families to independently review the same diff.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
+- Configure `review.reviewers` when you want multiple agent families to independently review the same diff.
 - Set explicit `commands.test` and `commands.lint` if you want deterministic baseline command execution regardless of agent choice.
 
 That last point matters: the agent helps fill in gaps, but explicit repo
@@ -216,6 +216,13 @@ The full driving protocol - how to read the home view and `gate:` objects, when 
 Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
 The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 
+If review reaches `review.max_fix_rounds`, it parks as `awaiting_triage`; `--yes` stops there. Report the residual findings for master triage. Only after master rules a residual merge-blocking may an agent send `axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <ids>`; the reason is persisted on the triggering round.
+
+If the gate status is `awaiting_agent_retry`, the agent invocation exhausted bounded retries for a transient provider/runtime failure.
+There are no findings to fix: respond with `no-mistakes axi respond --action retry` to retry that same step.
+This retry does not create a review fix round and does not count against `review.max_fix_rounds`.
+Under `--yes`, no-mistakes auto-retries this parked transient at most once per step, with that auto retry persisted on the run; a second consecutive transient remains parked for an explicit retry decision.
+
 ## Binary resolution
 
 When the daemon is running through a managed service, its `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories; on Windows it reuses the current process environment.
@@ -229,7 +236,8 @@ Three global config fields tune resolution and invocation, and the [Global Confi
 
 ## Review session reuse
 
-With the default `session_reuse: true`, Claude and Codex keep one durable reviewer session and a separate review-fixer session per run, every rereview still evaluates the entire branch diff, and resume failures fall back to fresh same-role sessions instead of skipping review.
+With the default `session_reuse: true`, the single-reviewer path can keep one durable Claude or Codex reviewer session, and the pipeline agent can keep a separate review-fixer session per run; configured panel reviewers stay independent and cold.
+Every rereview still evaluates the entire branch diff, and resume failures fall back to fresh same-role sessions instead of skipping review.
 The [`session_reuse` field reference](/no-mistakes/reference/global-config/#session_reuse) owns the exact reuse, fallback, privacy, and restart-recovery semantics.
 
 ## Agent interface
@@ -253,7 +261,7 @@ Each invocation returns:
 - **SessionID** and **Resumed** - the adapter-native session identity and whether this invocation resumed it, when supported
 - **Model** and **Provider** - adapter-reported serving metadata when available
 
-One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, and acpx) are invocation-scoped.
+One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, Grok, and acpx) are invocation-scoped.
 After no-mistakes starts one, it terminates any remaining child processes when the invocation exits, fails, or is cancelled, so agent-spawned test workers, build watchers, and dev servers do not survive the step.
 Step logs record their process lifecycle, including start and exit lines with the PID, and AXI status exposes that PID while the subprocess is still active.
 Persistent server agents (Rovo Dev and OpenCode) use their managed server lifecycle instead.
@@ -367,5 +375,5 @@ The `gate validation` line is the decisive result: when the configured global ru
 
 For `agent: acp:<target>`, doctor verifies that `acpx` is installed on `PATH` or resolves through `acpx_path` in global config.
 It does not invoke the target or test its credentials.
-For `agent: auto`, gate validation also requires `acli rovodev --help` to succeed for Rovo Dev and `grok --version` to succeed for Grok before selecting either runner.
 Every new validation run resolves its effective agent again after applying any trusted repository-level override.
+The global [`agent` reference](/no-mistakes/reference/global-config/#agent) owns the additional Rovo Dev and Grok pipeline-agent support probes; they apply to explicit selections and fallback lists as well as `auto`.

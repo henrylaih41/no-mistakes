@@ -174,6 +174,80 @@ func (lifecycleTestAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Res
 
 func (lifecycleTestAgent) Close() error { return nil }
 
+type concurrentPanelLifecycleAgent struct {
+	name    string
+	barrier *sync.WaitGroup
+}
+
+func (a concurrentPanelLifecycleAgent) Name() string { return a.name }
+
+func (a concurrentPanelLifecycleAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	a.barrier.Done()
+	a.barrier.Wait()
+	for i := 0; i < 32; i++ {
+		opts.OnLifecycle(agent.LifecycleEvent{
+			Agent:   a.name,
+			Phase:   agent.LifecyclePhaseRetry,
+			Message: fmt.Sprintf("%s lifecycle %02d", a.name, i),
+		})
+		runtime.Gosched()
+	}
+	return &agent.Result{Text: "ok"}, nil
+}
+
+func (a concurrentPanelLifecycleAgent) Close() error { return nil }
+
+func TestExecutor_ReviewPanelLifecycleLoggingConcurrent(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	var barrier sync.WaitGroup
+	barrier.Add(3)
+	reviewers := []agent.Agent{
+		concurrentPanelLifecycleAgent{name: "codex", barrier: &barrier},
+		concurrentPanelLifecycleAgent{name: "claude", barrier: &barrier},
+		concurrentPanelLifecycleAgent{name: "grok", barrier: &barrier},
+	}
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			for _, result := range agent.FanOut(sctx.Ctx, sctx.Reviewers, agent.RunOpts{}, 0) {
+				if result.Err != nil {
+					return nil, result.Err
+				}
+			}
+			return &StepOutcome{ExitCode: 0}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	exec.SetReviewers(reviewers)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	logPath := filepath.Join(p.RunLogDir(run.ID), "review.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	content := string(data)
+	for _, reviewer := range reviewers {
+		last := -1
+		for i := 0; i < 32; i++ {
+			message := fmt.Sprintf("%s lifecycle %02d", reviewer.Name(), i)
+			index := strings.Index(content, message)
+			if index < 0 {
+				t.Fatalf("log missing %q", message)
+			}
+			if index <= last {
+				t.Fatalf("lifecycle log order for %s changed at event %d", reviewer.Name(), i)
+			}
+			last = index
+		}
+	}
+}
+
 func TestExecutor_AgentLifecycleLoggedAndClearsPID(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

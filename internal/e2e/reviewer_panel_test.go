@@ -243,8 +243,10 @@ func reviewerPanelScenario(t *testing.T) string {
           line: 1
           description: "panel reviewer observation"
           action: no-op
+          review_scope: source
       risk_level: low
       risk_rationale: "informational finding only"
+      risk_scope: source-or-external
       tested:
         - "fakeagent: simulated review"
       testing_summary: "not run during review"

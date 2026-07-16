@@ -102,7 +102,8 @@ reason about in one long-lived process than inside independent hook invocations.
 
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon stopped while they were active):
 
-- Resumes a run only when it has one fully recorded `awaiting_approval` or `fix_review` gate, a matching worktree and head, an unambiguous branch owner, a valid step plan, and compatible saved review-session metadata
+- Resumes a run only when it has one fully recorded approval gate, a matching worktree and head, an unambiguous branch owner, a valid step plan, and compatible saved review-session metadata
+- Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution" rather than guessing how to resume it
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed

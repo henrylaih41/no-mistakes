@@ -88,13 +88,13 @@ no-mistakes axi run --intent "the user's goal" --review-loop=off
 no-mistakes axi run --intent "the user's goal" --yes
 ```
 
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--intent` | `string` | (none) | What the user set out to accomplish; required to start a new run |
-| `-y`, `--yes` | `bool` | `false` | Auto-resolve every gate until a decision point or outcome |
-| `--skip` | `string` | (none) | Comma-separated pipeline steps to skip |
-| `--design-context` | `string[]` | Empty | Repeatable path to a design-context text file for review and fix prompts |
-| `--review-loop` | `string` | (none) | Set to `off` to disable only the auxiliary Devin review loop for this run; CI monitoring still runs |
+| Flag               | Type       | Default | Description                                                                |
+| ------------------ | ---------- | ------- | -------------------------------------------------------------------------- |
+| `--intent`         | `string`   | (none)  | What the user set out to accomplish; required to start a new run           |
+| `-y`, `--yes`      | `bool`     | `false` | Auto-resolve every gate until a decision point or outcome                  |
+| `--skip`           | `string`   | (none)  | Comma-separated pipeline steps to skip                                     |
+| `--design-context` | `string[]` | Empty   | Repeatable design-context text file path for review and fix prompts        |
+| `--review-loop`    | `string`   | (none)  | Set to `off` to disable only Devin for this run; CI monitoring still runs  |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
@@ -102,6 +102,9 @@ Err on the side of completeness: include the goal, important decisions and trade
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 `axi run` starts a run even when there are no new commits to push, including the first run for a branch the gate already mirrors but has never validated — for example a push whose hook notification was dropped while the daemon was down — rather than failing with `no previous run for branch`.
 Reattaching to an in-flight run does not require `--intent`.
+Reattaching to an in-flight run can proceed while the daemon is already running even if the global config file has become invalid, but starting a fresh run still requires valid global config.
+Starting a fresh run also requires a runnable effective pipeline agent.
+If the configured native agent or ACP bridge is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
 `--design-context` supplies run-scoped design notes, ADRs, issue agreements, or other text context that reviewers and fixers should check the implementation against.
 Relative paths resolve from the current working tree before the run is triggered; absolute paths are allowed because the flag is explicit local user input.
 The daemon reads those files once at run start and stores the materialized context on the run, so later review and fix rounds use the same contract even if the files change.
@@ -109,9 +112,6 @@ Missing, unreadable, non-text, or invalid context files fail loudly instead of b
 Reattaching to an in-flight run does not add or replace its design context.
 `--review-loop=off` disables only the post-PR Devin review loop for the run.
 Use it when the PR base repo is not Devin-applicable or the run should rely on normal CI checks only; it does not skip the `ci` step, so GitHub checks, merge, and close monitoring continue.
-Reattaching to an in-flight run can proceed while the daemon is already running even if the global config file has become invalid, but starting a fresh run still requires valid global config.
-Starting a fresh run also requires a runnable effective pipeline agent.
-If the configured native agent or ACP bridge is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 `--yes` does not override a review step parked at `awaiting_triage`; it returns that gate for master triage instead.
@@ -143,16 +143,16 @@ no-mistakes axi respond --action retry
 no-mistakes axi respond --action skip
 ```
 
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--action` | `string` | (none) | `approve`, `fix`, `retry`, or `skip`; required |
-| `--step` | `string` | awaiting step | Step to respond to |
-| `--findings` | `string` | (none) | Comma-separated finding IDs for `--action fix` |
-| `--instructions` | `string` | (none) | Guidance applied to selected findings |
-| `--add-finding` | `string` | (none) | JSON finding object to add and fix |
-| `--fix-override` | `bool` | `false` | Allow one more review fix round after `awaiting_triage`; valid only with `--action fix` |
-| `--override-reason` | `string` | (none) | Required non-empty master triage reason for `--fix-override`; persisted on the triggering round |
-| `-y`, `--yes` | `bool` | `false` | Auto-resolve every subsequent gate until a decision point or outcome |
+| Flag             | Type     | Default       | Description                                                          |
+| ---------------- | -------- | ------------- | -------------------------------------------------------------------- |
+| `--action`       | `string` | (none)        | `approve`, `fix`, `retry`, or `skip`; required                       |
+| `--step`         | `string` | awaiting step | Step to respond to                                                   |
+| `--findings`     | `string` | (none)        | Comma-separated finding IDs for `--action fix`                       |
+| `--instructions` | `string` | (none)        | Guidance applied to selected findings                                |
+| `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
+| `--fix-override` | `bool`   | `false`       | Permit one review fix round after `awaiting_triage`                   |
+| `--override-reason` | `string` | (none)     | Required master triage reason for `--fix-override`; persisted         |
+| `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve every subsequent gate until a decision point or outcome |
 
 After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix` and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when CI is green but the PR still needs a human merge.
 It also stops at `awaiting_triage`; it never supplies `--fix-override` implicitly.
@@ -332,8 +332,9 @@ no-mistakes stats
 
 Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
 
-Use `--agents` for local, per-purpose agent performance aggregates, including duration, session mode, errors, and input, output, cache-read, and cache-creation tokens.
-Use `--run <id>` to inspect the individual agent invocations and total time parked at approval gates for one run; it implies `--agents`.
+Use `--agents` for local, per-purpose agent performance aggregates: duration and the subprocess-vs-model time split, session mode, errors, the token totals (input, output, cache-read, cache-creation, fresh input, reasoning), and the model round-trip and tool-category activity histogram, with a `METRICS` coverage count that tells a real zero apart from missing instrumentation.
+Use `--run <id>` to inspect the recorded pipeline-agent invocations for one run - including each invocation's per-round token deltas next to the raw (cumulative for resumed sessions) counters, tool-category breakdown, workload size, finding count, and fallback reason - plus the total time parked at approval gates; it implies `--agents`.
+Nullable fields an adapter did not report render as `-` (unknown), which is distinct from a recorded `0`; the legacy raw input, output, and cache-read counters remain numeric.
 
 ```sh
 no-mistakes stats --agents
@@ -341,6 +342,7 @@ no-mistakes stats --run <id>
 ```
 
 This detailed performance evidence stays local in `state.sqlite`; it is not sent to telemetry.
+The field definitions and their local/remote split are owned by [the environment reference](/reference/environment/#what-stays-local-and-what-leaves-the-machine).
 
 ## no-mistakes doctor
 
@@ -364,8 +366,9 @@ Checks:
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 
 For `agent: acp:<target>`, `doctor` verifies that `acpx` resolves but does not invoke the target or test its credentials.
-For `agent: auto`, gate validation also applies the Rovo Dev and Grok capability probes before selecting those runners.
 Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
+
+During `gate validation`, Rovo Dev and Grok pipeline-agent candidates additionally require `acli rovodev --help` and `grok --version` to succeed, whether selected explicitly, through `auto`, or from a fallback list.
 
 `doctor` checks `gh` and `az` availability. For GitLab PR and CI steps, install and authenticate `glab`. For Bitbucket Cloud PR and CI steps, set `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN`. For Azure DevOps PR and CI steps, install the `azure-devops` extension and provide a PAT.
 

@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -88,13 +87,6 @@ type StepOutcome struct {
 	// reported for this step. Used by demo mode to show realistic durations
 	// without actually waiting.
 	DurationOverrideMS int64
-
-	// ApprovalAutoResolve, when set on an approval-gated outcome, is checked
-	// while the executor is parked waiting for an agent response. Returning true
-	// means the external condition that required approval has already resolved,
-	// so the executor can approve the gate and continue without human input.
-	ApprovalAutoResolve         func(context.Context) bool
-	ApprovalAutoResolveInterval time.Duration
 }
 
 // Step is the interface that each pipeline step implements.
@@ -106,4 +98,13 @@ type Step interface {
 	// A step that returns NeedsApproval=true will pause the pipeline
 	// until the user responds with an approval action.
 	Execute(sctx *StepContext) (*StepOutcome, error)
+}
+
+// ApprovalGateReconciler is implemented by a step whose parked approval gate
+// can become obsolete when an external source of truth changes. The executor
+// invokes it with a bounded context while also waiting for an approval. A true
+// result completes the step through the normal success path; false or an error
+// leaves the gate parked. Implementations must be read-only and fail closed.
+type ApprovalGateReconciler interface {
+	ReconcileApprovalGate(sctx *StepContext) (resolved bool, err error)
 }

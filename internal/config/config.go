@@ -101,11 +101,28 @@ type RepoConfig struct {
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
 	// the pushed branch controls nothing that executes.
-	AllowRepoCommands bool             `yaml:"allow_repo_commands"`
-	AutoFix           AutoFixRaw       `yaml:"auto_fix"`
-	Intent            IntentRaw        `yaml:"intent"`
-	Test              TestRaw          `yaml:"test"`
-	DesignContext     DesignContextRaw `yaml:"design_context"`
+	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
+	AutoFix           AutoFixRaw `yaml:"auto_fix"`
+	Intent            IntentRaw  `yaml:"intent"`
+	Test              TestRaw    `yaml:"test"`
+	// Document carries the repository's documentation placement policy. It
+	// steers the document step's gate prompt, so it is honored ONLY from the
+	// trusted default-branch copy of .no-mistakes.yaml (see
+	// EffectiveRepoConfig): a contributor's pushed branch must not be able to
+	// weaken documentation rules for its own review.
+	Document DocumentRaw `yaml:"document"`
+	// DisableProjectSettings opts the repository out of loading project-level
+	// agent settings/instructions (AGENTS.md/CLAUDE.md and the equivalent
+	// per-harness project settings) into gate agents. It exists for
+	// agent-orchestration repos (e.g. firstmate) whose project instructions
+	// would otherwise install a fleet-captain identity on a gate agent. It is a
+	// SECURITY boundary honored ONLY from the trusted default-branch copy of
+	// .no-mistakes.yaml (see EffectiveRepoConfig and the daemon's
+	// assertGateTrustedConfigReadable): a contributor's pushed branch must not be
+	// able to turn it off (or on). Default false; a plain bool so a missing key
+	// or a YAML/JSON null is falsy and preserves current loading.
+	DisableProjectSettings bool             `yaml:"disable_project_settings"`
+	DesignContext          DesignContextRaw `yaml:"design_context"`
 	// Review is a pointer so an absent review block (nil) is distinguishable
 	// from an explicit empty one (&ReviewRaw{}). An explicit repo-level
 	// review block - including review.reviewers: [] - overrides the inherited
@@ -114,12 +131,6 @@ type RepoConfig struct {
 	// global review config (see Merge).
 	Review     *ReviewRaw    `yaml:"review"`
 	ReviewLoop ReviewLoopRaw `yaml:"review_loop"`
-	// Document carries the repository's documentation placement policy. It
-	// steers the document step's gate prompt, so it is honored ONLY from the
-	// trusted default-branch copy of .no-mistakes.yaml (see
-	// EffectiveRepoConfig): a contributor's pushed branch must not be able to
-	// weaken documentation rules for its own review.
-	Document DocumentRaw `yaml:"document"`
 }
 
 // DocumentRaw is the YAML representation of document-step settings.
@@ -132,17 +143,18 @@ type DocumentRaw struct {
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent             agentList        `yaml:"agent"`
-		Commands          Commands         `yaml:"commands"`
-		IgnorePatterns    []string         `yaml:"ignore_patterns"`
-		AllowRepoCommands bool             `yaml:"allow_repo_commands"`
-		AutoFix           AutoFixRaw       `yaml:"auto_fix"`
-		Intent            IntentRaw        `yaml:"intent"`
-		Test              TestRaw          `yaml:"test"`
-		DesignContext     DesignContextRaw `yaml:"design_context"`
-		Review            *ReviewRaw       `yaml:"review"`
-		ReviewLoop        ReviewLoopRaw    `yaml:"review_loop"`
-		Document          DocumentRaw      `yaml:"document"`
+		Agent                  agentList        `yaml:"agent"`
+		Commands               Commands         `yaml:"commands"`
+		IgnorePatterns         []string         `yaml:"ignore_patterns"`
+		AllowRepoCommands      bool             `yaml:"allow_repo_commands"`
+		AutoFix                AutoFixRaw       `yaml:"auto_fix"`
+		Intent                 IntentRaw        `yaml:"intent"`
+		Test                   TestRaw          `yaml:"test"`
+		Document               DocumentRaw      `yaml:"document"`
+		DisableProjectSettings bool             `yaml:"disable_project_settings"`
+		Review                 *ReviewRaw       `yaml:"review"`
+		ReviewLoop             ReviewLoopRaw    `yaml:"review_loop"`
+		DesignContext          DesignContextRaw `yaml:"design_context"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -156,10 +168,11 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.AutoFix = raw.AutoFix
 	c.Intent = raw.Intent
 	c.Test = raw.Test
-	c.DesignContext = raw.DesignContext
+	c.Document = raw.Document
+	c.DisableProjectSettings = raw.DisableProjectSettings
 	c.Review = raw.Review
 	c.ReviewLoop = raw.ReviewLoop
-	c.Document = raw.Document
+	c.DesignContext = raw.DesignContext
 	return nil
 }
 
@@ -210,10 +223,22 @@ type Config struct {
 	AutoFix              AutoFix
 	Intent               Intent
 	Test                 Test
+	Document             Document
 	DesignContext        DesignContext
 	Review               Review
 	ReviewLoop           ReviewLoop
-	Document             Document
+	// DisableProjectSettings is the resolved, trusted-only opt-out (see the
+	// RepoConfig field). When true, gate agents are launched with their
+	// project-level settings/instructions suppressed; the daemon fails the run
+	// closed if the resolved harness has no verified suppression knob.
+	DisableProjectSettings bool
+}
+
+// Document is the resolved document-step config. Instructions come from the
+// trusted default-branch repo config and augment the built-in placement
+// policy in the document prompt.
+type Document struct {
+	Instructions string
 }
 
 // ReviewerSpec identifies one reviewer in the cross-family review panel. Agent
@@ -326,13 +351,6 @@ type ReviewLoop struct {
 	// (/v3/organizations/{org_id}/pr-reviews). Required (with a review token) to use
 	// the Review API; empty keeps the loop on the legacy /v1/sessions trigger.
 	DevinOrgID string
-}
-
-// Document is the resolved document-step config. Instructions come from the
-// trusted default-branch repo config and augment the built-in placement
-// policy in the document prompt.
-type Document struct {
-	Instructions string
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -896,14 +914,6 @@ func (c *Config) ResolveReviewers(ctx context.Context, lookPath func(string) (st
 		if err := validateReviewerSpec(i, spec); err != nil {
 			return nil, err
 		}
-		// Re-check per-reviewer args against the concrete resolved family before
-		// they reach the real command. This runs for every spec (not just "auto")
-		// because the untrusted pushed-config path skips validateReviewers, so a
-		// concrete-family reviewer under allow_repo_commands reaches here with no
-		// prior reserved-arg check.
-		if arg, j, bad := reservedArgViolation(string(spec.Agent), spec.Args); bad {
-			return nil, fmt.Errorf("review.reviewers[%d].args[%d]: %q is managed by no-mistakes and cannot be overridden", i, j, arg)
-		}
 		if spec.Agent == types.AgentRovoDev {
 			bin := c.ReviewerPath(spec)
 			resolvedBin, err := lookPath(bin)
@@ -1361,26 +1371,30 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // EffectiveRepoConfig returns the repo config that should drive the pipeline
 // given a pushed-branch copy and the trusted default-branch copy.
 //
-// The execution-affecting selection fields — Commands (run verbatim via sh -c
-// on the daemon host), Agent/Agents (select which processes launch with the
-// maintainer's credentials, including fallback lists and acp: targets), Review
-// (the review panel, which likewise selects which reviewer binaries launch),
-// and ReviewLoop (which
-// gates whether the post-PR review loop runs, names the bot login whose
-// comments become fix-prompt content, and bounds how many automated fix rounds
-// execute) — are taken only from the trusted copy when it is present, so a
-// contributor's pushed branch cannot inject shell, pick an agent, or steer the
-// review loop. When allowRepoCommands is true the maintainer has explicitly
-// opted in (via allow_repo_commands on the TRUSTED default-branch copy) to
-// honoring the pushed-branch copy wholesale. When there is no trusted copy and
-// the maintainer has not opted in, these fields are forced empty/zero (Agent ""
-// and nil Agents inherit the global agent; Commands{} yields built-in defaults;
-// Review nil inherits the global panel; ReviewLoopRaw{} leaves the loop off) rather than
-// falling back to the pushed branch — this blocks the supply-chain vector for
-// repos that ship .no-mistakes.yaml only on feature branches. Document (the
+// The code-executing selection fields - Commands (run verbatim via sh -c on
+// the daemon host), Agent/Agents (select which processes launch with the
+// maintainer's credentials, including fallback lists and acp: targets), and
+// Review (the panel that selects reviewer processes), and ReviewLoop (which
+// gates post-PR review, selects the bot login, bounds fix rounds, and may read
+// the configured API-key file) - are
+// taken only from the trusted copy when it is present, so a contributor's
+// pushed branch cannot inject shell or pick an agent. Document (the
 // documentation placement policy injected into the document gate prompt) is
-// always trusted-only for the same reason: a pushed branch must not weaken the
-// documentation rules that gate itself.
+// trusted-only for the same reason: a pushed branch must not weaken the
+// documentation rules that gate itself. DisableProjectSettings, Review, and
+// ReviewLoop are also
+// trusted-only so a pushed branch cannot enable or defeat the gate-agent
+// project-instruction boundary. When allowRepoCommands is
+// true the maintainer has explicitly opted in (via allow_repo_commands on the
+// TRUSTED default-branch copy) to honoring the pushed branch's commands and
+// agent selection.
+// When there is no trusted copy and the maintainer has not opted in, both
+// fields are forced empty (Agent "" and nil Agents inherit the global agent;
+// Commands{} yields built-in defaults; Review nil inherits the global panel;
+// ReviewLoopRaw{} leaves the loop off)
+// rather than falling back to the pushed
+// branch - this blocks the supply-chain vector for repos that ship
+// .no-mistakes.yaml only on feature branches.
 //
 // ReviewLoop is gated even though the fixer it drives is always no-mistakes
 // itself (never a contributor-named binary): a pushed branch that could flip
@@ -1402,8 +1416,15 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 	effective := *pushed
 	if trusted != nil {
 		effective.Document = trusted.Document
+		// disable_project_settings is a security boundary: honor it ONLY from the
+		// trusted default-branch copy so a pushed branch cannot turn the opt-out
+		// off (and re-enable its own AGENTS.md) or on. A nil trusted copy here
+		// means the trusted config was legitimately absent (the daemon aborts
+		// separately when it could not be READ at all), so falsy is correct.
+		effective.DisableProjectSettings = trusted.DisableProjectSettings
 	} else {
 		effective.Document = DocumentRaw{}
+		effective.DisableProjectSettings = false
 	}
 	if allowRepoCommands {
 		return &effective
@@ -1412,9 +1433,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Commands = trusted.Commands
 		effective.Agent = trusted.Agent
 		effective.Agents = copyAgents(trusted.Agents)
-		// SECURITY: the review panel selects which reviewer binaries launch
-		// with the maintainer's credentials, so it is code-executing config.
-		// Take it from the trusted default-branch copy, never the pushed SHA.
+		// SECURITY: reviewer selection is code-executing config.
 		effective.Review = trusted.Review
 		// SECURITY: the review loop gates CI, names the bot login whose comments
 		// become fix-prompt content, and bounds how many fix rounds run - all
@@ -1745,10 +1764,13 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		AutoFix:              af,
 		Intent:               intent,
 		Test:                 test,
+		Document:             Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		DesignContext:        resolveDesignContext(repo.DesignContext),
 		Review:               review,
 		ReviewLoop:           reviewLoop,
-		Document:             Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
+		// repo is the EffectiveRepoConfig result, so this value is already
+		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
+		DisableProjectSettings: repo.DisableProjectSettings,
 	}
 
 	if repo.Agent != "" {

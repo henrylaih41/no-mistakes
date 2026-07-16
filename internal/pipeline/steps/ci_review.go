@@ -348,7 +348,7 @@ func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, 
 	// problem it cannot see (ruling #11); escalate to a human instead.
 	if !hasActionableDevinFindings(findings) {
 		sctx.Log(cimonitor.ReviewManualVerifyMsg)
-		return devinManualReviewOutcome(sctx, host, pr, cimonitor.ReviewManualVerifyMsg)
+		return devinManualReviewOutcome(cimonitor.ReviewManualVerifyMsg)
 	}
 	maxRounds := sctx.Config.ReviewLoop.MaxRounds
 	rounds := s.devinRounds()

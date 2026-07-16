@@ -25,16 +25,17 @@ type Run struct {
 	// It is observability only and does not affect gate resolution.
 	AwaitingAgentSince *int64
 	// ParkedMS accumulates the run's total parked-at-gate wall time in
-	// milliseconds across every gate wait.
-	ParkedMS int64
+	// milliseconds across every gate wait (local performance telemetry;
+	// step duration_ms values exclude this time).
+	ParkedMS        int64
+	Intent          *string
+	IntentSource    *string
+	IntentSessionID *string
+	IntentScore     *float64
 	// DesignContextJSON is the immutable materialized design context for this
 	// run, encoded as types.DesignContext JSON. Steps parse this copy instead
 	// of rereading mutable files during later rounds.
 	DesignContextJSON *string
-	Intent            *string
-	IntentSource      *string
-	IntentSessionID   *string
-	IntentScore       *float64
 	// Route is the name of the local route selected for this run (empty for the
 	// implicit default route). Persisted so a rerun re-resolves the SAME route
 	// the original push selected instead of silently retargeting the default.

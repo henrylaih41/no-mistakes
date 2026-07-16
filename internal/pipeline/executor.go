@@ -26,6 +26,11 @@ import (
 // EventFunc is called when a pipeline event occurs, for streaming to subscribers.
 type EventFunc func(ipc.Event)
 
+const (
+	defaultGateReconcileInterval = 2 * time.Minute
+	defaultGateReconcileTimeout  = 30 * time.Second
+)
+
 type approvalResponse struct {
 	action            types.ApprovalAction
 	findingIDs        []string
@@ -34,8 +39,6 @@ type approvalResponse struct {
 	fixOverrideReason string
 	autoRetry         bool
 }
-
-const defaultApprovalAutoResolveInterval = 30 * time.Second
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
@@ -54,15 +57,18 @@ type Executor struct {
 	sessions *RunSessions
 	shared   *RunShared
 
-	mu                   sync.Mutex
-	approvalCh           chan approvalResponse // buffered channel for approval responses
-	waiting              bool                  // true when blocked on approval
-	waitingStep          types.StepName        // which step is currently awaiting approval
-	waitingStepResultID  string
-	waitingAgentRetry    bool
-	waitingAtFixRoundCap bool // true when the review step is parked for triage at max_fix_rounds
-	waitingMaxFixRounds  int
-	waitingFixRoundCount int
+	mu          sync.Mutex
+	approvalCh  chan approvalResponse // buffered channel for approval responses
+	waiting     bool                  // true when blocked on approval
+	waitingStep types.StepName        // which step is currently awaiting approval
+
+	gateReconcileInterval time.Duration
+	gateReconcileTimeout  time.Duration
+	waitingStepResultID   string
+	waitingAgentRetry     bool
+	waitingAtFixRoundCap  bool // true when the review step is parked for triage at max_fix_rounds
+	waitingMaxFixRounds   int
+	waitingFixRoundCount  int
 }
 
 // SetReviewers configures the cross-family review panel agents. It is set after
@@ -91,13 +97,28 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		onEvent = func(ipc.Event) {}
 	}
 	return &Executor{
-		db:         database,
-		paths:      p,
-		config:     cfg,
-		agent:      ag,
-		steps:      steps,
-		onEvent:    onEvent,
-		approvalCh: make(chan approvalResponse, 1),
+		db:                    database,
+		paths:                 p,
+		config:                cfg,
+		agent:                 ag,
+		steps:                 steps,
+		onEvent:               onEvent,
+		approvalCh:            make(chan approvalResponse, 1),
+		gateReconcileInterval: defaultGateReconcileInterval,
+		gateReconcileTimeout:  defaultGateReconcileTimeout,
+	}
+}
+
+// SetGateReconcileTimings overrides the interval between approval-gate
+// reconciliation checks and the deadline for each check. It is primarily used
+// by deterministic tests and specialized embeddings; non-positive values keep
+// the production defaults.
+func (e *Executor) SetGateReconcileTimings(interval, timeout time.Duration) {
+	if interval > 0 {
+		e.gateReconcileInterval = interval
+	}
+	if timeout > 0 {
+		e.gateReconcileTimeout = timeout
 	}
 }
 
@@ -172,10 +193,7 @@ func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.A
 			return fmt.Errorf("--fix-override is only valid while review is awaiting_triage after max_fix_rounds is reached")
 		}
 	}
-	e.waiting = false
-	e.mu.Unlock()
-
-	e.approvalCh <- approvalResponse{
+	response := approvalResponse{
 		action:            action,
 		findingIDs:        findingIDs,
 		instructions:      instructions,
@@ -183,7 +201,15 @@ func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.A
 		fixOverrideReason: fixOverrideReason,
 		autoRetry:         autoRetry,
 	}
-	return nil
+	select {
+	case e.approvalCh <- response:
+		e.waiting = false
+		e.mu.Unlock()
+		return nil
+	default:
+		e.mu.Unlock()
+		return fmt.Errorf("approval response already queued for %q", step)
+	}
 }
 
 // Execute runs the pipeline steps sequentially for a given run.
@@ -191,9 +217,11 @@ func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.A
 // If the context is cancelled with a cause (via context.WithCancelCause),
 // the cause message is preserved as the run's error in the DB.
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
-	// Mark run as running
+	// Mark run as running. Route write failures through failRun so the
+	// in-memory lifecycle and subscriber stream still become terminal instead
+	// of leaving a silent pending run.
 	if err := e.db.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
-		return fmt.Errorf("update run status: %w", err)
+		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
 	}
 	run.Status = types.RunRunning
 	e.emitRunEvent(ipc.EventRunUpdated, run, repo)
@@ -247,9 +275,10 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		}
 	}
 
-	// Mark run as completed
+	// Mark run as completed. A failure here must emit a terminal failure rather
+	// than leaving a silent running row after every step has finished.
 	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
-		return fmt.Errorf("update run status: %w", err)
+		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
 	}
 	run.Status = types.RunCompleted
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
@@ -309,6 +338,41 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	e.initializeRunScopes(run.ID)
 
+	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
+	duration := recoveredStepDuration(gate.stepResult)
+	completeReconciledGate := func() error {
+		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusCompleted, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("complete reconciled step %s: %w", gate.step.Name(), err), ctx)
+		}
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", "", &duration)
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
+	}
+	reconcileCtx := &StepContext{
+		Ctx:      ctx,
+		Run:      run,
+		Repo:     repo,
+		WorkDir:  workDir,
+		Config:   e.config,
+		DB:       e.db,
+		Agent:    e.agent,
+		Sessions: e.sessions,
+		Shared:   e.shared,
+		Log: func(message string) {
+			slog.Info("recovered approval gate reconciliation", "run_id", run.ID, "step", gate.step.Name(), "message", message)
+		},
+		LogChunk: func(string) {},
+		LogFile:  func(string) {},
+	}
+	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx); reconciled {
+		if dbErr := e.db.ExitApprovalGate(context.Background(), run.ID, gate.stepResult.ID, types.StepStatusCompleted, time.Since(parkStart).Milliseconds(), nil); dbErr != nil {
+			exitErr := e.recoverApprovalGateExit(run.ID, gate.stepResult.ID, time.Since(parkStart).Milliseconds(), fmt.Errorf("exit reconciled approval gate for step %s: %w", gate.step.Name(), dbErr))
+			return e.failRun(run, repo, exitErr, ctx)
+		}
+		return completeReconciledGate()
+	} else if reconcileErr != nil && ctx.Err() == nil {
+		slog.Warn("could not reconcile recovered approval gate; preserving it", "run_id", run.ID, "step", gate.step.Name(), "error", reconcileErr)
+	}
+
 	e.mu.Lock()
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
@@ -325,19 +389,22 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		gate.stepResult.DurationMS,
 	)
 
-	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
-	response, err := e.waitForApproval(ctx, gate.step.Name(), nil, 0)
+	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, false)
+	exitStatus, exitReason := approvalExitState(response, err)
+	if reconciled {
+		exitStatus, exitReason = types.StepStatusCompleted, nil
+	}
 	parkedMS := time.Since(parkStart).Milliseconds()
-	duration := recoveredStepDuration(gate.stepResult)
+	if dbErr := e.db.ExitApprovalGate(context.Background(), run.ID, gate.stepResult.ID, exitStatus, parkedMS, exitReason); dbErr != nil {
+		exitErr := e.recoverApprovalGateExit(run.ID, gate.stepResult.ID, parkedMS, fmt.Errorf("exit recovered approval gate for step %s: %w", gate.step.Name(), dbErr))
+		return e.failRun(run, repo, exitErr, ctx)
+	}
 	if err != nil {
-		err = e.failApprovalGate(ctx, run.ID, gate.stepResult.ID, parkedMS, err)
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "", err.Error(), &duration)
 		return e.failRun(run, repo, fmt.Errorf("step %s: waiting for approval: %w", gate.step.Name(), err), ctx)
 	}
-	exitStatus, exitReason := approvalGateExitState(response.action)
-	if err := e.exitApprovalGate(ctx, run.ID, gate.stepResult.ID, exitStatus, parkedMS, exitReason); err != nil {
-		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "", err.Error(), &duration)
-		return e.failRun(run, repo, fmt.Errorf("step %s: leave recovered approval gate: %w", gate.step.Name(), err), ctx)
+	if reconciled {
+		return completeReconciledGate()
 	}
 
 	approvalFields := telemetry.Fields{
@@ -486,7 +553,7 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		}
 	}
 	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
-		return fmt.Errorf("complete recovered run: %w", err)
+		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err), ctx)
 	}
 	run.Status = types.RunCompleted
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
@@ -508,7 +575,7 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", "", nil)
 	}
 	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
-		return fmt.Errorf("complete recovered run: %w", err)
+		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
 	}
 	run.Status = types.RunCompleted
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
@@ -568,6 +635,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// Build step context with log callback that emits events and writes to file.
 	// lastChunkNewline tracks whether the most recent chunk ended with \n,
 	// so Log knows whether it needs a leading \n to flush a streaming partial.
+	var logMu sync.Mutex
 	lastChunkNewline := true
 	userIntent := ""
 	userIntentSource := ""
@@ -583,16 +651,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			userIntentSource = *run.IntentSource
 		}
 	}
-	designContext := types.DesignContext{}
-	if run != nil && run.DesignContextJSON != nil {
-		parsed, err := types.ParseDesignContextJSON(*run.DesignContextJSON)
-		if err != nil {
-			return false, fmt.Errorf("parse run design context: %w", err)
-		}
-		designContext = parsed
-	}
 	lastLogActivityAt := time.Time{}
-	touchLogActivity := func(text string, force bool) {
+	touchLogActivityLocked := func(text string, force bool) {
 		if activity := stepActivityFromLog(text); activity != "" {
 			now := time.Now()
 			if !force && !lastLogActivityAt.IsZero() && now.Sub(lastLogActivityAt) < stepActivityThrottleInterval {
@@ -604,7 +664,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 	}
-	writeLog := func(text string) {
+	writeLogLocked := func(text string) {
 		if text != "" {
 			prefix := ""
 			if !lastChunkNewline {
@@ -615,17 +675,26 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		e.emitLogChunk(run, repo, stepName, text)
 		fmt.Fprint(logFile, text)
-		touchLogActivity(text, true)
+		touchLogActivityLocked(text, true)
+	}
+	writeLog := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		writeLogLocked(text)
 	}
 	writeLogChunk := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
 		if text != "" {
 			lastChunkNewline = strings.HasSuffix(text, "\n")
 		}
 		e.emitLogChunk(run, repo, stepName, text)
 		fmt.Fprint(logFile, text)
-		touchLogActivity(text, strings.Contains(text, "\n"))
+		touchLogActivityLocked(text, strings.Contains(text, "\n"))
 	}
 	onAgentLifecycle := func(event agent.LifecycleEvent) {
+		logMu.Lock()
+		defer logMu.Unlock()
 		text := event.Message
 		if text == "" {
 			text = fmt.Sprintf("%s %s", event.Agent, event.Phase)
@@ -645,7 +714,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to touch step activity in db", "step", stepName, "error", dbErr)
 			}
 		}
-		writeLog(text)
+		writeLogLocked(text)
+	}
+	writeLogFile := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		fmt.Fprintln(logFile, text)
+		touchLogActivityLocked(text, true)
 	}
 	// roundNum is shared with the perf wrapper's round closure below: an
 	// invocation during execution of round N+1 sees roundNum still at N.
@@ -663,9 +738,17 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			round:    func() int { return roundNum + 1 },
 		}
 	}
-	// Default the review panel to the single implementation agent when none is
-	// configured. Wrap configured reviewers too so their subprocess lifecycle
-	// contributes to the same step activity signal.
+	designContext := types.DesignContext{}
+	if run != nil && run.DesignContextJSON != nil {
+		parsed, err := types.ParseDesignContextJSON(*run.DesignContextJSON)
+		if err != nil {
+			return false, fmt.Errorf("parse run design context: %w", err)
+		}
+		designContext = parsed
+	}
+	// Default the review panel to the wrapped implementation agent. Configured
+	// panel members retain their independent identities, while receiving the
+	// same lifecycle wrapper so activity/provenance stays visible.
 	reviewers := e.reviewers
 	if len(reviewers) == 0 {
 		reviewers = []agent.Agent{stepAgent}
@@ -695,10 +778,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		PreviousFindings: state.previousFindings,
 		Log:              writeLog,
 		LogChunk:         writeLogChunk,
-		LogFile: func(text string) {
-			fmt.Fprintln(logFile, text)
-			touchLogActivity(text, true)
-		},
+		LogFile:          writeLogFile,
 	}
 
 	nextTrigger := "initial"
@@ -720,8 +800,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if errors.As(err, &transient) {
 				executionMS = durationMS
 				reason := agentTransientParkReason(transient)
+				logMu.Lock()
 				fmt.Fprintf(logFile, "\n%s\n", reason)
-
+				logMu.Unlock()
 				e.mu.Lock()
 				e.waiting = true
 				e.waitingStep = stepName
@@ -734,32 +815,36 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 				parkStart := time.Now()
 				if _, dbErr := e.db.EnterApprovalGate(ctx, run.ID, sr.ID, types.StepStatusAwaitingRetry, executionMS, &reason); dbErr != nil {
-					e.resetApprovalWait()
-					gateErr := fmt.Errorf("step %s: enter agent retry gate: %w", stepName, dbErr)
-					if failErr := e.db.FailStep(sr.ID, gateErr.Error(), executionMS); failErr != nil {
-						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", failErr)
-					}
-					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", gateErr.Error(), &executionMS)
-					return false, gateErr
+					e.clearApprovalWaitState()
+					publishErr := fmt.Errorf("publish agent retry gate for step %s: %w", stepName, dbErr)
+					return false, e.failGatePublication(stepName, sr.ID, executionMS, publishErr)
 				}
 				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusAwaitingRetry), "", "", reason, &executionMS)
 
-				response, waitErr := e.waitForApproval(ctx, stepName, nil, 0)
-				parkedMS := time.Since(parkStart).Milliseconds()
+				response, _, waitErr := e.waitForApprovalOrReconcile(ctx, approvalOnlyStep{Step: step}, sctx, false)
+				exitStatus := types.StepStatusRunning
+				var exitReason *string
 				if waitErr != nil {
-					waitErr = e.failApprovalGate(ctx, run.ID, sr.ID, parkedMS, waitErr)
+					exitStatus = types.StepStatusFailed
+					reason := waitErr.Error()
+					exitReason = &reason
+				} else if response.action != types.ActionRetry {
+					exitStatus = types.StepStatusFailed
+					reason := fmt.Sprintf("agent transient park requires retry action, got %s", response.action)
+					exitReason = &reason
+				}
+				parkedMS := time.Since(parkStart).Milliseconds()
+				if dbErr := e.db.ExitApprovalGate(context.Background(), run.ID, sr.ID, exitStatus, parkedMS, exitReason); dbErr != nil {
+					return false, e.recoverApprovalGateExit(run.ID, sr.ID, parkedMS, fmt.Errorf("exit agent retry gate for step %s: %w", stepName, dbErr))
+				}
+				if waitErr != nil {
 					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", waitErr.Error(), &executionMS)
 					return false, fmt.Errorf("step %s: waiting for agent retry: %w", stepName, waitErr)
 				}
 				if response.action != types.ActionRetry {
 					retryErr := fmt.Errorf("step %s: agent transient park requires retry action, got %s", stepName, response.action)
-					retryErr = e.failApprovalGate(ctx, run.ID, sr.ID, parkedMS, retryErr)
 					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", retryErr.Error(), &executionMS)
 					return false, retryErr
-				}
-				if dbErr := e.exitApprovalGate(ctx, run.ID, sr.ID, types.StepStatusRunning, parkedMS, nil); dbErr != nil {
-					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", dbErr.Error(), &executionMS)
-					return false, fmt.Errorf("step %s: leave agent retry gate: %w", stepName, dbErr)
 				}
 				trigger := db.RoundTriggerAgentManualRetry
 				if response.autoRetry {
@@ -781,6 +866,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 					"label": transient.Label,
 				})
 				phaseStart = time.Now()
+				if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusRunning); dbErr != nil {
+					slog.Warn("failed to update step status in db", "step", stepName, "status", "running", "error", dbErr)
+				}
 				e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
 				continue
 			}
@@ -788,8 +876,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// often carries the only detail of why the step failed (e.g. git
 			// stderr from a rejected push); without this the step log shows the
 			// work starting but never why it stopped.
+			logMu.Lock()
 			fmt.Fprintf(logFile, "\nerror: %s\n", err.Error())
-			touchLogActivity("error: "+err.Error(), true)
+			touchLogActivityLocked("error: "+err.Error(), true)
+			logMu.Unlock()
 			if dbErr := e.db.FailStep(sr.ID, err.Error(), durationMS); dbErr != nil {
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
@@ -921,25 +1011,22 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// prevents a prompt response from being omitted from the parked total.
 		parkStart := time.Now()
 
+		// Publish the run marker and step gate in one transaction. If either
+		// write fails, clear the in-memory waiter and fail loudly instead of
+		// blocking at a gate that status readers cannot observe.
 		if _, dbErr := e.db.EnterApprovalGate(ctx, run.ID, sr.ID, approvalStatus, executionMS, nil); dbErr != nil {
-			e.resetApprovalWait()
-			gateErr := fmt.Errorf("step %s: enter approval gate: %w", stepName, dbErr)
-			if failErr := e.db.FailStep(sr.ID, gateErr.Error(), executionMS); failErr != nil {
-				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", failErr)
-			}
-			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", gateErr.Error(), &executionMS)
-			return false, gateErr
+			e.clearApprovalWaitState()
+			publishErr := fmt.Errorf("publish approval gate for step %s: %w", stepName, dbErr)
+			return false, e.failGatePublication(stepName, sr.ID, executionMS, publishErr)
 		}
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, diffText, "", &executionMS)
 
-		response, err := e.waitForApproval(ctx, stepName, outcome.ApprovalAutoResolve, outcome.ApprovalAutoResolveInterval)
+		response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, true)
 		parkedMS := time.Since(parkStart).Milliseconds()
-		if err != nil {
-			err = e.failApprovalGate(ctx, run.ID, sr.ID, parkedMS, err)
-			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", err.Error(), &executionMS)
-			return false, fmt.Errorf("step %s: waiting for approval: %w", stepName, err)
-		}
-		if response.action == types.ActionFix && response.fixOverrideReason != "" {
+		// A cap override must be attributable before the gate is exited. If
+		// persistence fails, refuse the extra fix round and terminalize the gate
+		// while preserving the attribution error as the primary failure.
+		if err == nil && !reconciled && response.action == types.ActionFix && response.fixOverrideReason != "" {
 			var persistErr error
 			if currentRoundID == "" {
 				persistErr = fmt.Errorf("step %s: cannot persist fix override reason (no round record); refusing unattributed override fix round", stepName)
@@ -947,16 +1034,26 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				persistErr = fmt.Errorf("step %s: persist fix override reason: %w", stepName, dbErr)
 			}
 			if persistErr != nil {
-				persistErr = e.failApprovalGate(ctx, run.ID, sr.ID, parkedMS, persistErr)
 				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", persistErr.Error(), &executionMS)
-				return false, persistErr
+				return false, e.failApprovalGateBeforeExit(run.ID, sr.ID, parkedMS, persistErr)
 			}
 			slog.Info("review fix override accepted", "step", stepName, "round", roundNum, "max_fix_rounds", reviewMaxFixRounds, "reason", response.fixOverrideReason)
 		}
-		exitStatus, exitReason := approvalGateExitState(response.action)
-		if dbErr := e.exitApprovalGate(ctx, run.ID, sr.ID, exitStatus, parkedMS, exitReason); dbErr != nil {
-			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", dbErr.Error(), &executionMS)
-			return false, fmt.Errorf("step %s: leave approval gate: %w", stepName, dbErr)
+
+		exitStatus, exitReason := approvalExitState(response, err)
+		if reconciled {
+			exitStatus, exitReason = types.StepStatusCompleted, nil
+		}
+		if dbErr := e.db.ExitApprovalGate(context.Background(), run.ID, sr.ID, exitStatus, parkedMS, exitReason); dbErr != nil {
+			return false, e.recoverApprovalGateExit(run.ID, sr.ID, parkedMS, fmt.Errorf("exit approval gate for step %s: %w", stepName, dbErr))
+		}
+		if err != nil {
+			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", err.Error(), &executionMS)
+			return false, fmt.Errorf("step %s: waiting for approval: %w", stepName, err)
+		}
+		if reconciled {
+			phaseStart = time.Now()
+			goto done
 		}
 
 		approvalFields := telemetry.Fields{
@@ -1057,42 +1154,6 @@ func roundInsertID(_ string, inserted *db.StepRound, err error) string {
 	return inserted.ID
 }
 
-func agentTransientParkReason(err *agent.TransientError) string {
-	agentName := "agent"
-	label := "transient provider failure"
-	if err != nil {
-		if strings.TrimSpace(err.Agent) != "" {
-			agentName = strings.TrimSpace(err.Agent)
-		}
-		if strings.TrimSpace(err.Label) != "" {
-			label = strings.TrimSpace(err.Label)
-		}
-	}
-	reason := fmt.Sprintf("agent provider/transient failure: %s %s after retries; resume with `no-mistakes axi respond --action retry` to retry this step", agentName, label)
-	if err != nil && err.Err != nil {
-		reason += fmt.Sprintf(" (last error: %v)", err.Err)
-	}
-	return reason
-}
-
-func (e *Executor) reviewFixRoundCapReached(stepName types.StepName, stepResultID string) (bool, int, int, error) {
-	if stepName != types.StepReview || e.config == nil {
-		return false, 0, 0, nil
-	}
-	max := e.config.Review.MaxFixRounds
-	if max < 0 {
-		return false, 0, max, fmt.Errorf("invalid review.max_fix_rounds: %d (must be >= 0)", max)
-	}
-	if max == 0 {
-		return false, 0, max, nil
-	}
-	count, err := e.db.CountStepFixRounds(stepResultID)
-	if err != nil {
-		return false, 0, max, err
-	}
-	return count >= max, count, max, nil
-}
-
 type lifecycleAgent struct {
 	inner       agent.Agent
 	onLifecycle func(agent.LifecycleEvent)
@@ -1176,50 +1237,125 @@ func pluralize(n int, singular, plural string) string {
 	return plural
 }
 
-func approvalGateExitState(action types.ApprovalAction) (types.StepStatus, *string) {
-	switch action {
-	case types.ActionApprove:
-		return types.StepStatusCompleted, nil
-	case types.ActionFix:
-		return types.StepStatusFixing, nil
-	case types.ActionSkip:
-		return types.StepStatusSkipped, nil
-	case types.ActionAbort:
-		reason := "aborted by user"
-		return types.StepStatusFailed, &reason
-	default:
-		reason := fmt.Sprintf("unsupported approval action %q", action)
-		return types.StepStatusFailed, &reason
-	}
-}
-
-func (e *Executor) exitApprovalGate(ctx context.Context, runID, stepResultID string, status types.StepStatus, parkedMS int64, reason *string) error {
-	cleanupCtx := context.Background()
-	if ctx != nil {
-		cleanupCtx = context.WithoutCancel(ctx)
-	}
-	if err := e.db.ExitApprovalGate(cleanupCtx, runID, stepResultID, status, parkedMS, reason); err != nil {
-		transitionErr := fmt.Errorf("exit approval gate: %w", err)
-		if cleanupErr := e.db.FailApprovalGate(cleanupCtx, runID, stepResultID, parkedMS, transitionErr.Error()); cleanupErr != nil {
-			return fmt.Errorf("%w; terminal cleanup: %v", transitionErr, cleanupErr)
+func agentTransientParkReason(err *agent.TransientError) string {
+	agentName := "agent"
+	label := "transient provider failure"
+	if err != nil {
+		if strings.TrimSpace(err.Agent) != "" {
+			agentName = strings.TrimSpace(err.Agent)
 		}
-		return transitionErr
+		if strings.TrimSpace(err.Label) != "" {
+			label = strings.TrimSpace(err.Label)
+		}
 	}
-	return nil
+	reason := fmt.Sprintf("agent provider/transient failure: %s %s after retries; resume with `no-mistakes axi respond --action retry` to retry this step", agentName, label)
+	if err != nil && err.Err != nil {
+		reason += fmt.Sprintf(" (last error: %v)", err.Err)
+	}
+	return reason
 }
 
-func (e *Executor) failApprovalGate(ctx context.Context, runID, stepResultID string, parkedMS int64, cause error) error {
-	cleanupCtx := context.Background()
-	if ctx != nil {
-		cleanupCtx = context.WithoutCancel(ctx)
+// approvalOnlyStep deliberately exposes only Step, even when the underlying
+// step also implements ApprovalGateReconciler. A transient-provider retry gate
+// represents operator intent and must not be cleared by unrelated external
+// state reconciliation (for example, a CI step observing a closed PR).
+type approvalOnlyStep struct{ Step }
+
+func (e *Executor) reviewFixRoundCapReached(stepName types.StepName, stepResultID string) (bool, int, int, error) {
+	if stepName != types.StepReview || e.config == nil {
+		return false, 0, 0, nil
 	}
-	if err := e.db.FailApprovalGate(cleanupCtx, runID, stepResultID, parkedMS, cause.Error()); err != nil {
-		return fmt.Errorf("%w; terminal approval gate cleanup: %v", cause, err)
+	max := e.config.Review.MaxFixRounds
+	if max < 0 {
+		return false, 0, max, fmt.Errorf("invalid review.max_fix_rounds: %d (must be >= 0)", max)
 	}
-	return cause
+	if max == 0 {
+		return false, 0, max, nil
+	}
+	count, err := e.db.CountStepFixRounds(stepResultID)
+	if err != nil {
+		return false, 0, max, err
+	}
+	return count >= max, count, max, nil
 }
 
-func (e *Executor) resetApprovalWait() {
+// waitForApprovalOrReconcile blocks until a user action arrives, the parked
+// gate's external source of truth makes it obsolete, or the context is
+// cancelled. Reconciliation runs synchronously under a bounded child context,
+// so no watcher goroutine can outlive approval, cancellation, or shutdown.
+// The caller must set e.waiting and e.waitingStep before calling this method.
+func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sctx *StepContext, immediate bool) (approvalResponse, bool, error) {
+	defer e.clearApprovalWaitState()
+
+	if _, ok := step.(ApprovalGateReconciler); !ok {
+		select {
+		case response := <-e.approvalCh:
+			return response, false, nil
+		case <-ctx.Done():
+			return approvalResponse{}, false, context.Cause(ctx)
+		}
+	}
+
+	delay := e.gateReconcileInterval
+	if immediate {
+		delay = 0
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	for {
+		select {
+		case response := <-e.approvalCh:
+			return response, false, nil
+		case <-ctx.Done():
+			return approvalResponse{}, false, context.Cause(ctx)
+		case <-timer.C:
+			resolved, err := e.reconcileApprovalGate(ctx, step, sctx)
+			if resolved {
+				if e.claimGateReconciliation() {
+					return approvalResponse{}, true, nil
+				}
+				return <-e.approvalCh, false, nil
+			}
+			if err != nil && ctx.Err() == nil {
+				if sctx != nil && sctx.Log != nil {
+					sctx.Log(fmt.Sprintf("warning: could not reconcile parked %s gate; preserving it: %v", step.Name(), err))
+				} else {
+					slog.Warn("could not reconcile parked approval gate; preserving it", "step", step.Name(), "error", err)
+				}
+			}
+			timer.Reset(e.gateReconcileInterval)
+		}
+	}
+}
+
+func (e *Executor) claimGateReconciliation() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.waiting {
+		return false
+	}
+	e.waiting = false
+	e.waitingStep = ""
+	return true
+}
+
+func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *StepContext) (bool, error) {
+	reconciler, ok := step.(ApprovalGateReconciler)
+	if !ok {
+		return false, nil
+	}
+	timeout := e.gateReconcileTimeout
+	if timeout <= 0 {
+		timeout = defaultGateReconcileTimeout
+	}
+	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	copyCtx := *sctx
+	copyCtx.Ctx = reconcileCtx
+	return reconciler.ReconcileApprovalGate(&copyCtx)
+}
+
+func (e *Executor) clearApprovalWaitState() {
 	e.mu.Lock()
 	e.waiting = false
 	e.waitingStep = ""
@@ -1228,46 +1364,58 @@ func (e *Executor) resetApprovalWait() {
 	e.waitingAtFixRoundCap = false
 	e.waitingFixRoundCount = 0
 	e.waitingMaxFixRounds = 0
-	e.mu.Unlock()
+	// Respond queues while holding the same mutex, so draining here cannot
+	// race with a late response being enqueued after publication failure or
+	// context cancellation.
 	select {
 	case <-e.approvalCh:
 	default:
 	}
+	e.mu.Unlock()
 }
 
-// waitForApproval blocks until a user action arrives, an external resolver
-// clears the parked gate, or context is cancelled.
-// The caller must set e.waiting and e.waitingStep before calling this method.
-func (e *Executor) waitForApproval(ctx context.Context, stepName types.StepName, autoResolve func(context.Context) bool, autoResolveInterval time.Duration) (approvalResponse, error) {
-	defer e.resetApprovalWait()
-
-	if autoResolve != nil && autoResolve(ctx) {
-		return approvalResponse{action: types.ActionApprove}, nil
+func approvalExitState(response approvalResponse, waitErr error) (types.StepStatus, *string) {
+	if waitErr != nil {
+		reason := waitErr.Error()
+		return types.StepStatusFailed, &reason
 	}
-
-	var tick <-chan time.Time
-	var ticker *time.Ticker
-	if autoResolve != nil {
-		if autoResolveInterval <= 0 {
-			autoResolveInterval = defaultApprovalAutoResolveInterval
-		}
-		ticker = time.NewTicker(autoResolveInterval)
-		defer ticker.Stop()
-		tick = ticker.C
+	switch response.action {
+	case types.ActionApprove:
+		return types.StepStatusCompleted, nil
+	case types.ActionSkip:
+		return types.StepStatusSkipped, nil
+	case types.ActionAbort:
+		reason := "aborted by user"
+		return types.StepStatusFailed, &reason
+	case types.ActionFix:
+		return types.StepStatusFixing, nil
+	default:
+		reason := fmt.Sprintf("unsupported approval action %q", response.action)
+		return types.StepStatusFailed, &reason
 	}
+}
 
-	for {
-		select {
-		case response := <-e.approvalCh:
-			return response, nil
-		case <-tick:
-			if autoResolve(ctx) {
-				return approvalResponse{action: types.ActionApprove}, nil
-			}
-		case <-ctx.Done():
-			return approvalResponse{}, context.Cause(ctx)
-		}
+func (e *Executor) failGatePublication(stepName types.StepName, stepResultID string, durationMS int64, publishErr error) error {
+	if failErr := e.db.FailStep(stepResultID, publishErr.Error(), durationMS); failErr != nil {
+		slog.Warn("failed to mark step as failed after gate publication error", "step", stepName, "error", failErr)
 	}
+	return publishErr
+}
+
+func (e *Executor) recoverApprovalGateExit(runID, stepResultID string, parkedMS int64, exitErr error) error {
+	if cleanupErr := e.db.FailApprovalGate(context.Background(), runID, stepResultID, parkedMS, exitErr.Error()); cleanupErr != nil {
+		return fmt.Errorf("%w; terminal gate cleanup failed: %v", exitErr, cleanupErr)
+	}
+	return exitErr
+}
+
+func (e *Executor) failApprovalGateBeforeExit(runID, stepResultID string, parkedMS int64, primaryErr error) error {
+	reason := primaryErr.Error()
+	if exitErr := e.db.ExitApprovalGate(context.Background(), runID, stepResultID, types.StepStatusFailed, parkedMS, &reason); exitErr != nil {
+		cleanupErr := e.recoverApprovalGateExit(runID, stepResultID, parkedMS, fmt.Errorf("exit approval gate after %v: %w", primaryErr, exitErr))
+		return fmt.Errorf("%w; approval gate cleanup failed: %v", primaryErr, cleanupErr)
+	}
+	return primaryErr
 }
 
 // failRun marks a run as failed and returns the error.

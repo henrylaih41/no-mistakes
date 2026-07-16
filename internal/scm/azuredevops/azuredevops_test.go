@@ -2,6 +2,7 @@ package azuredevops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,6 +36,21 @@ func TestProviderAndCapabilities(t *testing.T) {
 	}
 	if caps.FailedCheckLogs {
 		t.Fatal("Capabilities().FailedCheckLogs = true, want false (not implemented)")
+	}
+}
+
+func TestReviewBotOperationsUnsupported(t *testing.T) {
+	t.Parallel()
+	h := newTestHost(nil)
+
+	if _, _, err := h.GetReviewVerdict(context.Background(), 1, "head", "bot"); !errors.Is(err, scm.ErrUnsupported) {
+		t.Fatalf("GetReviewVerdict() error = %v, want ErrUnsupported", err)
+	}
+	if _, err := h.GetBotFindings(context.Background(), 1, "head", "bot"); !errors.Is(err, scm.ErrUnsupported) {
+		t.Fatalf("GetBotFindings() error = %v, want ErrUnsupported", err)
+	}
+	if err := h.ReplyToReviewComment(context.Background(), 1, 2, "body"); !errors.Is(err, scm.ErrUnsupported) {
+		t.Fatalf("ReplyToReviewComment() error = %v, want ErrUnsupported", err)
 	}
 }
 
