@@ -489,18 +489,23 @@ func gateAllowsAutoResolution(gate stepView) bool {
 // cannot read, so the empty action tells the caller to fail closed and surface
 // the parked gate for a manual decision instead.
 func gateResolution(gate stepView, alreadyFixed bool) (types.ApprovalAction, []string) {
+	// A retry gate is answered by retrying the step itself, not by approving
+	// its content, so it is resolved before the findings-readability check.
 	if gate.Status == string(types.StepStatusAwaitingRetry) {
 		return types.ActionRetry, nil
 	}
-	if alreadyFixed || gate.Status == string(types.StepStatusFixReview) {
-		return types.ActionApprove, nil
-	}
+	// Readability is checked before every approval branch, including the
+	// alreadyFixed/fix_review convergence path: a malformed rereview payload
+	// must fail closed the same way a malformed initial payload does.
 	if gate.FindingsJSON == "" {
 		return types.ActionApprove, nil
 	}
 	parsed, err := types.ParseFindingsJSON(gate.FindingsJSON)
 	if err != nil {
 		return "", nil
+	}
+	if alreadyFixed || gate.Status == string(types.StepStatusFixReview) {
+		return types.ActionApprove, nil
 	}
 	if !types.HasActionableFindings(parsed) {
 		return types.ActionApprove, nil
