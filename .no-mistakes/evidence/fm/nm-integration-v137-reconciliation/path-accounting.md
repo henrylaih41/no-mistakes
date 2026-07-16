@@ -7,7 +7,7 @@ This ledger implements Amendment 1 of `design-no-mistakes-integration-v137-recon
 - v1.37 base: `fc0845a`
 - Re-port branch: `feat/integration-v137-reconciliation`
 - Accounting set: all 326 paths changed by `ce637efb..origin/integration`
-- Result before ancestry closure: all 326 paths exist; 243 are blob-identical, 81 are ported onto v1.37 content, 2 release-history paths are superseded by upstream, and 0 are intentionally dropped.
+- Result before ancestry closure: all 326 paths exist; 245 are blob-identical, 79 are ported onto v1.37 content, 2 release-history paths are superseded by upstream, and 0 are intentionally dropped.
 
 ## Feature-preservation evidence
 
@@ -205,8 +205,8 @@ Each port was completed as a logical tested commit (or a small code/docs series)
 - `internal/db/agent_session_test.go` — kept — blob-identical to the `ce06d605` integration end state.
 - `internal/db/db.go` — kept — blob-identical to the `ce06d605` integration end state.
 - `internal/db/db_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
-- `internal/db/gate_transition.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
-- `internal/db/gate_transition_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/db/gate_transition.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/gate_transition_test.go` — kept — blob-identical to the `ce06d605` integration end state.
 - `internal/db/repo.go` — kept — blob-identical to the `ce06d605` integration end state.
 - `internal/db/round.go` — kept — blob-identical to the `ce06d605` integration end state.
 - `internal/db/round_test.go` — kept — blob-identical to the `ce06d605` integration end state.

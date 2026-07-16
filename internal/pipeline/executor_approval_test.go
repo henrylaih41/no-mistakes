@@ -15,6 +15,43 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestExecutor_CancelledApprovalGateFailsAtomically(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := newApprovalStep(types.StepReview, `{"findings":[{"severity":"warning","description":"needs a human","action":"ask-user"}],"summary":"1 issue"}`)
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(ctx, run, repo, t.TempDir())
+	}()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("executor error = %v, want context cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor did not leave cancelled approval gate")
+	}
+
+	failedRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedRun.Status != types.RunFailed || failedRun.AwaitingAgentSince != nil {
+		t.Fatalf("run = status %s awaiting %v, want failed and unparked", failedRun.Status, failedRun.AwaitingAgentSince)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
+		t.Fatalf("steps = %+v, want one failed step", steps)
+	}
+}
+
 func TestExecutor_GatePublishFailureDoesNotWaitInvisible(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	step := &adaptiveCallStep{
