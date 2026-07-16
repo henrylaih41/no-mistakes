@@ -717,8 +717,9 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 // normally the gate branch, or the latest terminal run's verified unpublished
 // head while custody remains outstanding. An explicit intent overrides the
 // selected run. Otherwise an authoritative intent is inherited byte-for-byte;
-// runs without one infer intent afresh.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent string) (string, error) {
+// runs without one infer intent afresh. When no prior run exists, axi run may
+// bootstrap the first run by supplying the exact gate head it just pushed.
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID, expectedHead string, skipSteps []types.StepName, intent string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -753,7 +754,18 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		}
 	}
 	if latestForBranch == nil {
-		return "", fmt.Errorf("no previous run for branch %s", branch)
+		// No prior run to replay. Bootstrap the FIRST run for this branch when the
+		// caller supplied the head it just pushed (axi run) and it matches the
+		// current gate head — this covers the "ref already mirrored but no run
+		// recorded" case (e.g. a push whose hook notification was dropped while the
+		// daemon was down or restarting). The plain `rerun` command sends no
+		// expected head, so it keeps the replay-only error. Base is the zero SHA,
+		// identical to a brand-new branch's first push; the true base (merge-base
+		// with the default branch) is resolved lazily at step time.
+		if expectedHead == "" || expectedHead != gateHead {
+			return "", fmt.Errorf("no previous run for branch %s", branch)
+		}
+		return m.startRun(ctx, repo, branch, gateHead, git.ZeroSHA, "bootstrap", skipSteps, intent)
 	}
 	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
 	if err != nil {

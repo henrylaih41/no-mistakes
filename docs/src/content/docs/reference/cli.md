@@ -112,6 +112,7 @@ no-mistakes axi run --intent "the user's goal" --yes
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
 Err on the side of completeness: include the goal, important decisions and tradeoffs, constraints or approaches ruled in or out, and explicit requests that might otherwise look surprising in the diff.
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
+`axi run` starts a run even when there are no new commits to push, including the first run for a branch the gate already mirrors but has never validated — for example a push whose hook notification was dropped while the daemon was down — rather than failing with `no previous run for branch`.
 Reattaching to an in-flight run does not require `--intent`.
 Reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
@@ -368,6 +369,8 @@ no-mistakes sync --recover --keep-local
 Without `--yes`, apply prints the exact full-SHA plan and requires TTY confirmation; `--recover` prompts the same way before returning custody.
 A non-TTY apply or recovery refuses with a direct `--yes` hint.
 The command uses the same service and safety contract as `no-mistakes axi sync`, including the guarded equivalent advance and custody recovery documented there; it never stashes, rebases, creates a merge commit, switches branches, deletes a branch, or updates an external remote.
+
+Unlike `axi run`, plain `rerun` still requires a prior run on the branch and reports `no previous run for branch` when none exists; use `no-mistakes axi run` to bootstrap a branch the gate already mirrors but has never validated.
 
 ## no-mistakes status
 
