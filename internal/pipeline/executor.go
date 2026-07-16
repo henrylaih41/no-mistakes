@@ -634,6 +634,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// Build step context with log callback that emits events and writes to file.
 	// lastChunkNewline tracks whether the most recent chunk ended with \n,
 	// so Log knows whether it needs a leading \n to flush a streaming partial.
+	var logMu sync.Mutex
 	lastChunkNewline := true
 	userIntent := ""
 	userIntentSource := ""
@@ -650,7 +651,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 	}
 	lastLogActivityAt := time.Time{}
-	touchLogActivity := func(text string, force bool) {
+	touchLogActivityLocked := func(text string, force bool) {
 		if activity := stepActivityFromLog(text); activity != "" {
 			now := time.Now()
 			if !force && !lastLogActivityAt.IsZero() && now.Sub(lastLogActivityAt) < stepActivityThrottleInterval {
@@ -662,7 +663,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 	}
-	writeLog := func(text string) {
+	writeLogLocked := func(text string) {
 		if text != "" {
 			prefix := ""
 			if !lastChunkNewline {
@@ -673,17 +674,26 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		e.emitLogChunk(run, repo, stepName, text)
 		fmt.Fprint(logFile, text)
-		touchLogActivity(text, true)
+		touchLogActivityLocked(text, true)
+	}
+	writeLog := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		writeLogLocked(text)
 	}
 	writeLogChunk := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
 		if text != "" {
 			lastChunkNewline = strings.HasSuffix(text, "\n")
 		}
 		e.emitLogChunk(run, repo, stepName, text)
 		fmt.Fprint(logFile, text)
-		touchLogActivity(text, strings.Contains(text, "\n"))
+		touchLogActivityLocked(text, strings.Contains(text, "\n"))
 	}
 	onAgentLifecycle := func(event agent.LifecycleEvent) {
+		logMu.Lock()
+		defer logMu.Unlock()
 		text := event.Message
 		if text == "" {
 			text = fmt.Sprintf("%s %s", event.Agent, event.Phase)
@@ -703,7 +713,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to touch step activity in db", "step", stepName, "error", dbErr)
 			}
 		}
-		writeLog(text)
+		writeLogLocked(text)
+	}
+	writeLogFile := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		fmt.Fprintln(logFile, text)
+		touchLogActivityLocked(text, true)
 	}
 	// roundNum is shared with the perf wrapper's round closure below: an
 	// invocation during execution of round N+1 sees roundNum still at N.
@@ -761,10 +777,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		PreviousFindings: state.previousFindings,
 		Log:              writeLog,
 		LogChunk:         writeLogChunk,
-		LogFile: func(text string) {
-			fmt.Fprintln(logFile, text)
-			touchLogActivity(text, true)
-		},
+		LogFile:          writeLogFile,
 	}
 
 	nextTrigger := "initial"
@@ -786,7 +799,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if errors.As(err, &transient) {
 				executionMS = durationMS
 				reason := agentTransientParkReason(transient)
+				logMu.Lock()
 				fmt.Fprintf(logFile, "\n%s\n", reason)
+				logMu.Unlock()
 				e.mu.Lock()
 				e.waiting = true
 				e.waitingStep = stepName
@@ -860,8 +875,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// often carries the only detail of why the step failed (e.g. git
 			// stderr from a rejected push); without this the step log shows the
 			// work starting but never why it stopped.
+			logMu.Lock()
 			fmt.Fprintf(logFile, "\nerror: %s\n", err.Error())
-			touchLogActivity("error: "+err.Error(), true)
+			touchLogActivityLocked("error: "+err.Error(), true)
+			logMu.Unlock()
 			if dbErr := e.db.FailStep(sr.ID, err.Error(), durationMS); dbErr != nil {
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
