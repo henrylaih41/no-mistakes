@@ -1,0 +1,367 @@
+# Integration → v1.37 reconciliation evidence
+
+This ledger implements Amendment 1 of `design-no-mistakes-integration-v137-reconciliation-20260716.md`.
+
+- Fork-delta base: `ce637efb61250707911fd0de610b88df00b1201b`
+- Pre-v1.37 integration end state: `ce06d605f18d3b2a1b93a61aee154fde1e454675`
+- v1.37 base: `fc0845a`
+- Re-port branch: `feat/integration-v137-reconciliation`
+- Accounting set: all 326 paths changed by `ce637efb..origin/integration`
+- Result before ancestry closure: all 326 paths exist; 243 are blob-identical, 81 are ported onto v1.37 content, 2 release-history paths are superseded by upstream, and 0 are intentionally dropped.
+
+## Feature-preservation evidence
+
+Each port was completed as a logical tested commit (or a small code/docs series), with `go build ./...` green before proceeding.
+
+| Checklist | Source end state | v1.37 port | Targeted verification |
+|---|---|---|---|
+| Extra: cross-family reviewer panel | `46aacd7..0a3cef8` | `89b3faf` | agent/config/pipeline/reviewer-panel unit and e2e tests; wrapper/session provenance tests |
+| 1. Devin Review API v3 + SHA validation | `f988cce..671ac94` | `d3d0d77` | Devin client/config/CI-review tests, including empty commit SHA rejection |
+| 2. Bot-login normalization + pagination | `c889522`, `0860e71` | `0dc1b8f`, `463213f` | GitHub review-read and CI-review tests, including paginated review and login variants |
+| 3. Multi-reply/stale unreviewed-head handling | `8f26937` | `84ab7b1` | CI-review stale-finding and anti-refix regressions |
+| 4. Per-push routes, redaction, isolation | `cf6cfb4..216b841`, `69a90c3`, `b0d0e5e`, `af08fb5` | `4a69aa3`, `d678294`, `4c742e4` | route CLI/config/DB/daemon/rebase/CI and route e2e tests |
+| 5. AXI first-run bootstrap | `044a6b6`, `3a5ee95` | `5eacfd4` | AXI run/bootstrap daemon and journey tests |
+| 6. Head-SHA stale-thread filter | `10e856e` | `663cd2b` | GitHub `GetBotFindings` head-SHA and normalization regressions |
+| 7. Per-run design context | `fb15cd4` | `06924a9` | design-context/config/reviewer/fixer prompt tests |
+| 8. CI-monitor Devin hardening/self-heal | `750e146` | `cdda0a3` | CI and recovery tests; upstream v1.37 `ApprovalGateReconciler` retained as the self-heal substrate |
+| 9. Private-ref masking + e2e PATH | `0a24f97` | `a30b510` | rebase finding masking and e2e daemon PATH regressions |
+| 10. Lifecycle attribution/cleanup | `68c4ef3` | `7a5a1a0` | daemon lifecycle, worktree cleanup, and attribution tests |
+| 11. Review cap + transient retry gate | `9d5d24b`, `896b89d` | `8bacb87`, `d08c1a4` | review-cap, triage, retry-attribution, and approval-only reconciliation tests |
+| 12. Native Grok + envelope parsing | `eac6c6f`, `ce06d60` | `1106f5d`, `5d3adbb` | Grok command/config/reserved-args/structured-output tests and isolated Grok e2e fixture |
+| 13. Atomic approval gates | `314eb00` (source series `b870cbd`, `d957a29`, `197c27b`, `4910a1e`) | `3ab4039`, `a7a7546` | `go test ./internal/db ./internal/daemon ./internal/pipeline ./internal/ipc`; `go build ./...`; enter/exit rollback, snapshot, fail-loud cleanup, stable identity, recovery, retry, triage, and v1.37 reconciliation paths |
+
+### Upstream-equivalent decisions
+
+- v1.37 parked-gate reconciliation is preserved as the substrate; atomic enter/exit wraps its one `waitForApprovalOrReconcile` path rather than adding a competing wait loop.
+- v1.37 reviewer lifecycle/performance/session wrappers are preserved for every panel member; fan-out occurs across wrapped step agents.
+- No checklist guarantee was replaced by a weaker upstream behavior.
+- No fork-delta path is absent from the re-port head.
+
+## Path-by-path ruling #3 ledger
+
+- `.no-mistakes.yaml` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/agmd-nm-g7/agents-guidance-validation.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-agentless-skip-a8/agentless-gate-transcript.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-daemon-singleton-fix-s9/duplicate-daemon-guard-demo.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-daemon-singleton-fix-s9/singleton-regression-tests.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-doc-redundancy-cleanup-p5/agents-guide.png` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-doc-redundancy-cleanup-p5/azure-env-reference.png` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-doc-redundancy-cleanup-p5/configuration-guide.png` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-incremental-fix-doc-i5/agents-guide-excerpt.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-incremental-fix-doc-i5/axi-abort-help.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-incremental-fix-doc-i5/axi-respond-help.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-incremental-fix-doc-i5/axi-run-help.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-incremental-fix-doc-i5/generated-skill-validate-excerpt.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-intent-conformance-gate-impl/axi-explicit-intent-journey.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-pr-body-cap-n3/generated-pr-body-summary.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-pr-body-cap-n3/generated-pr-body.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-review-wedge-b6/axi-wedge-observability-transcript.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-telemetry-diet-t2/stats-cli-recheck.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-telemetry-diet-t2/stats-cli-transcript.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-trendshift-badge-t8/readme-header-render.html` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-trendshift-badge-t8/readme-header-render.png` — kept — blob-identical to the `ce06d605` integration end state.
+- `.no-mistakes/evidence/fm/nm-trendshift-badge-t8/readme-trendshift-badge-check.txt` — kept — blob-identical to the `ce06d605` integration end state.
+- `.release-please-manifest.json` — superseded-by-upstream — v1.37 release/version history replaces pre-v1.37 metadata; no runtime guarantee is carried here.
+- `AGENTS.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `CHANGELOG.md` — superseded-by-upstream — v1.37 release/version history replaces pre-v1.37 metadata; no runtime guarantee is carried here.
+- `CONTRIBUTING.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `Makefile` — kept — blob-identical to the `ce06d605` integration end state.
+- `README.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `README.zh-CN.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `cmd/fakeagent/codex.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `cmd/fakeagent/grok.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `cmd/fakeagent/log.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `cmd/fakeagent/main.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `cmd/fakeagent/scenario.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `cmd/no-mistakes/main.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `cmd/no-mistakes/main_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `docs/src/content/docs/concepts/auto-fix.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/concepts/daemon.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/concepts/gate-model.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/concepts/pipeline.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `docs/src/content/docs/guides/agents.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/guides/configuration.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/guides/provider-integration.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `docs/src/content/docs/guides/setup-wizard.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `docs/src/content/docs/guides/troubleshooting.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/guides/tui.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `docs/src/content/docs/reference/cli.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/reference/environment.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/reference/global-config.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/reference/pipeline-steps.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/reference/repo-config.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
+- `docs/src/content/docs/start-here/installation.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `docs/src/content/docs/start-here/introduction.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `docs/src/content/docs/start-here/quick-start.md` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/acpx.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/acpx_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/agent.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/agent_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/claude.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/claude_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/codex.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/codex_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/copilot.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/fallback.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/fallback_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/fanout.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/fanout_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/grok.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/grok_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/lifecycle.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/native_command.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/opencode.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/opencode_http.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/opencode_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/opencode_types.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/pi.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/reap_unix_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/retry.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/retry_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/rovodev.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/server_windows.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/agent/session_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/steering.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/agent/steering_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/bitbucket/host.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/bitbucket/host_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/cimonitor/cimonitor.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cimonitor/cimonitor_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/axi.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/cli/axi_drive.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/cli/axi_drive_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/axi_guidance.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/axi_guidance_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/axi_query.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/cli/axi_render.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/cli/axi_telemetry_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/axi_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/daemon_cmd.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/daemon_cmd_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/daemon_lifecycle_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/doctor.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/doctor_agentless_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/doctor_copilot_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/helpers_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/lifecycle_log.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/root.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/route.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/route_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/runs.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/stats.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/cli/stats_agents_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/cli/status.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/telemetry.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/telemetry_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/update.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/cli/update_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/config/config.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/config/config_agent_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/config/config_args_override_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/config/config_design_context_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/config/config_global_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/config/config_repo_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/config/config_repo_trust_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/config/config_review_loop_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/config/config_review_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/collision.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/collision_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/daemon.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/daemon/env_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/helpers_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/daemon/lifecycle.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/lifecycle_logging_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/lifecycle_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/lock.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/lock_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/lock_unix.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/lock_windows.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/manager.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/daemon/manager_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/daemon/manager_trust_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/daemon/proc_unix.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/proc_windows.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/recover_servers_windows.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/routes.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/routes_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/selfexec.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service_launchd.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service_launchd_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service_proxy_inherit_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service_render.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service_render_proxy_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service_schtasks.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service_systemd.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service_systemd_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/service_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/singleton_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/startup_recovery_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/daemon/subscribe_recover_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/daemon/telemetry_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/agent_invocation.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/db/agent_invocation_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/db/agent_session.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/agent_session_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/db.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/db_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/db/gate_transition.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/db/gate_transition_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/db/repo.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/round.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/round_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/route.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/route_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/run.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/db/run_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/schema.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/db/stats.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/db/step.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/db/step_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/designcontext/design_context.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/designcontext/design_context_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/devin/client.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/devin/client_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/devin/key.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/devin/key_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/e2e/axi_journey_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/e2e/axi_review_cap_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/e2e/daemon_run_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/e2e/doc.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/e2e/grok_journey_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/e2e/harness.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/e2e/harness_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/e2e/journey_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/e2e/repo_config_security_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/e2e/reviewer_panel_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/e2e/route_routing_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/gate/gate.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/gate/gate_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/git/env.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/git/env_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/git/git.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/git/git_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/git/hook.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/git/hook_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/intent/disambiguator_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/intent/paths.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/ipc/client.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/ipc/client_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/ipc/protocol.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/ipc/protocol_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/ipc/transport_unix.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/ipc/transport_unix_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/ipc/transport_windows.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/lifecycle/guard.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/paths/paths.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/executor.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/executor_approval_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/executor_autofix_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/executor_context_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/executor_intent_conformance_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/executor_logging_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/executor_perf_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/executor_reviewers_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/executor_round_cap_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/instrument.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/pipeline.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/sessions.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/sessions_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/shared.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/ci.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/ci_checks.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/ci_checks_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/ci_fix.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/ci_merge_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/ci_review.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/ci_review_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/ci_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/common_exec.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/common_fix.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/common_git.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/common_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/design_context.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/design_context_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/document.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/document_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/helpers_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/host.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/housekeeping_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/intent_prompt.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/intent_prompt_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/lint.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/lint_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/pr.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/pr_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/prsummary.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/prsummary_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/rebase.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/rebase_force_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/rebase_local_default_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/rebase_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/review.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/review_fanout_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/review_panel.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/review_panel_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/review_session_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/review_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/round_history.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/round_history_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/shell_unix_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/steps_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/pipeline/steps/test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/pipeline/steps/test_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/auth_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/azuredevops/azuredevops.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/scm/azuredevops/azuredevops_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/scm/azuredevops/parse.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/azuredevops/url.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/azuredevops/url_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/github/github.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/github/github_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/scm/gitlab/gitlab.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/gitlab/gitlab_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/host.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/host_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/prbody.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/prbody_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/scm.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/scm/scm_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/shellenv/shell_command.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/shellenv/shell_command_other.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/shellenv/shell_command_unix.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/shellenv/shell_command_unix_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/shellenv/shell_command_windows.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/shellenv/shell_command_windows_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/shellenv/shellenv.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/skill/skill.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/skill/skill_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/telemetry/readgate.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/telemetry/readgate_lock.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/telemetry/readgate_lock_unix.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/telemetry/readgate_lock_windows.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/telemetry/readgate_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/telemetry/telemetry.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/app.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/commands.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/events.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/findings.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/keys.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/pipeline.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/pipeline_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/review.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/review_source_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/tui/yolo_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/types/design_context.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/types/findings.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/types/findings_test.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
+- `internal/types/types.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/update/active_runs.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/update/helpers_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/update/spawn_windows.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/update/update.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/update/update_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/winproc/harden_other.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/winproc/harden_windows.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/winproc/harden_windows_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `skills/no-mistakes/SKILL.md` — ported — fork guidance is retained and reconciled with v1.37 documentation, so the current blob intentionally includes both lineages.
