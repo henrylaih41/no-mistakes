@@ -91,6 +91,66 @@ func TestRebaseStep_DetectsUnpushedLocalDefaultBranchCommits(t *testing.T) {
 	}
 }
 
+// A selected route can point the base at a repo other than the gate origin.
+// The bundled-local-default check must compare against the base the run rebases
+// onto (baseTrackingRef), not the gate's origin/<default>: otherwise commits
+// that are already on origin but absent from the routed base are silently
+// bundled into the routed PR. Here origin carries the local-default commit but
+// the routed base does NOT, so the check must still flag it.
+func TestDetectBundledLocalDefaultCommits_RouteBaseBehindOrigin(t *testing.T) {
+	t.Parallel()
+	routeBase := t.TempDir()
+	gitCmd(t, routeBase, "init", "--bare")
+
+	// Working repo: local main starts at R0 (pushed to the routed base), then an
+	// unrelated workstream commits U to local main without pushing it to the base.
+	working := t.TempDir()
+	gitCmd(t, working, "init")
+	gitCmd(t, working, "config", "user.name", "test")
+	gitCmd(t, working, "config", "user.email", "test@test.com")
+	gitCmd(t, working, "checkout", "-b", "main")
+	os.WriteFile(filepath.Join(working, "base.txt"), []byte("base"), 0o644)
+	gitCmd(t, working, "add", "-A")
+	gitCmd(t, working, "commit", "-m", "base")
+	gitCmd(t, working, "remote", "add", "base", routeBase)
+	gitCmd(t, working, "push", "base", "main") // routeBase main == R0
+
+	os.WriteFile(filepath.Join(working, "unrelated.txt"), []byte("unrelated work"), 0o644)
+	gitCmd(t, working, "add", "-A")
+	gitCmd(t, working, "commit", "-m", "unrelated workstream commit")
+	localMainTip := gitCmd(t, working, "rev-parse", "HEAD") // R0 + U, never on routeBase
+
+	// Gate worktree: feature branched off local main (carries U as ancestor).
+	dir := t.TempDir()
+	gitCmd(t, dir, "clone", routeBase, ".")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "fetch", working, "main")
+	gitCmd(t, dir, "checkout", "--detach", localMainTip)
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	os.WriteFile(filepath.Join(dir, "my_fix.txt"), []byte("fix"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "my fix")
+
+	// The gate's own origin/main DOES carry U: the old origin/<default> check would
+	// not flag it. The routed base (baseTrackingRef) is still at R0, so the route-
+	// aware check must flag U.
+	gitCmd(t, dir, "update-ref", "refs/remotes/origin/main", localMainTip)
+	gitCmd(t, dir, "update-ref", baseTrackingRef("main"), gitCmd(t, dir, "rev-parse", "refs/remotes/origin/main~1"))
+
+	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, "", "", config.Commands{})
+	sctx.Repo.WorkingPath = working
+	sctx.Repo.DefaultBranch = "main"
+
+	outcome := detectBundledLocalDefaultCommits(sctx.Ctx, sctx, "feature", "main")
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("expected the routed-base check to flag commits absent from the routed base, got %#v", outcome)
+	}
+	if !strings.Contains(outcome.Findings, "unrelated workstream commit") {
+		t.Fatalf("expected findings to name the bundled commit, got: %s", outcome.Findings)
+	}
+}
+
 func TestRebaseStep_DetectsUnpushedLocalDefaultBranchCommitsOnForcePush(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()

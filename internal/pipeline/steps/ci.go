@@ -486,7 +486,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// run a bounded review-loop fix round. Anti-thrash keys on
 					// (headSHA, finding fingerprints) so a pushed fix waits for
 					// the bot to re-review the new commit before re-evaluating.
-					if outcome := s.handleDevinFixRound(sctx, host, pr, devinFindings, devinKey, fixCompletedAt); outcome != nil {
+					// A user/agent `fix` response after the loop parked forces one
+					// more round past the bounded guard; gate it to once per
+					// execution (manualFixAttempted) so it cannot thrash the loop.
+					forcedDevinFix := sctx.Fixing && !manualFixAttempted
+					if forcedDevinFix {
+						manualFixAttempted = true
+					}
+					if outcome := s.handleDevinFixRound(sctx, host, pr, devinFindings, devinKey, fixCompletedAt, forcedDevinFix); outcome != nil {
 						return outcome, nil
 					}
 				} else if sctx.Fixing && !manualFixAttempted {

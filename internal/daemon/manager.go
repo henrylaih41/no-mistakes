@@ -852,8 +852,10 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		// steering as the impl agent. Any failure here must close what has been
 		// built so far before returning, since the cleanup defer below only runs
 		// once the background goroutine owns the run.
-		// Skip setup when review is skipped; an unused reviewer must not make the
-		// run fail because its binary is absent or its config is invalid.
+		//
+		// Skip reviewer resolution entirely when the review step itself is
+		// skipped for this run: otherwise a missing reviewer binary or an invalid
+		// reviewer spec would fail startRun for a run that never reviews.
 		if !slices.Contains(skipSteps, types.StepReview) {
 			reviewerSpecs, revErr := cfg.ResolveReviewers(ctx, exec.LookPath)
 			if revErr != nil {
