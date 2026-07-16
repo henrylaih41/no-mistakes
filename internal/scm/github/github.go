@@ -2,10 +2,12 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -434,13 +436,39 @@ func (h *Host) apiArgs(suffix string) []string {
 }
 
 // paginatedAPIArgs is apiArgs plus --paginate, so gh follows the Link headers
-// and returns every page merged into a single JSON array. Without it a list read
-// (PR review comments, issue comments, or reviews) silently stops at the first
-// page (~30 items): a severe finding or the head-SHA review object that lands
-// beyond page 1 would be dropped, and the review gate could then wrongly treat a
-// changes-requested PR as approved.
+// and fetches every page. Without it a list read (PR review comments, issue
+// comments, or reviews) silently stops at the first page (~30 items): a severe
+// finding or the head-SHA review object that lands beyond page 1 would be
+// dropped, and the review gate could then wrongly treat a changes-requested PR
+// as approved.
+//
+// NOTE: for a JSON-array endpoint, `gh api --paginate` (without --slurp) emits
+// each page as its OWN top-level array document concatenated back-to-back
+// ([...][...]), not one merged array. Callers must stream-decode the output
+// (see decodePaginatedArray), since a single json.Unmarshal fails once a second
+// page exists.
 func (h *Host) paginatedAPIArgs(suffix string) []string {
 	return append(h.apiArgs(suffix), "--paginate")
+}
+
+// decodePaginatedArray flattens the multi-document output of a paginated
+// `gh api` array read (see paginatedAPIArgs) into a single slice. Each page is a
+// separate top-level JSON array, so it decodes the stream value-by-value and
+// concatenates every page; a single-page (one array) response decodes as one
+// value. An empty/whitespace-only body yields a nil slice.
+func decodePaginatedArray[T any](out []byte) ([]T, error) {
+	dec := json.NewDecoder(bytes.NewReader(out))
+	var items []T
+	for {
+		var page []T
+		if err := dec.Decode(&page); err != nil {
+			if errors.Is(err, io.EOF) {
+				return items, nil
+			}
+			return nil, err
+		}
+		items = append(items, page...)
+	}
 }
 
 type ghUser struct {
@@ -709,8 +737,8 @@ func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botL
 	if err != nil {
 		return "", nil, fmt.Errorf("gh api pulls reviews: %w", err)
 	}
-	var reviews []ghReview
-	if err := json.Unmarshal(reviewsOut, &reviews); err != nil {
+	reviews, err := decodePaginatedArray[ghReview](reviewsOut)
+	if err != nil {
 		return "", nil, fmt.Errorf("parse PR reviews: %w", err)
 	}
 

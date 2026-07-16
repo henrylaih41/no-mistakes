@@ -189,6 +189,38 @@ func (s *CIStep) recordDevinFixKey(key string) {
 	s.lastDevinFixKey = key
 }
 
+// ciFixAlreadyAttempted reports whether the shared CI-fix path already pushed a
+// fix for the current issue state, so the monitor should wait for CI to re-run
+// rather than re-running the fixer. The CI-check identity (failing names + merge
+// conflict, ciKey) and the review-loop identity (head SHA + finding
+// fingerprints, devinKey) are compared as INDEPENDENT dimensions: the stable CI
+// anti-thrash must not be reset just because the review verdict transitions from
+// "not green" to "pending" on a freshly pushed head (devinKey would otherwise
+// vanish from a conflated key and spuriously mismatch). A still-flagging review
+// only re-triggers when it carries a distinct fingerprint set; with no
+// fingerprints there is nothing new to feed the fixer, so the CI key alone gates.
+func (s *CIStep) ciFixAlreadyAttempted(ciKey, devinKey string, devinNotGreen bool) bool {
+	if ciKey == "" || ciKey != s.lastFixedChecks {
+		return false
+	}
+	if !devinNotGreen || devinKey == "" {
+		return true
+	}
+	return devinKey == s.devinFixKey()
+}
+
+// recordCIFix records the anti-thrash keys for a fix the shared CI-fix path just
+// pushed. The CI key and (when the review loop flagged the head) the review key
+// are stored separately so each dimension's anti-thrash survives the other's
+// state changing on the next poll.
+func (s *CIStep) recordCIFix(ciKey, devinKey string, devinNotGreen bool, fixCompletedAt map[string]time.Time) {
+	s.lastFixedChecks = ciKey
+	if devinNotGreen && devinKey != "" {
+		s.recordDevinFixKey(devinKey)
+	}
+	s.lastFixedCompletedAt = fixCompletedAt
+}
+
 // retriggeredSHA returns the head SHA the last explicit Devin re-trigger was made
 // for, read under devinMu.
 func (s *CIStep) retriggeredSHA() string {
@@ -433,8 +465,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				sctx.Log("issues detected but checks still pending, waiting for all checks to complete...")
 			} else if hasIssues {
 				lastMonitorLog = ""
-				// All checks done, issues present - fix or report
-				fixKey := encodeLastFixedChecks(failing, mergeConflict)
+				// All checks done, issues present - fix or report. The CI-check
+				// identity and the review-loop identity are kept as separate
+				// anti-thrash dimensions (see ciFixAlreadyAttempted) so a push
+				// that flips the review verdict to pending does not reset the CI
+				// anti-thrash and re-run the fixer against still-stale checks.
+				ciKey := encodeLastFixedChecks(failing, mergeConflict)
+				devinKey := encodeDevinFixKey(nil, false, sctx.Run.HeadSHA, devinPrints)
 				fixCompletedAt := failingCheckCompletionTimes(checks)
 				issueDesc := strings.Join(failing, ", ")
 				if mergeConflict {
@@ -449,7 +486,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// run a bounded review-loop fix round. Anti-thrash keys on
 					// (headSHA, finding fingerprints) so a pushed fix waits for
 					// the bot to re-review the new commit before re-evaluating.
-					devinKey := encodeDevinFixKey(nil, false, sctx.Run.HeadSHA, devinPrints)
 					if outcome := s.handleDevinFixRound(sctx, host, pr, devinFindings, devinKey, fixCompletedAt); outcome != nil {
 						return outcome, nil
 					}
@@ -461,13 +497,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI manual fix failed: %v", err))
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
-						s.lastFixedChecks = fixKey
-						s.lastFixedCompletedAt = fixCompletedAt
+						s.recordCIFix(ciKey, devinKey, devinNotGreen, fixCompletedAt)
 					} else {
 						sctx.Log("CI fix produced no changes, returning for manual intervention...")
 						return ciFailureOutcome(failing, mergeConflict, "CI fix produced no changes - failures require manual intervention"), nil
 					}
-				} else if sctx.Fixing && fixKey == s.lastFixedChecks {
+				} else if sctx.Fixing && s.ciFixAlreadyAttempted(ciKey, devinKey, devinNotGreen) {
 					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
 				} else if ciFixLimit <= 0 {
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fix disabled, waiting for manual intervention...", issueDesc))
@@ -475,7 +510,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				} else if s.ciFixAttempts >= ciFixLimit {
 					sctx.Log(fmt.Sprintf("issues detected: %s - max auto-fix attempts (%d) reached, waiting for manual intervention...", issueDesc, ciFixLimit))
 					return ciFailureOutcome(failing, mergeConflict, "CI failures still present after auto-fix attempts"), nil
-				} else if fixKey == s.lastFixedChecks {
+				} else if s.ciFixAlreadyAttempted(ciKey, devinKey, devinNotGreen) {
 					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
 				} else {
 					s.ciFixAttempts++
@@ -485,8 +520,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI auto-fix failed: %v", err))
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
-						s.lastFixedChecks = fixKey
-						s.lastFixedCompletedAt = fixCompletedAt
+						s.recordCIFix(ciKey, devinKey, devinNotGreen, fixCompletedAt)
 					} else {
 						// No changes produced - don't set lastFixedChecks so next
 						// poll treats this as a new failure and retries if attempts remain.
