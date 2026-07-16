@@ -501,9 +501,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 			devinNotGreen := devinDecision == devinDecisionNotGreen
 			// The review body reports findings on this head but no file-scoped
-			// threads loaded to fix: a human must verify. Folded into hasIssues so
-			// it is not mistaken for "checks passed, ready to merge", but routed to
-			// a park (never the fixer) below.
+			// threads loaded to fix: the gate owner must verify. Folded into
+			// hasIssues so it is not mistaken for "checks passed, ready to merge",
+			// but routed to a park (never the fixer) below.
 			devinManualReview := devinDecision == devinDecisionManualReview
 			// The pre-grace form of the same body-only not-green signal. It does NOT
 			// force a park on its own (we keep polling for threads to propagate), but
@@ -565,8 +565,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				if loopActive && devinManualReview && !hasFailures && !mergeConflict {
 					// Checks are clean but the review bot reported findings on this
 					// head that we could not load as file-scoped threads. There is
-					// nothing concrete to auto-fix, so park at the human gate with an
-					// explicit reason instead of running the fixer (which would
+					// nothing concrete to auto-fix, so park for gate-owner judgment
+					// with an explicit reason instead of running the fixer (which would
 					// fabricate changes for a problem it cannot see, ruling #11).
 					lastMonitorLog = ""
 					sctx.Log(cimonitor.ReviewManualVerifyMsg)
@@ -662,7 +662,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// still propagate), but surface the body-only not-green signal so it
 					// is never mistaken for a ready-to-merge review; once the grace
 					// window elapses this escalates to devinDecisionManualReview and the
-					// run parks for a human. This NEVER fails open to green.
+					// run parks for gate-owner judgment. This NEVER fails open to green.
 					lastMonitorLog = logCIMonitorStatus(sctx, cimonitor.ReviewManualVerifyPendingMsg, lastMonitorLog)
 				case len(checks) == 0 && elapsed < s.gracePeriod():
 					// CI checks may not be registered yet, keep polling.

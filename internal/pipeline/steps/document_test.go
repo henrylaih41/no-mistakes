@@ -318,8 +318,8 @@ func TestDocumentStep_MalformedOutput_CommitsAndRequiresApproval(t *testing.T) {
 	if len(findings.Items) != 1 {
 		t.Fatalf("expected 1 finding, got %+v", findings.Items)
 	}
-	if findings.Items[0].Action != types.ActionAskUser {
-		t.Error("expected malformed output finding to require human review")
+	if findings.Items[0].Action != types.ActionAskMaster {
+		t.Error("expected malformed output finding to route to Master")
 	}
 	// Any edits the agent made should still be committed.
 	if status := gitStatusPorcelain(t, dir); status != "" {
@@ -354,7 +354,7 @@ func TestDocumentStep_NoStructuredOutput_RequiresApproval(t *testing.T) {
 	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
 		t.Fatalf("unmarshal findings: %v", err)
 	}
-	if len(findings.Items) != 1 || findings.Items[0].Action != types.ActionAskUser {
-		t.Fatalf("expected 1 ask-user finding, got %+v", findings.Items)
+	if len(findings.Items) != 1 || findings.Items[0].Action != types.ActionAskMaster {
+		t.Fatalf("expected 1 ask-master finding, got %+v", findings.Items)
 	}
 }

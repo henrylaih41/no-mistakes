@@ -1171,7 +1171,8 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult) {
 	case types.StepStatusRunning:
 		b.WriteString("Step is currently running.\n\n")
 	case types.StepStatusAwaitingApproval:
-		b.WriteString("Waiting for user approval.\n\n")
+		b.WriteString(awaitingApprovalDetail(sr))
+		b.WriteString("\n\n")
 	case types.StepStatusAwaitingRetry:
 		b.WriteString("Waiting for an agent provider/transient retry response.\n\n")
 	case types.StepStatusFixing:
@@ -1194,6 +1195,20 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult) {
 	default:
 		b.WriteString("Status unavailable.\n\n")
 	}
+}
+
+func awaitingApprovalDetail(sr *db.StepResult) string {
+	if sr.FindingsJSON != nil {
+		findings, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+		if err == nil && types.HasAskUserFindings(findings) {
+			return "Waiting for user approval."
+		}
+	}
+
+	// HasAskUserFindings uses the canonical action normalization: mixed gates
+	// select the stricter user authority, while missing, unknown, and unreadable
+	// actions fail closed to Master/gate-owner judgment.
+	return "Waiting for master/gate-owner decision."
 }
 
 func shouldOmitPipelineStep(sr *db.StepResult) bool {

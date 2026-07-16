@@ -60,7 +60,10 @@ Combined lint duty (same pass - no separate lint agent will run):
 Set "category" on every finding: "documentation" for documentation findings, "lint" for lint findings.`
 
 // housekeepingFindingsSchema extends findingsSchema with the per-finding
-// category that routes combined-pass findings to their owning gates.
+// category that routes combined-pass findings to their owning gates. The
+// document/housekeeping prompt intentionally defines no action vocabulary
+// (schema-only); only the review and test prompts teach the four-level
+// authority contract.
 var housekeepingFindingsSchema = json.RawMessage(`{
 	"type": "object",
 	"properties": {
@@ -74,7 +77,7 @@ var housekeepingFindingsSchema = json.RawMessage(`{
 					"file": {"type": "string"},
 					"line": {"type": "integer"},
 					"description": {"type": "string"},
-					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]},
+					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-master", "ask-user"]},
 					"category": {"type": "string", "enum": ["documentation", "lint"]}
 				},
 				"required": ["severity", "description", "action", "category"]
@@ -151,7 +154,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	}
 
 	// Without trustworthy structured output we cannot confirm the agent
-	// resolved every gap, so surface it for human review. Nothing is stashed
+	// resolved every gap, so surface it for gate-owner review. Nothing is stashed
 	// for the lint step, which therefore re-assesses with its own pass.
 	var findings Findings
 	if result.Output == nil {
@@ -306,15 +309,15 @@ func splitHousekeepingFindings(findings Findings) (doc Findings, lint Findings) 
 	return doc, lint
 }
 
-// documentApprovalOutcome builds a single ask-user finding for cases where the
-// agent's structured output is missing or unparsable, so a human can confirm
-// the documentation state instead of silently trusting an opaque response.
+// documentApprovalOutcome builds a single ask-master finding for cases where
+// the agent's structured output is missing or unparsable, so the gate owner can
+// inspect or retry it without misrepresenting the failure as a product choice.
 func documentApprovalOutcome(summary string) *pipeline.StepOutcome {
 	findings := Findings{
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: summary,
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 		Summary: summary,
 	}

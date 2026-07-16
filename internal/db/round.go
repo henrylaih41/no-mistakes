@@ -242,7 +242,7 @@ func (d *DB) CountStepFixRounds(stepResultID string) (int, error) {
 
 // CountStepAgentAutoRetries returns how many retry responses came from the
 // --yes auto-resume path. It intentionally counts only agent_auto_retry rounds,
-// so manual retries remain unbounded human actions and review fix caps stay
+// so manual retries remain unbounded explicit actions and review fix caps stay
 // independent.
 func (d *DB) CountStepAgentAutoRetries(stepResultID string) (int, error) {
 	rounds, err := d.GetRoundsByStep(stepResultID)

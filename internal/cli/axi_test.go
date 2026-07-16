@@ -70,9 +70,11 @@ func TestFindingsTally(t *testing.T) {
 			{ID: "b", Action: types.ActionAutoFix, Description: "y"},
 			{ID: "c", Action: types.ActionNoOp, Description: "z"},
 			{ID: "d", Action: types.ActionAskUser, Description: "w"},
+			{ID: "e", Action: types.ActionAskMaster, Description: "m"},
+			{ID: "f", Action: "future-owner", Description: "unknown"},
 		}, "s")},
 	}}
-	if got := rv.findingsTally(); got != "2 awaiting, 1 auto-fix, 1 info" {
+	if got := rv.findingsTally(); got != "2 ask-master, 2 ask-user, 1 auto-fix, 1 info" {
 		t.Errorf("findingsTally = %q", got)
 	}
 
@@ -285,6 +287,30 @@ func TestFormatParkedFor(t *testing.T) {
 				t.Errorf("formatParkedFor = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A gate whose findings JSON cannot be parsed must not render as a silent
+// empty gate: the output names the unreadable payload and points at the step
+// log so the responder knows why no findings rows follow.
+func TestWriteGateShape_UnreadableFindingsAreNamed(t *testing.T) {
+	gate := stepView{
+		Name:         "review",
+		Status:       "awaiting_approval",
+		FindingsJSON: `{"findings":[{"severity":"error","description":"truncated`,
+	}
+	out := axiDoc(gateFields(gate)...)
+
+	for _, want := range []string{
+		"gate:\n",
+		"  step: review\n",
+		"findings_unreadable:",
+		"could not be parsed",
+		"no-mistakes axi logs --step review --full",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("unreadable-findings gate output missing %q in:\n%s", want, out)
+		}
 	}
 }
 

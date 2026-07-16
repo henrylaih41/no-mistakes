@@ -126,6 +126,69 @@ func TestBuildPipelineSummary_SkippedStep(t *testing.T) {
 	}
 }
 
+func TestBuildPipelineSummary_AwaitingApprovalUsesFindingAuthority(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		actions []string
+		want    string
+	}{
+		{
+			name:    "ask-master",
+			actions: []string{types.ActionAskMaster},
+			want:    "Waiting for master/gate-owner decision.",
+		},
+		{
+			name:    "ask-user",
+			actions: []string{types.ActionAskUser},
+			want:    "Waiting for user approval.",
+		},
+		{
+			name:    "mixed uses strictest authority",
+			actions: []string{types.ActionAskMaster, types.ActionAskUser},
+			want:    "Waiting for user approval.",
+		},
+		{
+			name:    "unknown fails closed to ask-master",
+			actions: []string{"future-owner"},
+			want:    "Waiting for master/gate-owner decision.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			findings := types.Findings{Summary: "awaiting authority decision"}
+			for i, action := range tt.actions {
+				findings.Items = append(findings.Items, types.Finding{
+					ID:          fmt.Sprintf("finding-%d", i+1),
+					Severity:    "warning",
+					Description: "finding awaiting a decision",
+					Action:      action,
+				})
+			}
+			findingsJSON, err := types.MarshalFindingsJSON(findings)
+			if err != nil {
+				t.Fatalf("marshal findings: %v", err)
+			}
+
+			steps := []*db.StepResult{{
+				ID:           "s1",
+				StepName:     types.StepReview,
+				Status:       types.StepStatusAwaitingApproval,
+				FindingsJSON: &findingsJSON,
+			}}
+			md, _ := BuildPipelineSummary(steps, nil)
+
+			if !strings.Contains(md, tt.want) {
+				t.Fatalf("expected %q in pipeline summary, got:\n%s", tt.want, md)
+			}
+		})
+	}
+}
+
 func TestBuildPipelineSummary_ExcludesPushPRCI(t *testing.T) {
 	t.Parallel()
 	steps := []*db.StepResult{

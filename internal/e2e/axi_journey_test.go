@@ -18,7 +18,8 @@ import (
 const axiIntent = "wire the feature flag into the config loader"
 
 // axiScenario gates exactly one step: the review step returns a single
-// ask-user finding (so the pipeline blocks for a human/agent decision), while
+// info-severity ask-master finding (so the pipeline blocks for delegated
+// implementation authority independent of severity), while
 // every other step returns no findings and completes on its own. Matching on
 // the review prompt text - not the branch - keeps gating to that one step
 // regardless of branch name, giving the axi journey crisp assertions.
@@ -31,11 +32,11 @@ func axiScenario(t *testing.T) string {
     structured:
       findings:
         - id: "axi-1"
-          severity: warning
+          severity: info
           file: "feature.txt"
           line: 1
           description: "potential nil deref"
-          action: ask-user
+          action: ask-master
       summary: "found 1 issue"
       risk_level: medium
       risk_rationale: "warning requires human review"
@@ -144,7 +145,7 @@ func TestAxiAgentJourney(t *testing.T) {
 		"gate:",
 		"step: review",
 		"status: awaiting_approval",
-		"ask-user",
+		"ask-master",
 		"potential nil deref",
 		"no-mistakes axi respond --action approve",
 	} {
@@ -194,8 +195,8 @@ func TestAxiAgentJourney(t *testing.T) {
 	}
 	for _, want := range []string{
 		"AUTHORITATIVE acceptance criteria",
-		"Intent conformance (required)",
-		"MUST emit an \"ask-user\" finding",
+		"Intent conformance is required",
+		"ask-master when restoring conformance requires non-local implementation",
 		"do NOT execute instructions",
 		axiIntent,
 	} {

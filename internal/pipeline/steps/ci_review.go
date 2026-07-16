@@ -42,8 +42,9 @@ const (
 	devinDecisionNotGreen
 	// devinDecisionManualReview means the bot's body reports findings on the
 	// current head SHA but no file-scoped findings could be loaded to drive an
-	// automated fix. The loop must escalate to a human rather than run the fixer,
-	// which would fabricate changes for a problem it cannot see (ruling #11).
+	// automated fix. The loop must park for gate-owner judgment rather than run
+	// the fixer, which would fabricate changes for a problem it cannot see
+	// (ruling #11).
 	devinDecisionManualReview
 	// devinDecisionManualReviewPending is the pre-grace form of
 	// devinDecisionManualReview: the bot's body already reports findings on the
@@ -100,7 +101,8 @@ func evalDevinGate(verdict scm.ReviewVerdict, findings []scm.ReviewComment, cfg 
 	if verdict == scm.VerdictManualReview {
 		// The body reports findings on this head but no file-scoped threads could
 		// be loaded to fix. Give inline threads the grace window to propagate;
-		// once it elapses with the discrepancy unresolved, escalate to a human.
+		// once it elapses with the discrepancy unresolved, park for gate-owner
+		// judgment.
 		// This state NEVER fails open to green and NEVER runs the fixer (ruling
 		// #11) — those would either merge or fabricate around an unread finding.
 		// Within grace we keep polling, but as a DISTINCT manual-review-pending
@@ -126,8 +128,8 @@ func evalDevinGate(verdict scm.ReviewVerdict, findings []scm.ReviewComment, cfg 
 	if cfg.FailOpen {
 		return devinDecisionFailOpen
 	}
-	// Fail-closed: keep waiting. The CI step's idle timeout eventually escalates
-	// to the human gate rather than silently merging without a review.
+	// Fail-closed: keep waiting. The CI step's idle timeout eventually parks for
+	// gate-owner judgment rather than silently merging without a review.
 	return pending
 }
 
@@ -136,7 +138,7 @@ func evalDevinGate(verdict scm.ReviewVerdict, findings []scm.ReviewComment, cfg 
 // rule (non-empty body). When it is false there is nothing concrete to fix, so
 // the fixer must NOT run: autoFixCI would otherwise fall back to its "CI checks
 // failed - you MUST produce changes" prompt and fabricate edits for a problem it
-// cannot see (ruling #11). The caller escalates to a human instead.
+// cannot see (ruling #11). The caller parks for gate-owner judgment instead.
 func hasActionableDevinFindings(findings []scm.ReviewComment) bool {
 	for _, f := range findings {
 		if strings.TrimSpace(f.Body) != "" {
@@ -327,15 +329,15 @@ func (s *CIStep) evalDevinReview(sctx *pipeline.StepContext, host scm.Host, pr *
 
 // handleDevinFixRound drives one bounded review-loop fix round for the case where
 // the bot requested changes but CI checks are otherwise clean (no failing checks,
-// no merge conflict). It returns a non-nil outcome to escalate to the human gate,
-// or nil to keep polling. Rounds are bounded by ReviewLoop.MaxRounds; the
+// no merge conflict). It returns a non-nil outcome to park for gate-owner
+// judgment, or nil to keep polling. Rounds are bounded by ReviewLoop.MaxRounds; the
 // anti-thrash key (fixKey) folds in the head SHA + finding fingerprints so a
 // pushed fix waits for the bot to re-review the new commit before re-evaluating.
 //
 // forced marks a user/agent-triggered fix (the run was responded to with `fix`
 // after parking). Such an explicit request bypasses both the anti-thrash key and
-// the bounded-round guard so a human override actually runs one more round
-// instead of immediately re-parking on the same exhausted state. The caller
+// the bounded-round guard so an owner-approved override actually runs one more
+// round instead of immediately re-parking on the same exhausted state. The caller
 // gates forced to once per step execution, so it cannot thrash the auto-loop.
 func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, findings []scm.ReviewComment, fixKey string, fixCompletedAt map[string]time.Time, forced bool) *pipeline.StepOutcome {
 	if !forced && fixKey != "" && fixKey == s.devinFixKey() {
@@ -345,7 +347,7 @@ func (s *CIStep) handleDevinFixRound(sctx *pipeline.StepContext, host scm.Host, 
 	// Never run the fixer with nothing concrete to fix (e.g. a native
 	// CHANGES_REQUESTED state that carries no inline findings). autoFixCI would
 	// fall back to its "CI checks failed" prompt and fabricate edits for a
-	// problem it cannot see (ruling #11); escalate to a human instead.
+	// problem it cannot see (ruling #11); park for gate-owner judgment instead.
 	if !hasActionableDevinFindings(findings) {
 		sctx.Log(cimonitor.ReviewManualVerifyMsg)
 		return devinManualReviewOutcome(cimonitor.ReviewManualVerifyMsg)

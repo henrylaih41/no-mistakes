@@ -69,7 +69,7 @@ func newAxiRunCmd() *cobra.Command {
 		Long: "Triggers a pipeline run for the current branch and drives it. Without\n" +
 			"--yes it blocks until the first approval gate, CI-ready point, or final outcome and\n" +
 			"prints it. With --yes it auto-resolves every gate (fixing actionable\n" +
-			"findings - including ask-user findings, with no escalation - then\n" +
+			"auto-fix, ask-master, and ask-user findings with no escalation - then\n" +
 			"accepting the result) until a decision point or outcome. --yes still\n" +
 			"stops at an awaiting_triage gate when review reaches max_fix_rounds: it\n" +
 			"never supplies the override implicitly. Report the residual findings for\n" +
@@ -364,8 +364,8 @@ func rerunParams(repoID, branch, expectedHead string, skipSteps []types.StepName
 
 // driveRun polls a run until it reaches an approval gate, a terminal state, or
 // CI checks pass, streaming step transitions to progress (stderr). When
-// autoApprove is set it resolves each gate and continues; otherwise it returns
-// at the first gate so the caller can surface it for a human/agent decision.
+// autoApprove is set it resolves each readable gate and continues; otherwise it
+// returns at the first gate so the caller can surface it to the owning authority.
 //
 // Auto-resolution means "agree to fix every finding": a gate with actionable
 // findings is fixed (every finding selected), and the resulting fix_review is
@@ -405,6 +405,12 @@ func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID
 				return run, false, nil
 			}
 			action, findingIDs := gateResolution(gate, fixedSteps[gate.Name])
+			if action == "" {
+				// Fail closed: the gate's findings could not be read, so
+				// auto-resolution stops here and the parked gate is surfaced
+				// to the caller for a manual decision.
+				return run, false, nil
+			}
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
 			}
@@ -478,16 +484,30 @@ func gateAllowsAutoResolution(gate stepView) bool {
 // in which case the gate is approved so the run converges instead of looping on
 // a finding the fix cannot clear. Gates with only non-actionable findings, no
 // findings, or actionable findings that carry no IDs (which a fix would resolve
-// to zero selections) are approved.
+// to zero selections) are approved. A gate whose findings JSON is present but
+// unreadable is NOT auto-resolvable: automation must never approve content it
+// cannot read, so the empty action tells the caller to fail closed and surface
+// the parked gate for a manual decision instead.
 func gateResolution(gate stepView, alreadyFixed bool) (types.ApprovalAction, []string) {
+	// A retry gate is answered by retrying the step itself, not by approving
+	// its content, so it is resolved before the findings-readability check.
 	if gate.Status == string(types.StepStatusAwaitingRetry) {
 		return types.ActionRetry, nil
+	}
+	// Readability is checked before every approval branch, including the
+	// alreadyFixed/fix_review convergence path: a malformed rereview payload
+	// must fail closed the same way a malformed initial payload does.
+	if gate.FindingsJSON == "" {
+		return types.ActionApprove, nil
+	}
+	parsed, err := types.ParseFindingsJSON(gate.FindingsJSON)
+	if err != nil {
+		return "", nil
 	}
 	if alreadyFixed || gate.Status == string(types.StepStatusFixReview) {
 		return types.ActionApprove, nil
 	}
-	parsed, err := types.ParseFindingsJSON(gate.FindingsJSON)
-	if err != nil || !types.HasActionableFindings(parsed) {
+	if !types.HasActionableFindings(parsed) {
 		return types.ActionApprove, nil
 	}
 	ids := make([]string, 0, len(parsed.Items))

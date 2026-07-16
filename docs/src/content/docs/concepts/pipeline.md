@@ -27,7 +27,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 - the branch was checked against fresh remote upstream and the pushed-branch target first
 - review, tests, user-facing test evidence when available, docs, and lint happened before any branch push to the configured target
-- the human stayed in control when a step needed judgment
+- the owning authority stayed in control when a step needed judgment
 - the final branch update was guarded against discarding unincorporated commits already on the push target
 - push, PR creation, and CI monitoring only happened after the local gate was satisfied
 
@@ -63,9 +63,9 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 Every step can:
 
 - **Complete** cleanly and advance the pipeline.
-- **Return findings** with severity (`error`, `warning`, `info`) and an action (`auto-fix`, `ask-user`, `no-op`).
+- **Return findings** with severity (`error`, `warning`, `info`) and an action (`no-op`, `auto-fix`, `ask-master`, `ask-user`).
 - **Trigger auto-fix** if the step's `auto_fix` limit is above 0, the step result is auto-fixable, and any finding is `auto-fix`-eligible. The document step applies safe documentation fixes during its initial pass and, when `commands.lint` is empty, combines that pass with initial safe lint fixes before the lint step consumes its findings.
-- **Pause for approval** if blocking findings remain after auto-fix, or if any finding is `ask-user`.
+- **Pause for approval** if blocking findings remain after auto-fix, or if any finding is `ask-master` or `ask-user`.
 - **Skip** when there's nothing to do (e.g., no diff, unsupported host).
 - **Fail** on fatal errors and stop the pipeline.
 

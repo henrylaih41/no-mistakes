@@ -184,12 +184,14 @@ func ciFailureOutcome(failing []string, mergeConflict bool, summary string) *pip
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "warning",
 			Description: fmt.Sprintf("CI check failing: %s", name),
+			Action:      types.ActionAskMaster,
 		})
 	}
 	if mergeConflict {
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "warning",
 			Description: "PR has merge conflicts with the base branch",
+			Action:      types.ActionAskMaster,
 		})
 	}
 	findingsJSON, _ := json.Marshal(findings)
@@ -216,7 +218,7 @@ func withDevinManualVerify(outcome *pipeline.StepOutcome, reason string) *pipeli
 	parsed.Items = append(parsed.Items, Finding{
 		Severity:    "warning",
 		Description: reason,
-		Action:      types.ActionAskUser,
+		Action:      types.ActionAskMaster,
 	})
 	if parsed.Summary != "" {
 		parsed.Summary += "; " + reason
@@ -250,7 +252,7 @@ func devinSeverityToFinding(severity string) string {
 }
 
 // devinFailureOutcome escalates an unresolved post-PR review-loop state to the
-// human approval gate, surfacing the bot's outstanding findings as actionable
+// gate owner, surfacing the bot's outstanding findings as actionable
 // items. Used when the loop exhausts its bounded rounds with Devin still
 // requesting changes.
 func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline.StepOutcome {
@@ -262,14 +264,14 @@ func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline
 		out.Items = append(out.Items, Finding{
 			Severity:    devinSeverityToFinding(f.Severity),
 			Description: fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Body),
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		})
 	}
 	if len(out.Items) == 0 {
 		out.Items = append(out.Items, Finding{
 			Severity:    "warning",
 			Description: "Devin still requested changes when the review loop exhausted its rounds",
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		})
 	}
 	findingsJSON, _ := json.Marshal(out)
@@ -279,13 +281,13 @@ func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline
 	}
 }
 
-// devinManualReviewOutcome parks the run at the human approval gate when the
+// devinManualReviewOutcome parks the run for gate-owner judgment when the
 // review bot signals a problem on the current head SHA but no concrete
 // file-scoped findings could be loaded to auto-fix (its body reports findings
 // yet the inline threads are missing, or it used a native CHANGES_REQUESTED
 // state with no inline comments). It deliberately does NOT synthesize or
 // fabricate any file-scoped finding summary — it surfaces the single, honest
-// reason and hands the decision to a human (ruling #11).
+// reason and hands the decision to the gate owner (ruling #11).
 //
 // Like every parked CI gate, this is reconciled by CIStep.ReconcileApprovalGate
 // against the PR's current state. A merge or close therefore self-heals through
@@ -296,7 +298,7 @@ func devinManualReviewOutcome(reason string) *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: reason,
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)
@@ -312,7 +314,7 @@ func ciMergeabilityOutcome(summary, description string) *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: description,
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)
@@ -328,7 +330,7 @@ func ciMonitoringTimeoutOutcome() *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: "PR was still open when CI monitoring timed out",
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)

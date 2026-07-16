@@ -104,7 +104,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// the contributor's local default branch but were never pushed to
 	// origin/<default>. Rebasing onto the fresh remote default keeps those
 	// commits in the branch's history, so the PR would silently bundle another
-	// workstream's unpushed work. Surface it for a human decision instead.
+	// workstream's unpushed work. Surface it for gate-owner judgment instead.
 	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
 		return outcome, nil
 	}
@@ -297,10 +297,9 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 			File:        firstFile,
 			Description: description,
 			// Bundling another workstream's unpushed commits is a workflow call
-			// the contributor must make (push <default>, rebase, or proceed); the
-			// pipeline cannot safely auto-resolve it. Mark it ask-user so the gate
-			// classifies it correctly and the driving agent escalates.
-			Action: types.ActionAskUser,
+			// the gate owner must make (push <default>, rebase, or proceed); it
+			// needs non-local context but does not change product behavior.
+			Action: types.ActionAskMaster,
 		}},
 		Summary: fmt.Sprintf("branch bundles %d unpushed %s commit(s)", len(commits), defaultBranch),
 	})

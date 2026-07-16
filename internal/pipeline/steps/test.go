@@ -164,7 +164,7 @@ Task:
 - Look for existing tests that would generate sufficient evidence. If they exist, run the smallest relevant set.
 - If no existing test produces sufficient evidence, write or improve a test so that it does.
 - If automated testing cannot produce the needed evidence, execute manual verification steps and record the evidence-producing steps you performed.
-- If sufficient evidence is not possible, report a warning finding explaining what evidence is missing and why the user needs to decide what to do.
+- If sufficient evidence is not possible, report a warning finding explaining what evidence is missing and what decision it blocks.
 - Include a concise "testing_summary" sentence describing what you exercised and the overall result.
 - The "testing_summary" must account for the complete test step: baseline commands that already ran, automated tests, manual or evidence-producing checks, artifacts gathered, and the overall result.
 - Record the exact tests, manual checks, and evidence-producing steps you ran in a "tested" array. Prefer concrete commands or test selectors wrapped in backticks.
@@ -181,7 +181,10 @@ Rules:
 - Only report actionable findings: test failures, unfixable setup issues, flaky tests you identified, or missing evidence that prevents you from demonstrating the user intent.
 - Do NOT report passing tests (whether existing or new), test counts, coverage summaries, or other non-actionable information.
 - If all tests pass and there are no issues, return an empty findings array.
-- Set action to "ask-user" for missing-evidence warning findings and only otherwise when a test failure seems desired and you question the author's intent of having the test in the first place. Set action to "auto-fix" for objective test failures that can be safely fixed. Set action to "no-op" for informational notes.%s`,
+- Set action to "auto-fix" for an objective failure with one clear, bounded correction established by the approved intent, design, contract, invariant, or a test that still stands; evidence the change under test itself removed or altered does not count. A user-visible fix can still be auto-fix when it restores already-established behavior; in that case the description MUST name the evidence that establishes it.
+- Set action to "ask-master" when evidence is missing but the approved requirement is clear, or when fixing or demonstrating it needs non-local implementation judgment while preserving approved behavior.
+- Set action to "ask-user" only when the test exposes a genuine unresolved product or guarantee decision: authoritative evidence does not determine one outcome, at least two materially different outcomes are plausible, and the choice changes behavior or an agreed guarantee. State the decision, options, consequences, and recommendation.
+- Set action to "no-op" for informational notes. When uncertain HOW to fix or demonstrate approved behavior, choose ask-master. When uncertain WHAT the product should do, choose ask-user.%s`,
 				sctx.Run.Branch,
 				baseSHA,
 				sctx.Run.HeadSHA,

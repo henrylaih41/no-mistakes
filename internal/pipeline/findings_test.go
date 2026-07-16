@@ -105,12 +105,45 @@ func TestAutoFixableFindingsJSON_EmptyInput(t *testing.T) {
 	}
 }
 
+// A payload that cannot be parsed must never round-trip back as an
+// auto-fixable payload: it fails closed to "" so the executor's
+// manual-findings boundary parks it instead of dispatching a fix round.
+func TestAutoFixableFindingsJSON_MalformedInputFailsClosed(t *testing.T) {
+	if got := autoFixableFindingsJSON(`{"findings":[`); got != "" {
+		t.Fatalf("expected empty string for malformed input, got %q", got)
+	}
+}
+
 func TestAutoFixableFindingsJSON_AllNoOp(t *testing.T) {
 	raw := `{"findings":[{"id":"review-1","severity":"info","description":"note","action":"no-op"}],"risk_level":"low","risk_rationale":"Clean."}`
 
 	fixableRaw := autoFixableFindingsJSON(raw)
 	if fixableRaw != "" {
 		t.Fatalf("expected empty string for all-no-op findings, got %q", fixableRaw)
+	}
+}
+
+func TestHasManualFindingsJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"ask-master", `{"findings":[{"action":"ask-master"}]}`, true},
+		{"ask-user", `{"findings":[{"action":"ask-user"}]}`, true},
+		{"missing action", `{"findings":[{"description":"unclassified"}]}`, true},
+		{"unknown action", `{"findings":[{"action":"future-owner"}]}`, true},
+		{"auto-fix", `{"findings":[{"action":"auto-fix"}]}`, false},
+		{"no-op", `{"findings":[{"action":"no-op"}]}`, false},
+		{"empty", "", false},
+		{"malformed", "{", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasManualFindingsJSON(tt.raw); got != tt.want {
+				t.Errorf("hasManualFindingsJSON() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

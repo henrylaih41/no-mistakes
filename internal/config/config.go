@@ -305,7 +305,7 @@ type ReviewLoopRaw struct {
 // no-mistakes (the reviewing bot is review-only), so no fixer agent is config'd.
 //
 // Accepted tradeoff with FailOpen=false: the fail-closed path waits for the bot
-// and relies on the CI step's idle timeout to escalate to the human gate. That
+// and relies on the CI step's idle timeout to park for gate-owner judgment. That
 // idle timer re-arms every time the base branch advances (see CITimeout), so on
 // a PR whose base branch is actively moving while the bot stays silent, the
 // timeout may never elapse and escalation may never fire - the loop just keeps

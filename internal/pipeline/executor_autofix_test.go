@@ -383,7 +383,7 @@ func TestExecutor_AutoFixSkipsHumanReviewFindings(t *testing.T) {
 	}
 }
 
-func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *testing.T) {
+func TestExecutor_AskMasterFindingsRequireApprovalWithoutNeedsApprovalFlag(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
 
@@ -393,7 +393,7 @@ func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *
 			return &StepOutcome{
 				NeedsApproval: false,
 				AutoFixable:   true,
-				Findings:      `{"findings":[{"severity":"info","description":"design choice","action":"ask-user"}],"summary":"1 issue"}`,
+				Findings:      `{"findings":[{"severity":"info","description":"implementation choice","action":"ask-master"}],"summary":"1 issue"}`,
 			}, nil
 		},
 	}
@@ -406,6 +406,53 @@ func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+
+	exec.Respond(types.StepReview, types.ActionApprove, nil)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+}
+
+// Malformed findings JSON must never enter an auto-fix round, even when the
+// step declares itself AutoFixable with fix attempts available: the
+// auto-fixable subset of an unreadable payload is empty (fail closed), and
+// the manual-findings boundary parks the step for a decision instead. Exactly
+// one step call proves no fix round was dispatched.
+func TestExecutor_MalformedFindingsParkInsteadOfAutoFix(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			callCount++
+			return &StepOutcome{
+				NeedsApproval: false,
+				AutoFixable:   true,
+				Findings:      `{"findings":[{"severity":"error","description":"truncated`,
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 3}}, nil, []Step{step}, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, workDir)
+	}()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 step call (no auto-fix round for malformed findings), got %d", callCount)
+	}
 
 	exec.Respond(types.StepReview, types.ActionApprove, nil)
 

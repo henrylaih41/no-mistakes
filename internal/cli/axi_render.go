@@ -188,7 +188,8 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 	return rv
 }
 
-// awaitingStep returns the step currently blocking on a human decision, if any.
+// awaitingStep returns the step currently blocking on an authority decision,
+// if any.
 // At most one step awaits at a time, so the first match is the active gate.
 func (rv runView) awaitingStep() (stepView, bool) {
 	for _, s := range rv.Steps {
@@ -244,7 +245,7 @@ func (s stepView) findingCount() int {
 // findingsTally summarizes a run's findings across all steps by action, so an
 // agent sees the shape of outstanding work without a follow-up call.
 func (rv runView) findingsTally() string {
-	var awaiting, autofix, info int
+	var askMaster, askUser, autofix, info int
 	for _, s := range rv.Steps {
 		if s.FindingsJSON == "" {
 			continue
@@ -255,18 +256,25 @@ func (rv runView) findingsTally() string {
 		}
 		for _, f := range parsed.Items {
 			switch f.Action {
+			case types.ActionAskMaster:
+				askMaster++
 			case types.ActionAskUser:
-				awaiting++
+				askUser++
 			case types.ActionAutoFix:
 				autofix++
-			default:
+			case types.ActionNoOp:
 				info++
+			default:
+				askMaster++
 			}
 		}
 	}
-	parts := make([]string, 0, 3)
-	if awaiting > 0 {
-		parts = append(parts, fmt.Sprintf("%d awaiting", awaiting))
+	parts := make([]string, 0, 4)
+	if askMaster > 0 {
+		parts = append(parts, fmt.Sprintf("%d ask-master", askMaster))
+	}
+	if askUser > 0 {
+		parts = append(parts, fmt.Sprintf("%d ask-user", askUser))
 	}
 	if autofix > 0 {
 		parts = append(parts, fmt.Sprintf("%d auto-fix", autofix))
@@ -441,7 +449,7 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 // gateFields renders the active approval gate: the awaiting step, its findings
 // table, and the next-step commands an agent can run to clear it.
 func gateFields(gate stepView) []toon.Field {
-	parsed, _ := types.ParseFindingsJSON(gate.FindingsJSON)
+	parsed, parseErr := types.ParseFindingsJSON(gate.FindingsJSON)
 	gfields := []toon.Field{
 		{Key: "step", Value: gate.Name},
 		{Key: "status", Value: gate.Status},
@@ -461,6 +469,12 @@ func gateFields(gate stepView) []toon.Field {
 			{Key: "help", Value: help},
 		}
 	}
+	// An unreadable findings payload must not render as a silent empty gate:
+	// name the failure so the responder knows why no findings rows follow and
+	// where to look before deciding.
+	if parseErr != nil && gate.FindingsJSON != "" {
+		gfields = append(gfields, toon.Field{Key: "findings_unreadable", Value: "the step's findings JSON could not be parsed; read the step log (`no-mistakes axi logs --step " + gate.Name + " --full`) before responding"})
+	}
 	if parsed.Summary != "" {
 		gfields = append(gfields, toon.Field{Key: "summary", Value: parsed.Summary})
 	}
@@ -468,10 +482,10 @@ func gateFields(gate stepView) []toon.Field {
 		gfields = append(gfields, toon.Field{Key: "risk", Value: parsed.RiskLevel})
 	}
 	// Point-of-use reminder at the review gate: review auto-fix defaults to
-	// disabled, so agents should expect blocking and ask-user findings to park
+	// disabled, so agents should expect blocking and both manual actions to park
 	// unless config explicitly opts back in.
 	if gate.Name == string(types.StepReview) {
-		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."})
+		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking findings plus `ask-master` and `ask-user` review findings park for a decision rather than being silently self-fixed."})
 	}
 	if gate.Status == string(types.StepStatusAwaitingTriage) {
 		gfields = append(gfields, toon.Field{Key: "triage", Value: "Review max_fix_rounds has been reached. Residual findings require master triage: approve accepted/follow-up residuals, or use a one-round override only for a merge-blocking ruling."})

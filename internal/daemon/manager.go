@@ -1136,7 +1136,7 @@ func telemetryFailedStepName(database *db.DB, runID string) string {
 	return ""
 }
 
-// HandleRespond routes a user approval action to the executor for the given run.
+// HandleRespond routes an approval response to the executor for the given run.
 func (m *RunManager) HandleRespond(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
 	return m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, "", false)
 }

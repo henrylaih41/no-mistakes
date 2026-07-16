@@ -883,6 +883,36 @@ func TestFindingsSchema_Action(t *testing.T) {
 	}
 }
 
+func TestFindingSchemas_AllowFourAuthorityActions(t *testing.T) {
+	t.Parallel()
+	for name, schema := range map[string]json.RawMessage{
+		"findings":  findingsSchema,
+		"test":      testFindingsSchema,
+		"review":    reviewFindingsSchema,
+		"housekeep": housekeepingFindingsSchema,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var parsed map[string]interface{}
+			if err := json.Unmarshal(schema, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			props := parsed["properties"].(map[string]interface{})
+			items := props["findings"].(map[string]interface{})["items"].(map[string]interface{})
+			action := items["properties"].(map[string]interface{})["action"].(map[string]interface{})
+			got := action["enum"].([]interface{})
+			want := []string{"no-op", "auto-fix", "ask-master", "ask-user"}
+			if len(got) != len(want) {
+				t.Fatalf("action enum length = %d, want %d: %#v", len(got), len(want), got)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("action enum[%d] = %#v, want %q", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestFindingsSchema_IncludesTestedArray(t *testing.T) {
 	t.Parallel()
 	var parsed map[string]interface{}
