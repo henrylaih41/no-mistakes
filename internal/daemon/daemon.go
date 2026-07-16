@@ -453,82 +453,66 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.ShutdownResult{OK: true}, nil
 	})
 
-	srv.Handle(ipc.MethodGetRun, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+	srv.Handle(ipc.MethodGetRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p ipc.GetRunParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		run, err := d.GetRun(p.RunID)
+		snapshot, err := d.GetRunSnapshot(ctx, p.RunID)
 		if err != nil {
 			return nil, fmt.Errorf("get run: %w", err)
 		}
-		if run == nil {
+		if snapshot == nil {
 			return nil, fmt.Errorf("run not found: %s", p.RunID)
 		}
-		steps, err := d.GetStepsByRun(p.RunID)
-		if err != nil {
-			return nil, fmt.Errorf("get steps: %w", err)
-		}
-		return &ipc.GetRunResult{Run: runToInfo(d, run, steps)}, nil
+		return &ipc.GetRunResult{Run: runToInfo(d, snapshot.Run, snapshot.Steps)}, nil
 	})
 
-	srv.Handle(ipc.MethodGetRuns, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+	srv.Handle(ipc.MethodGetRuns, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p ipc.GetRunsParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		runs, err := d.GetRunsByRepo(p.RepoID)
+		snapshots, err := d.GetRunsByRepoSnapshots(ctx, p.RepoID)
 		if err != nil {
 			return nil, fmt.Errorf("get runs: %w", err)
 		}
-		infos := make([]ipc.RunInfo, 0, len(runs))
-		for _, r := range runs {
-			steps, err := d.GetStepsByRun(r.ID)
-			if err != nil {
-				return nil, fmt.Errorf("get steps for run %s: %w", r.ID, err)
-			}
-			infos = append(infos, *runToInfo(d, r, steps))
+		infos := make([]ipc.RunInfo, 0, len(snapshots))
+		for _, snapshot := range snapshots {
+			infos = append(infos, *runToInfo(d, snapshot.Run, snapshot.Steps))
 		}
 		return &ipc.GetRunsResult{Runs: infos}, nil
 	})
 
-	srv.Handle(ipc.MethodGetRunsForHead, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+	srv.Handle(ipc.MethodGetRunsForHead, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p ipc.GetRunsForHeadParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		runs, err := d.GetRunsByRepoHead(p.RepoID, p.Branch, p.HeadSHA)
+		snapshots, err := d.GetRunsByRepoHeadSnapshots(ctx, p.RepoID, p.Branch, p.HeadSHA)
 		if err != nil {
 			return nil, fmt.Errorf("get runs for head: %w", err)
 		}
-		infos := make([]ipc.RunInfo, 0, len(runs))
-		for _, r := range runs {
-			steps, err := d.GetStepsByRun(r.ID)
-			if err != nil {
-				return nil, fmt.Errorf("get steps for run %s: %w", r.ID, err)
-			}
-			infos = append(infos, *runToInfo(d, r, steps))
+		infos := make([]ipc.RunInfo, 0, len(snapshots))
+		for _, snapshot := range snapshots {
+			infos = append(infos, *runToInfo(d, snapshot.Run, snapshot.Steps))
 		}
 		return &ipc.GetRunsResult{Runs: infos}, nil
 	})
 
-	srv.Handle(ipc.MethodGetActiveRun, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+	srv.Handle(ipc.MethodGetActiveRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p ipc.GetActiveRunParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		run, err := d.GetActiveRun(p.RepoID, p.Branch)
+		snapshot, err := d.GetActiveRunSnapshot(ctx, p.RepoID, p.Branch)
 		if err != nil {
 			return nil, fmt.Errorf("get active run: %w", err)
 		}
-		if run == nil {
+		if snapshot == nil {
 			return &ipc.GetActiveRunResult{}, nil
 		}
-		steps, err := d.GetStepsByRun(run.ID)
-		if err != nil {
-			return nil, fmt.Errorf("get steps: %w", err)
-		}
-		return &ipc.GetActiveRunResult{Run: runToInfo(d, run, steps)}, nil
+		return &ipc.GetActiveRunResult{Run: runToInfo(d, snapshot.Run, snapshot.Steps)}, nil
 	})
 
 	srv.Handle(ipc.MethodRerun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
