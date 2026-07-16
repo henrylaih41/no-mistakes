@@ -103,6 +103,47 @@ func TestRecoverStaleRunsClearsAwaitingAgent(t *testing.T) {
 	}
 }
 
+func TestRunInsertRoute(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+
+	// A plain InsertRun records no route (implicit default).
+	plain, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if plain.Route != nil {
+		t.Errorf("plain run route = %v, want nil", *plain.Route)
+	}
+	gotPlain, _ := d.GetRun(plain.ID)
+	if gotPlain.Route != nil {
+		t.Errorf("reloaded plain run route = %v, want nil", *gotPlain.Route)
+	}
+
+	// A routed run round-trips the selected route name so a rerun can re-resolve it.
+	routed, err := d.InsertRunWithRoute(repo.ID, "feature", "abc123", "def456", "parent")
+	if err != nil {
+		t.Fatalf("insert routed run: %v", err)
+	}
+	if routed.Route == nil || *routed.Route != "parent" {
+		t.Fatalf("routed run route = %v, want \"parent\"", routed.Route)
+	}
+	got, _ := d.GetRun(routed.ID)
+	if got.Route == nil || *got.Route != "parent" {
+		t.Fatalf("reloaded routed run route = %v, want \"parent\"", got.Route)
+	}
+
+	// A blank route name is treated as the implicit default (NULL), not an empty
+	// string, so resolution falls through to the default/legacy target.
+	blank, err := d.InsertRunWithRoute(repo.ID, "feature", "abc123", "def456", "  ")
+	if err != nil {
+		t.Fatalf("insert blank-route run: %v", err)
+	}
+	if blank.Route != nil {
+		t.Errorf("blank-route run route = %v, want nil", *blank.Route)
+	}
+}
+
 func TestRunGetNotFound(t *testing.T) {
 	d := openTestDB(t)
 	got, err := d.GetRun("nonexistent")

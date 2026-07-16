@@ -7,7 +7,17 @@ CREATE TABLE IF NOT EXISTS repos (
     upstream_url   TEXT NOT NULL,
     fork_url       TEXT,
     default_branch TEXT NOT NULL DEFAULT 'main',
+    default_route  TEXT,
     created_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS routes (
+    repo_id    TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    base_url   TEXT NOT NULL,
+    fork_url   TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -19,8 +29,9 @@ CREATE TABLE IF NOT EXISTS runs (
     status               TEXT NOT NULL DEFAULT 'pending',
     pr_url               TEXT,
     error                TEXT,
-    awaiting_agent_since INTEGER,
-    parked_ms            INTEGER,
+	awaiting_agent_since INTEGER,
+	parked_ms            INTEGER,
+	route                TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -125,6 +136,7 @@ CREATE TABLE IF NOT EXISTS intent_cache (
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
+	`ALTER TABLE repos ADD COLUMN default_route TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,
@@ -135,6 +147,7 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN intent_score REAL`,
 	`ALTER TABLE runs ADD COLUMN awaiting_agent_since INTEGER`,
 	`ALTER TABLE runs ADD COLUMN parked_ms INTEGER`,
+	`ALTER TABLE runs ADD COLUMN route TEXT`,
 	`ALTER TABLE step_results ADD COLUMN last_activity_at INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,

@@ -109,3 +109,54 @@ func TestParseIntentPushOptionsNone(t *testing.T) {
 		t.Fatalf("parseIntentPushOptions(no intent) = %q, want empty", got)
 	}
 }
+
+func TestParseRoutePushOptionPresent(t *testing.T) {
+	got, err := parseRoutePushOption([]string{"ci.skip", "no-mistakes.route=parent"})
+	if err != nil {
+		t.Fatalf("parseRoutePushOption() error = %v", err)
+	}
+	if got != "parent" {
+		t.Fatalf("parseRoutePushOption() = %q, want %q", got, "parent")
+	}
+}
+
+func TestParseRoutePushOptionAbsent(t *testing.T) {
+	got, err := parseRoutePushOption([]string{"no-mistakes.skip=test", "ci.skip"})
+	if err != nil {
+		t.Fatalf("parseRoutePushOption() error = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("parseRoutePushOption(no route) = %q, want empty", got)
+	}
+}
+
+func TestParseRoutePushOptionMultipleLastWins(t *testing.T) {
+	got, err := parseRoutePushOption([]string{"no-mistakes.route=fork", "no-mistakes.route=parent"})
+	if err != nil {
+		t.Fatalf("parseRoutePushOption() error = %v", err)
+	}
+	if got != "parent" {
+		t.Fatalf("parseRoutePushOption(multiple) = %q, want last %q", got, "parent")
+	}
+}
+
+func TestParseRoutePushOptionEmptyValueRejected(t *testing.T) {
+	if _, err := parseRoutePushOption([]string{"no-mistakes.route="}); err == nil {
+		t.Fatal("expected empty route name to fail")
+	}
+	if _, err := parseRoutePushOption([]string{"no-mistakes.route=   "}); err == nil {
+		t.Fatal("expected blank route name to fail")
+	}
+}
+
+func TestParseRoutePushOptionGarbageRejected(t *testing.T) {
+	for _, bad := range []string{
+		"no-mistakes.route=has space",
+		"no-mistakes.route=../escape",
+		"no-mistakes.route=-leadingdash",
+	} {
+		if _, err := parseRoutePushOption([]string{bad}); err == nil {
+			t.Fatalf("expected garbage route %q to fail", bad)
+		}
+	}
+}

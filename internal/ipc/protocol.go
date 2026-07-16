@@ -62,6 +62,11 @@ func (e *RPCError) Error() string { return e.Message }
 // Intent, when set, is an agent-supplied description of the change. It is
 // stamped onto the run so the intent step uses it verbatim instead of inferring
 // intent from local transcripts.
+//
+// Route, when set, is the name of a local route (a no-mistakes.route push
+// option) selecting which pre-defined base/fork the run targets. It only
+// SELECTS a route stored in the local gate database by name; it can never
+// supply a base or fork URL.
 type PushReceivedParams struct {
 	// Gate is the absolute path to the gate bare repo.
 	Gate      string           `json:"gate"`
@@ -70,6 +75,7 @@ type PushReceivedParams struct {
 	New       string           `json:"new"`
 	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
 	Intent    string           `json:"intent,omitempty"`
+	Route     string           `json:"route,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.

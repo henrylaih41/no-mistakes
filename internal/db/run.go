@@ -33,11 +33,15 @@ type Run struct {
 	IntentSource    *string
 	IntentSessionID *string
 	IntentScore     *float64
-	CreatedAt       int64
-	UpdatedAt       int64
+	// Route is the name of the local route selected for this run (empty for the
+	// implicit default route). Persisted so a rerun re-resolves the SAME route
+	// the original push selected instead of silently retargeting the default.
+	Route     *string
+	CreatedAt int64
+	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, route, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -46,12 +50,18 @@ func scanRun(row interface {
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
 		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
-		&r.CreatedAt, &r.UpdatedAt,
+		&r.Route, &r.CreatedAt, &r.UpdatedAt,
 	)
 }
 
-// InsertRun creates a new run record.
+// InsertRun creates a new run record on the implicit default route.
 func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
+	return d.InsertRunWithRoute(repoID, branch, headSHA, baseSHA, "")
+}
+
+// InsertRunWithRoute creates a new run record, recording the name of the local
+// route it was resolved from (empty for the implicit default route).
+func (d *DB) InsertRunWithRoute(repoID, branch, headSHA, baseSHA, route string) (*Run, error) {
 	ts := now()
 	r := &Run{
 		ID:        newID(),
@@ -63,9 +73,13 @@ func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
 		CreatedAt: ts,
 		UpdatedAt: ts,
 	}
+	trimmed := strings.TrimSpace(route)
+	if trimmed != "" {
+		r.Route = &trimmed
+	}
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, route, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, nullableString(trimmed), r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

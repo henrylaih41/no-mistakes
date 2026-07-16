@@ -362,6 +362,68 @@ func TestRerunSkipStepsConfiguresExecutor(t *testing.T) {
 	}
 }
 
+func TestRerunFallsBackWhenStoredRouteDeleted(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{step}
+	})
+
+	repo, headSHA := setupTestGitRepo(t, p, d, "rerun-deleted-route-repo")
+	if _, err := d.AddRoute(repo.ID, "parent", "https://github.com/parent/repo.git", ""); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:  p.RepoDir("rerun-deleted-route-repo"),
+		Ref:   "refs/heads/main",
+		Old:   "0000000000000000000000000000000000000000",
+		New:   headSHA,
+		Route: "parent",
+	}, &first); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, first.RunID)
+
+	firstRun, err := d.GetRun(first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRun.Route == nil || *firstRun.Route != "parent" {
+		t.Fatalf("first run route = %v, want %q", firstRun.Route, "parent")
+	}
+
+	// Delete the route the original push selected, then rerun. The rerun must
+	// fall back to the default/legacy target rather than failing with
+	// "unknown route".
+	if _, err := d.RemoveRoute(repo.ID, "parent"); err != nil {
+		t.Fatalf("remove route: %v", err)
+	}
+
+	var second ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
+		RepoID: "rerun-deleted-route-repo",
+		Branch: "main",
+	}, &second); err != nil {
+		t.Fatalf("rerun after route deletion should not fail: %v", err)
+	}
+	waitForRunTerminalState(t, d, second.RunID)
+
+	secondRun, err := d.GetRun(second.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondRun.Route != nil {
+		t.Fatalf("rerun route = %v, want nil after fallback", *secondRun.Route)
+	}
+}
+
 func TestPushReceivedReturnsBeforeIntentSummarization(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)

@@ -536,8 +536,17 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 		return "", fmt.Errorf("unknown repo for gate %s", params.Gate)
 	}
 
+	// Resolve the selected route (or the default/legacy target) into the run's
+	// effective base/fork BEFORE the run is created. An explicit but unknown
+	// route name fails fast here so the error surfaces to the pusher via the
+	// post-receive hook instead of silently falling back.
+	effectiveRepo, effectiveRoute, err := m.resolveRepoRoute(repo, params.Route)
+	if err != nil {
+		return "", err
+	}
+
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
+	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, effectiveRoute)
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
@@ -580,18 +589,48 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 		return "", fmt.Errorf("no previous run for branch %s", branch)
 	}
 
-	baseSHA := latestForBranch.BaseSHA
+	sourceRun := latestForBranch
 	if matchingHead != nil {
-		baseSHA = matchingHead.BaseSHA
+		sourceRun = matchingHead
+	}
+	baseSHA := sourceRun.BaseSHA
+
+	// A rerun carries no route push-option, so it re-resolves the SAME route
+	// the original push selected (persisted on the run). Re-resolving by name
+	// (rather than reusing stored URLs) honors a later edit to the route
+	// definition, and keeps a rerun target-stable instead of silently
+	// retargeting the current default route. An empty stored route resolves the
+	// default/legacy target, preserving pre-routes behavior.
+	routeName := ""
+	if sourceRun.Route != nil {
+		routeName = strings.TrimSpace(*sourceRun.Route)
+	}
+	// The named route may have been removed since the original push. Fall back
+	// to the default/legacy target rather than hard-failing the rerun, mirroring
+	// the dangling-default-route fallback in resolveRoute. resolveRepoRoute would
+	// otherwise treat a stored-but-unknown name as a fail-fast push selector.
+	if routeName != "" {
+		r, lookupErr := m.db.GetRoute(repo.ID, routeName)
+		if lookupErr != nil {
+			return "", fmt.Errorf("look up route %q: %w", routeName, lookupErr)
+		}
+		if r == nil {
+			slog.Warn("route stored on previous run no longer exists; falling back to default/legacy target for rerun", "repo_id", repo.ID, "route", routeName)
+			routeName = ""
+		}
+	}
+	effectiveRepo, effectiveRoute, err := m.resolveRepoRoute(repo, routeName)
+	if err != nil {
+		return "", err
 	}
 
-	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent)
+	return m.startRun(ctx, effectiveRepo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, effectiveRoute)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string) (string, error) {
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, route string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -618,8 +657,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
-	// Create run record.
-	run, err := m.db.InsertRun(repo.ID, branch, headSHA, baseSHA)
+	// Create run record. The selected route name is persisted so a later rerun
+	// re-resolves the same target instead of falling back to the default route.
+	run, err := m.db.InsertRunWithRoute(repo.ID, branch, headSHA, baseSHA, route)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
