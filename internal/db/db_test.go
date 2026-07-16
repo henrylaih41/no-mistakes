@@ -46,6 +46,9 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
 	}
+	if !hasColumn(t, d, "runs", "review_loop_disabled") {
+		t.Fatal("runs.review_loop_disabled column missing from fresh schema")
+	}
 }
 
 func TestOpenCreatesStepRoundsTable(t *testing.T) {

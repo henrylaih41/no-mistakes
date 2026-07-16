@@ -65,6 +65,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			reviewLoopDisabled, err := parseReviewLoopPushOption(pushOptions)
+			if err != nil {
+				return err
+			}
 			designContextPaths, err := designcontext.ParsePushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -95,6 +99,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				Intent:             intent,
 				Route:              route,
 				DesignContextPaths: designContextPaths,
+				ReviewLoopDisabled: reviewLoopDisabled,
 			}, &result)
 		},
 	}
@@ -214,6 +219,50 @@ func parseRoutePushOption(options []string) (string, error) {
 		route = name
 	}
 	return route, nil
+}
+
+const reviewLoopPushOptionPrefix = "no-mistakes.review-loop="
+
+// parseReviewLoopPushOption extracts the per-push review-loop override. It can
+// only disable the auxiliary Devin loop for one run; enabling or reconfiguring
+// the loop remains controlled by trust-gated config.
+func parseReviewLoopPushOption(options []string) (bool, error) {
+	disabled := false
+	for _, option := range options {
+		value, ok := strings.CutPrefix(option, reviewLoopPushOptionPrefix)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(value) == "" {
+			return false, fmt.Errorf("empty review-loop value in push option %q (use no-mistakes.review-loop=off)", option)
+		}
+		parsed, err := parseReviewLoopValue(value)
+		if err != nil {
+			return false, fmt.Errorf("unsupported review-loop push option %q: only no-mistakes.review-loop=off is allowed", option)
+		}
+		if parsed {
+			disabled = true
+		}
+	}
+	return disabled, nil
+}
+
+func parseReviewLoopValue(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return false, nil
+	case "off", "false", "disabled", "disable", "0":
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported review-loop value %q", value)
+	}
+}
+
+func formatReviewLoopPushOption(disabled bool) string {
+	if !disabled {
+		return ""
+	}
+	return reviewLoopPushOptionPrefix + "off"
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {

@@ -2,9 +2,12 @@ package steps
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestDevinSeverityToFinding(t *testing.T) {
@@ -58,6 +61,53 @@ func TestDevinFailureOutcomeMapsSeveritiesAndBlocks(t *testing.T) {
 	// high/medium/low severities it would not.
 	if !hasBlockingFindings(parsed.Items) {
 		t.Error("expected mapped findings to be blocking")
+	}
+}
+
+// TestWithDevinManualVerify_FoldsSignalIntoCIFailureOutcome is the review-codex-2-1
+// regression: when checks are failing AND Devin reported a body-only not-green
+// signal, the CI-failure park must still carry the manual-verify finding so the
+// not-green Devin signal is never hidden behind a CI-only gate (ruling #3). An
+// empty reason (no manual-review state) must be a byte-identical no-op.
+func TestWithDevinManualVerify_FoldsSignalIntoCIFailureOutcome(t *testing.T) {
+	t.Parallel()
+
+	base := ciFailureOutcome([]string{"build"}, false, "CI failures require manual intervention")
+	if got := withDevinManualVerify(base, ""); got.Findings != base.Findings {
+		t.Fatalf("empty reason must not alter findings:\n got %q\nwant %q", got.Findings, base.Findings)
+	}
+
+	combined := withDevinManualVerify(
+		ciFailureOutcome([]string{"build"}, false, "CI failures require manual intervention"),
+		cimonitor.ReviewManualVerifyMsg,
+	)
+	if !combined.NeedsApproval {
+		t.Fatal("combined outcome must still be a NeedsApproval park")
+	}
+	var parsed Findings
+	if err := json.Unmarshal([]byte(combined.Findings), &parsed); err != nil {
+		t.Fatalf("unmarshal findings: %v", err)
+	}
+	if !strings.Contains(parsed.Summary, cimonitor.ReviewManualVerifyMsg) {
+		t.Errorf("summary must mention the manual-verify reason, got %q", parsed.Summary)
+	}
+	foundCheck, foundManual := false, false
+	for _, it := range parsed.Items {
+		if strings.Contains(it.Description, "build") {
+			foundCheck = true
+		}
+		if it.Description == cimonitor.ReviewManualVerifyMsg {
+			foundManual = true
+			if it.Action != types.ActionAskUser {
+				t.Errorf("manual-verify finding action = %q, want %q", it.Action, types.ActionAskUser)
+			}
+		}
+	}
+	if !foundCheck {
+		t.Error("combined outcome must still carry the failing-check finding")
+	}
+	if !foundManual {
+		t.Error("combined outcome must carry the Devin manual-verify finding")
 	}
 }
 

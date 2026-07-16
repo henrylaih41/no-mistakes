@@ -554,7 +554,7 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.DesignContextPaths, effectiveRoute)
+	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.DesignContextPaths, params.ReviewLoopDisabled, effectiveRoute)
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch by
@@ -563,7 +563,7 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 // `axi run` bootstrap path), in which case it starts the FIRST run from the gate
 // head with a zero-SHA base. Optional intent and design-context paths are
 // stamped/materialized onto the new run.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, expectedHead string, skipSteps []types.StepName, intent string, designContextPaths []string) (string, error) {
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, expectedHead string, skipSteps []types.StepName, intent string, designContextPaths []string, reviewLoopDisabled bool) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -613,7 +613,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, expectedHe
 		if err != nil {
 			return "", err
 		}
-		return m.startRun(ctx, effectiveRepo, branch, headSHA, git.ZeroSHA, "bootstrap", skipSteps, intent, designContextPaths, effectiveRoute)
+		return m.startRun(ctx, effectiveRepo, branch, headSHA, git.ZeroSHA, "bootstrap", skipSteps, intent, designContextPaths, reviewLoopDisabled, effectiveRoute)
 	}
 
 	sourceRun := latestForBranch
@@ -651,14 +651,14 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, expectedHe
 		return "", err
 	}
 
-	return m.startRun(ctx, effectiveRepo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, designContextPaths, effectiveRoute)
+	return m.startRun(ctx, effectiveRepo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, designContextPaths, reviewLoopDisabled, effectiveRoute)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts. Design-context files are
 // materialized once here so all review/fix rounds use the same contract.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string, designContextPaths []string, route string) (string, error) {
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string, designContextPaths []string, reviewLoopDisabled bool, route string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -691,6 +691,14 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
+	}
+	if reviewLoopDisabled {
+		if err := m.db.UpdateRunReviewLoopDisabled(run.ID, true); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("stamp_review_loop_override")
+			return "", err
+		}
+		run.ReviewLoopDisabled = true
 	}
 
 	// Stamp an agent-supplied intent onto the run before the pipeline starts,

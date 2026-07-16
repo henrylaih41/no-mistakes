@@ -1013,9 +1013,16 @@ func reviewThreadNode(databaseID int64, path string, line int, body string) stri
 }
 
 // devinReviewsJSON renders the REST pulls/{n}/reviews response: a COMMENTED
-// review by the bot (REST-form login with "[bot]" + type "Bot") on the head SHA.
+// review by the bot (REST-form login with "[bot]" + type "Bot") on the head SHA
+// carrying Devin's clean top-level verdict body.
 func devinReviewsJSON(headSHA string) string {
-	return fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, headSHA)
+	return fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"body":"## ✅ Devin Review: No Issues Found","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, headSHA)
+}
+
+// devinReviewsJSONWithBody is devinReviewsJSON with a caller-supplied top-level
+// review body, for exercising the findings/ambiguous body verdicts.
+func devinReviewsJSONWithBody(headSHA, body string) string {
+	return fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"body":%q,"user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, headSHA, body)
 }
 
 // TestCIStep_DevinGreenProceedsToReady is the Bug 2 acceptance test: with no
@@ -1239,5 +1246,295 @@ func TestCIStep_DevinNeverReviewedStillWaits(t *testing.T) {
 	}
 	if cimonitor.ChecksPassed(logs) {
 		t.Fatalf("cimonitor.ChecksPassed = true, want false (Devin never reviewed → not ready): %v", logs)
+	}
+}
+
+// TestCIStep_DevinFindingsBodyNoThreadsNeedsManualReview is the nm#20 /
+// review-claude-1-1 acceptance test: Devin's COMMENTED review body reports
+// findings on the current head, but no file-scoped threads loaded. The loop must
+// NOT run the auto-fixer (which would fabricate changes for a problem it cannot
+// see, ruling #11) — once the grace window elapses it must park at the human gate
+// with the explicit "manual verify" reason.
+func TestCIStep_DevinFindingsBodyNoThreadsNeedsManualReview(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	env := fakeCIGHWithReviews(t, "OPEN", "[]",
+		devinReviewsJSONWithBody(headSHA, "## ⚠️ Devin Review: Found 2 potential issues"),
+		reviewThreadsEnvelope(), // body says found N, but no threads load
+	)
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("auto-fixer must not run when Devin's findings could not be loaded")
+		return nil, nil
+	}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = time.Hour
+	sctx.Config.ReviewLoop = config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{
+		checksGracePeriod:    time.Minute,
+		pollIntervalOverride: 5 * time.Minute, // jump past the 11m Devin grace window
+		now:                  func() time.Time { return current },
+		baseBranchTip:        func(context.Context) (string, bool) { return "basetip", true },
+		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			if current.Sub(started) >= time.Hour {
+				cancel()
+				return ctx.Err()
+			}
+			current = current.Add(interval)
+			return nil
+		},
+	}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked outcome", err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("expected a NeedsApproval park for manual review, got %+v", outcome)
+	}
+	if !strings.Contains(outcome.Findings, "manual verify") {
+		t.Fatalf("park findings must carry the manual-verify reason, got %q", outcome.Findings)
+	}
+	foundManual := false
+	for _, l := range logs {
+		if strings.Contains(l, cimonitor.ReviewManualVerifyMsg) {
+			foundManual = true
+		}
+	}
+	if !foundManual {
+		t.Fatalf("expected %q in logs, got: %v", cimonitor.ReviewManualVerifyMsg, logs)
+	}
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("cimonitor.ChecksPassed = true, want false (manual review needed → not ready): %v", logs)
+	}
+}
+
+// TestCIStep_FailingCheckWithDevinManualReviewSurfacesBothAtTimeout is the
+// review-codex-2-1 acceptance test: when a CI check is failing AND Devin reported
+// a body-only not-green signal on the current head (findings, no loadable
+// threads), the CI-failure park must NOT hide the manual-verify signal (ruling
+// #3). A failing check plus a still-pending check keeps the monitor in the
+// "waiting on checks" branch until the CI timeout fires, at which point the
+// combined outcome must carry BOTH the failing check and the manual-verify
+// finding.
+func TestCIStep_FailingCheckWithDevinManualReviewSurfacesBothAtTimeout(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	checksJSON := `[{"name":"build","state":"FAILURE","bucket":"fail"},{"name":"deploy","state":"PENDING","bucket":"pending"}]`
+	env := fakeCIGHWithReviews(t, "OPEN", checksJSON,
+		devinReviewsJSONWithBody(headSHA, "## ⚠️ Devin Review: Found 2 potential issues"),
+		reviewThreadsEnvelope(), // body says found N, but no threads load -> manual verify
+	)
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("auto-fixer must not run while a check is still pending")
+		return nil, nil
+	}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 30 * time.Minute
+	sctx.Config.ReviewLoop = config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{
+		checksGracePeriod:    time.Minute,
+		pollIntervalOverride: 5 * time.Minute, // step past the 11m Devin grace window before timeout
+		now:                  func() time.Time { return current },
+		baseBranchTip:        func(context.Context) (string, bool) { return "basetip", true },
+		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			current = current.Add(interval)
+			if current.Sub(started) > 2*time.Hour { // safety net against a stuck loop
+				cancel()
+				return ctx.Err()
+			}
+			return nil
+		},
+	}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked timeout outcome", err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("expected a NeedsApproval park, got %+v", outcome)
+	}
+	if !strings.Contains(outcome.Findings, "build") {
+		t.Errorf("park findings must carry the failing check, got %q", outcome.Findings)
+	}
+	if !strings.Contains(outcome.Findings, cimonitor.ReviewManualVerifyMsg) {
+		t.Errorf("park findings must also carry the Devin manual-verify signal, got %q", outcome.Findings)
+	}
+}
+
+// TestCIStep_FailingCheckWithDevinManualReviewPendingWithinGraceSurfacesBoth is
+// the review-codex-2-1 within-grace regression test. Before the fix, a
+// MANUAL_REVIEW verdict (body-only not-green: "found N potential issues", no
+// loadable threads) was downgraded to a plain pending during the 11-minute
+// grace window, so it carried NO manual-verify reason. If a CI gate parked in
+// the same poll before the window elapsed — here a failing check with auto-fix
+// disabled — the body-only not-green signal disappeared behind the CI-only park
+// (ruling #3 violation). The fix keeps a distinct manual-review-pending signal
+// during grace and folds it into the earlier CI gate, so the park must carry
+// BOTH the failing check AND the awaiting-manual-verify reason.
+func TestCIStep_FailingCheckWithDevinManualReviewPendingWithinGraceSurfacesBoth(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	// A failing check with NO pending check: all checks are done this poll, so the
+	// monitor decides to park immediately rather than wait for pending checks.
+	checksJSON := `[{"name":"build","state":"FAILURE","bucket":"fail"}]`
+	env := fakeCIGHWithReviews(t, "OPEN", checksJSON,
+		devinReviewsJSONWithBody(headSHA, "## ⚠️ Devin Review: Found 2 potential issues"),
+		reviewThreadsEnvelope(), // body says found N, but no threads load -> manual verify
+	)
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("auto-fixer must not run when CI auto-fix is disabled")
+		return nil, nil
+	}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = time.Hour
+	sctx.Config.AutoFix = config.AutoFix{CI: 0} // disabled -> park immediately, still within grace
+	sctx.Config.ReviewLoop = config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{
+		checksGracePeriod:    time.Minute,
+		pollIntervalOverride: time.Second, // stay well within the 11m Devin grace window
+		now:                  func() time.Time { return current },
+		baseBranchTip:        func(context.Context) (string, bool) { return "basetip", true },
+		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			// The disabled-auto-fix park returns on the first poll; if we ever loop,
+			// bail out rather than spin so a regression surfaces as a failure.
+			cancel()
+			return ctx.Err()
+		},
+	}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked outcome within grace", err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("expected a NeedsApproval park, got %+v", outcome)
+	}
+	if !strings.Contains(outcome.Findings, "build") {
+		t.Errorf("park findings must carry the failing check, got %q", outcome.Findings)
+	}
+	if !strings.Contains(outcome.Findings, cimonitor.ReviewManualVerifyPendingMsg) {
+		t.Errorf("park findings must also carry the pending Devin manual-verify signal (never hidden during grace), got %q", outcome.Findings)
+	}
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("cimonitor.ChecksPassed = true, want false (manual review pending -> not ready): %v", logs)
+	}
+}
+
+// TestCIStep_DevinAmbiguousBodyLogsExplicitReason is the review-codex-2-1
+// acceptance test: a current-head COMMENTED review whose body carries no
+// recognizable verdict must surface an explicit "ambiguous body" reason rather
+// than the generic "waiting on Devin review" (which conflates it with "the bot
+// has not reviewed this head yet").
+func TestCIStep_DevinAmbiguousBodyLogsExplicitReason(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	env := fakeCIGHWithReviews(t, "OPEN", "[]",
+		devinReviewsJSONWithBody(headSHA, "## Devin Review\nI looked at this change."),
+		reviewThreadsEnvelope(), // no threads; body is unrecognized
+	)
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 10 * time.Second
+	// Fail-closed so the ambiguous state keeps its distinct pending reason rather
+	// than fail-opening to green while we assert on the log.
+	sctx.Config.ReviewLoop = config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: false}
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{
+		checksGracePeriod:    50 * time.Millisecond,
+		pollIntervalOverride: 50 * time.Millisecond,
+		now:                  func() time.Time { return current },
+		baseBranchTip:        func(context.Context) (string, bool) { return "basetip", true },
+		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			if current.Sub(started) >= 300*time.Millisecond {
+				cancel()
+				return ctx.Err()
+			}
+			current = current.Add(interval)
+			return nil
+		},
+	}
+	_, err := step.Execute(sctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation while waiting on an ambiguous body, got %v", err)
+	}
+
+	foundAmbiguous := false
+	foundWaiting := false
+	for _, l := range logs {
+		if strings.Contains(l, cimonitor.ReviewBodyAmbiguousMsg) {
+			foundAmbiguous = true
+		}
+		if strings.Contains(l, cimonitor.WaitingOnReviewMsg) {
+			foundWaiting = true
+		}
+	}
+	if !foundAmbiguous {
+		t.Fatalf("expected %q in logs (ambiguous body → explicit reason), got: %v", cimonitor.ReviewBodyAmbiguousMsg, logs)
+	}
+	if foundWaiting {
+		t.Fatalf("ambiguous body must not be logged as generic %q, got: %v", cimonitor.WaitingOnReviewMsg, logs)
+	}
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("cimonitor.ChecksPassed = true, want false (ambiguous body → not ready): %v", logs)
 	}
 }

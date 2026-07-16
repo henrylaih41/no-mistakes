@@ -440,7 +440,7 @@ func TestConfigErrorForFreshAxiRunAllowsReattach(t *testing.T) {
 }
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
-	params := rerunParams("repo-1", "feature/x", "head-abc", []types.StepName{types.StepReview}, "user goal", []string{"/tmp/design.md"})
+	params := rerunParams("repo-1", "feature/x", "head-abc", []types.StepName{types.StepReview}, "user goal", []string{"/tmp/design.md"}, true)
 	if params.RepoID != "repo-1" || params.Branch != "feature/x" || params.Intent != "user goal" {
 		t.Fatalf("unexpected rerun params: %#v", params)
 	}
@@ -452,6 +452,9 @@ func TestRerunParamsIncludeSkipSteps(t *testing.T) {
 	}
 	if len(params.DesignContextPaths) != 1 || params.DesignContextPaths[0] != "/tmp/design.md" {
 		t.Fatalf("DesignContextPaths = %#v, want /tmp/design.md", params.DesignContextPaths)
+	}
+	if !params.ReviewLoopDisabled {
+		t.Fatal("ReviewLoopDisabled = false, want true")
 	}
 }
 
@@ -683,7 +686,7 @@ func TestAxiRunReportsInvalidGlobalConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if err := runAxiRun(cmd, false, nil, "user goal", nil); err == nil {
+	if err := runAxiRun(cmd, false, nil, "user goal", nil, false); err == nil {
 		t.Fatalf("axi run should fail on invalid global config:\n%s", out.String())
 	}
 	got := out.String()

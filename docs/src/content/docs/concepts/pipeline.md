@@ -83,6 +83,7 @@ You can't reorder steps. You *can*:
 - Ignore paths during review and documentation checks.
 - Disable or tune transcript-based intent extraction when intent is not supplied directly.
 - Skip steps for one run with `no-mistakes --skip <steps>`, `git push -o no-mistakes.skip=<steps>`, `no-mistakes axi run --skip <steps>`, or from the TUI.
+- Disable only the auxiliary Devin review loop for one run with `no-mistakes axi run --review-loop=off` or `git push -o no-mistakes.review-loop=off`; the `ci` step still monitors checks, merge, and close state.
 
 See [Configuration](/no-mistakes/guides/configuration/).
 

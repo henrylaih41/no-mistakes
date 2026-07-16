@@ -32,6 +32,29 @@ func TestUpdateRunDesignContextRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUpdateRunReviewLoopDisabledRoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/repo", "https://github.com/test/repo.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	if run.ReviewLoopDisabled {
+		t.Fatal("fresh run ReviewLoopDisabled = true, want false")
+	}
+
+	if err := d.UpdateRunReviewLoopDisabled(run.ID, true); err != nil {
+		t.Fatalf("UpdateRunReviewLoopDisabled: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if !got.ReviewLoopDisabled {
+		t.Fatal("ReviewLoopDisabled did not round-trip")
+	}
+}
+
 func TestRunInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

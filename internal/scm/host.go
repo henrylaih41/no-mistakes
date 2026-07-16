@@ -172,9 +172,23 @@ const (
 	// VerdictChangesRequested means the bot reviewed the current head SHA and
 	// left at least one unresolved severe (high/medium) file-scoped finding.
 	VerdictChangesRequested ReviewVerdict = "CHANGES_REQUESTED"
+	// VerdictManualReview means the bot reviewed the current head SHA and its
+	// top-level review body reports findings ("found N potential issues"), but no
+	// file-scoped findings could be loaded to drive an automated fix (the inline
+	// threads are missing, filtered to another commit, or unreadable). This is
+	// not green and never becomes green on its own: a human must verify, because
+	// running the auto-fixer with nothing concrete to fix would fabricate edits.
+	VerdictManualReview ReviewVerdict = "MANUAL_REVIEW"
 	// VerdictPending means the bot has reviewed the PR before but not yet the
 	// current head SHA (e.g. a re-review is still in flight after a new push).
 	VerdictPending ReviewVerdict = "PENDING"
+	// VerdictPendingAmbiguous means the bot reviewed the current head SHA with a
+	// COMMENTED state whose top-level body carries no recognizable clean/finding
+	// verdict, and no severe file-scoped findings were loaded. It follows the same
+	// pending/fail-open path as VerdictPending, but is a distinct value so callers
+	// can surface an explicit "review body ambiguous" reason rather than
+	// conflating it with "the bot has not reviewed this head yet".
+	VerdictPendingAmbiguous ReviewVerdict = "PENDING_AMBIGUOUS"
 	// VerdictNone means the bot has never reviewed the PR.
 	VerdictNone ReviewVerdict = "NONE"
 )

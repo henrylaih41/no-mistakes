@@ -154,6 +154,8 @@ branch, marking the remaining steps as skipped.
 3. If blocking findings remain, or any finding has `action: ask-user`, pause and wait for user action
 4. `action: no-op` findings are informational only; the user can approve, fix selected findings, skip, or cancel the run when the step pauses
 
+A step can attach an auto-resolver to an approval gate so it clears without user action once the external condition that forced the pause resolves on its own - for example the CI idle-timeout or Devin manual-verify gate when the PR is merged or closed out-of-band.
+
 While the executor is paused at an approval or fix-review gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
 That timestamp is observability only and does not alter approval behavior.
 When the wait ends, it atomically clears the marker and adds the elapsed wall time to the run's local parked-time total, so a crash cannot leave that time undercounted.
