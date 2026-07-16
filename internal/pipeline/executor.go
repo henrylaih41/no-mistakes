@@ -365,7 +365,8 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx); reconciled {
 		if dbErr := e.db.ExitApprovalGate(context.Background(), run.ID, gate.stepResult.ID, types.StepStatusCompleted, time.Since(parkStart).Milliseconds(), nil); dbErr != nil {
-			return e.failRun(run, repo, fmt.Errorf("exit reconciled approval gate for step %s: %w", gate.step.Name(), dbErr), ctx)
+			exitErr := e.recoverApprovalGateExit(run.ID, gate.stepResult.ID, time.Since(parkStart).Milliseconds(), fmt.Errorf("exit reconciled approval gate for step %s: %w", gate.step.Name(), dbErr))
+			return e.failRun(run, repo, exitErr, ctx)
 		}
 		return completeReconciledGate()
 	} else if reconcileErr != nil && ctx.Err() == nil {

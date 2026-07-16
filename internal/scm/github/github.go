@@ -499,7 +499,7 @@ const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cur
 // ghReviewThreadsResponse is the `gh api graphql` payload for reviewThreadsQuery.
 type ghReviewThreadsResponse struct {
 	Data struct {
-		Repository struct {
+		Repository *struct {
 			PullRequest struct {
 				ReviewThreads struct {
 					PageInfo struct {
@@ -549,17 +549,16 @@ type ghThreadAuthor struct {
 	Typename string `json:"__typename"`
 }
 
-// ownerName resolves the repo slug into its owner and name. When the slug is
-// unknown it falls back to gh's {owner}/{repo} placeholders, which `gh api`
-// (including graphql -F field values) fills from the working-dir repo — the
-// graphql analogue of apiArgs()'s placeholder fallback.
-func (h *Host) ownerName() (string, string) {
+// ownerName resolves the configured repo slug into its GraphQL variables.
+// Unlike REST endpoint placeholders, GraphQL field values cannot infer the
+// repository from the working directory, so an unresolved slug is an error.
+func (h *Host) ownerName() (string, string, error) {
 	owner, name, ok := strings.Cut(h.repo, "/")
 	owner, name = strings.TrimSpace(owner), strings.TrimSpace(name)
 	if !ok || owner == "" || name == "" {
-		return "{owner}", "{repo}"
+		return "", "", fmt.Errorf("github repository slug %q is not owner/name", h.repo)
 	}
-	return owner, name
+	return owner, name, nil
 }
 
 // reviewThreadsArgs builds the `gh api graphql` invocation that fetches one page
@@ -572,8 +571,11 @@ func (h *Host) ownerName() (string, string) {
 // all-numeric value (e.g. a repo literally named "123") into a JSON number,
 // which then fails to bind to the String! GraphQL variable. The integer number
 // variable still uses -F so it binds to Int!.
-func (h *Host) reviewThreadsArgs(prNumber int, cursor string) []string {
-	owner, name := h.ownerName()
+func (h *Host) reviewThreadsArgs(prNumber int, cursor string) ([]string, error) {
+	owner, name, err := h.ownerName()
+	if err != nil {
+		return nil, err
+	}
 	args := []string{
 		"api", "graphql",
 		"-f", "query=" + reviewThreadsQuery,
@@ -584,7 +586,7 @@ func (h *Host) reviewThreadsArgs(prNumber int, cursor string) []string {
 	if cursor != "" {
 		args = append(args, "-f", "cursor="+cursor)
 	}
-	return args
+	return args, nil
 }
 
 // ghReview is a PR review object from `gh api repos/{owner}/{repo}/pulls/{n}/reviews`.
@@ -643,13 +645,20 @@ func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLog
 	var threads []ghReviewThread
 	cursor := ""
 	for {
-		out, err := h.cmd(ctx, "gh", h.reviewThreadsArgs(prNumber, cursor)...).Output()
+		args, err := h.reviewThreadsArgs(prNumber, cursor)
+		if err != nil {
+			return nil, fmt.Errorf("build review threads request: %w", err)
+		}
+		out, err := h.cmd(ctx, "gh", args...).Output()
 		if err != nil {
 			return nil, fmt.Errorf("gh api graphql reviewThreads: %w", err)
 		}
 		var resp ghReviewThreadsResponse
 		if err := json.Unmarshal(out, &resp); err != nil {
 			return nil, fmt.Errorf("parse review threads: %w", err)
+		}
+		if resp.Data.Repository == nil {
+			return nil, fmt.Errorf("parse review threads: repository is null")
 		}
 		rt := resp.Data.Repository.PullRequest.ReviewThreads
 		threads = append(threads, rt.Nodes...)

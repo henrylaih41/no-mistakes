@@ -154,6 +154,32 @@ exit 0
 	}
 }
 
+func TestGrokAgent_Run_ReapsLeakedGrandchildOnCleanExit(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	bin := writeFakeGrok(t, dir, `#!/bin/sh
+( sleep 120 >/dev/null 2>&1 ) &
+echo $! > "`+pidFile+`"
+printf 'ok\n'
+exit 0
+`, "")
+
+	ga := &grokAgent{bin: bin}
+	result, err := ga.Run(context.Background(), RunOpts{Prompt: "review", CWD: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Text != "ok" {
+		t.Fatalf("unexpected agent text: %q", result.Text)
+	}
+
+	grandchild := waitForPidFile(t, pidFile, 5*time.Second)
+	if !pidGoneWithin(grandchild, 5*time.Second) {
+		_ = syscall.Kill(grandchild, syscall.SIGKILL)
+		t.Fatalf("grandchild pid %d still alive after clean Grok exit", grandchild)
+	}
+}
+
 func TestCodexAgent_Run_ReapsGrandchildHoldingStdoutPipeOnLeaderExit(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "grandchild.pid")

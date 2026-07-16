@@ -382,7 +382,11 @@ func graphqlThreadsKey(repo string, prNumber int, cursor ...string) string {
 	if len(cursor) > 0 {
 		c = cursor[0]
 	}
-	return strings.TrimSpace("gh " + strings.Join(h.reviewThreadsArgs(prNumber, c), " "))
+	args, err := h.reviewThreadsArgs(prNumber, c)
+	if err != nil {
+		panic(err)
+	}
+	return strings.TrimSpace("gh " + strings.Join(args, " "))
 }
 
 // reviewThreadsResponse wraps thread nodes in the graphql envelope the production
@@ -512,6 +516,39 @@ func TestGetBotFindingsReturnsOnlyLiveBotThreads(t *testing.T) {
 		case "internal/old/outdated.go", "internal/old/resolved.go", "internal/human/note.go":
 			t.Errorf("addressed/non-bot thread leaked as a finding: %+v", f)
 		}
+	}
+}
+
+func TestGetBotFindingsUnresolvedRepoFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	unresolvedKey := strings.TrimSpace("gh " + strings.Join([]string{
+		"api", "graphql",
+		"-f", "query=" + reviewThreadsQuery,
+		"-f", "owner={owner}",
+		"-f", "name={repo}",
+		"-F", "number=7",
+	}, " "))
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		unresolvedKey: {stdout: `{"data":{"repository":null}}` + "\n"},
+	}), nil, "", "")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err == nil || !strings.Contains(err.Error(), "repository slug") {
+		t.Fatalf("GetBotFindings() = (%v, %v), want unresolved repository slug error", findings, err)
+	}
+}
+
+func TestGetBotFindingsNullRepositoryFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		graphqlThreadsKey("test/repo", 7): {stdout: `{"data":{"repository":null}}` + "\n"},
+	}), nil, "", "test/repo")
+
+	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
+	if err == nil || !strings.Contains(err.Error(), "repository is null") {
+		t.Fatalf("GetBotFindings() = (%v, %v), want null repository error", findings, err)
 	}
 }
 

@@ -590,6 +590,81 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	}
 }
 
+func TestExecutor_ResumeReconciledGateExitFailureClearsParkedMarker(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"ci-1","severity":"warning","description":"waiting","action":"ask-user"}],"summary":"waiting"}`
+	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 25); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.EnterApprovalGate(context.Background(), run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 25, nil); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := fmt.Sprintf(`
+		CREATE TRIGGER abort_reconciled_gate_exit
+		BEFORE UPDATE OF awaiting_agent_since ON runs
+		WHEN OLD.id = '%s'
+		 AND NEW.awaiting_agent_since IS NULL
+		 AND NEW.status = OLD.status
+		BEGIN
+			SELECT RAISE(ABORT, 'forced reconciled gate exit failure');
+		END`, run.ID)
+	if _, err := raw.Exec(trigger); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	step := &reconcilingApprovalStep{name: types.StepCI}
+	step.resolved.Store(true)
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	err = exec.Resume(context.Background(), run, repo, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "forced reconciled gate exit failure") {
+		t.Fatalf("Resume() error = %v, want forced reconciled gate exit failure", err)
+	}
+
+	storedRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.Status != types.RunFailed {
+		t.Fatalf("run status = %s, want failed", storedRun.Status)
+	}
+	if storedRun.AwaitingAgentSince != nil {
+		t.Fatalf("awaiting_agent_since = %d on failed reconciled run, want nil", *storedRun.AwaitingAgentSince)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
+		t.Fatalf("steps = %+v, want one failed step", steps)
+	}
+}
+
 func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
