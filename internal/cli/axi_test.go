@@ -290,6 +290,30 @@ func TestFormatParkedFor(t *testing.T) {
 	}
 }
 
+// A gate whose findings JSON cannot be parsed must not render as a silent
+// empty gate: the output names the unreadable payload and points at the step
+// log so the responder knows why no findings rows follow.
+func TestWriteGateShape_UnreadableFindingsAreNamed(t *testing.T) {
+	gate := stepView{
+		Name:         "review",
+		Status:       "awaiting_approval",
+		FindingsJSON: `{"findings":[{"severity":"error","description":"truncated`,
+	}
+	out := axiDoc(gateFields(gate)...)
+
+	for _, want := range []string{
+		"gate:\n",
+		"  step: review\n",
+		"findings_unreadable:",
+		"could not be parsed",
+		"no-mistakes axi logs --step review --full",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("unreadable-findings gate output missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 func TestWriteGateShape(t *testing.T) {
 	gate := stepView{
 		Name:   "review",

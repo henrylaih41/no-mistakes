@@ -371,7 +371,7 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 					ID:          "intent-removed-required-behavior",
 					Severity:    "error",
 					Action:      types.ActionAskUser,
-					Description: "the fix deletes the intent-required guarded stale-lock removal, leaving rejected retry-only",
+					Description: "the fix deletes the intent-required guarded stale-lock removal, leaving rejected retry-only; decision: keep the REQUIRED guarded-removal criterion or change it to retry-only; keeping it restores stale-lock recovery, changing it leaves wedged locks unrecoverable; recommendation: keep the criterion and restore the guarded removal",
 				}},
 				RiskLevel: "high",
 			}

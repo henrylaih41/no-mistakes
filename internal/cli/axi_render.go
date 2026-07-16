@@ -448,7 +448,7 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 // gateFields renders the active approval gate: the awaiting step, its findings
 // table, and the next-step commands an agent can run to clear it.
 func gateFields(gate stepView) []toon.Field {
-	parsed, _ := types.ParseFindingsJSON(gate.FindingsJSON)
+	parsed, parseErr := types.ParseFindingsJSON(gate.FindingsJSON)
 	gfields := []toon.Field{
 		{Key: "step", Value: gate.Name},
 		{Key: "status", Value: gate.Status},
@@ -467,6 +467,12 @@ func gateFields(gate stepView) []toon.Field {
 			{Key: "gate", Value: toon.NewObject(gfields...)},
 			{Key: "help", Value: help},
 		}
+	}
+	// An unreadable findings payload must not render as a silent empty gate:
+	// name the failure so the responder knows why no findings rows follow and
+	// where to look before deciding.
+	if parseErr != nil && gate.FindingsJSON != "" {
+		gfields = append(gfields, toon.Field{Key: "findings_unreadable", Value: "the step's findings JSON could not be parsed; read the step log (`no-mistakes axi logs --step " + gate.Name + " --full`) before responding"})
 	}
 	if parsed.Summary != "" {
 		gfields = append(gfields, toon.Field{Key: "summary", Value: parsed.Summary})

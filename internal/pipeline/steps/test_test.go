@@ -205,6 +205,7 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 		"Always include an \"artifacts\" array",
 		"If sufficient evidence is not possible, report a warning finding explaining what evidence is missing and what decision it blocks",
 		"evidence the change under test itself removed or altered does not count",
+		"in that case the description MUST name the evidence that establishes it",
 		`Set action to "ask-master" when evidence is missing but the approved requirement is clear`,
 		`Set action to "ask-user" only when the test exposes a genuine unresolved product or guarantee decision`,
 		"When uncertain HOW to fix or demonstrate approved behavior, choose ask-master",

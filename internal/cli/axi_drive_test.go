@@ -141,6 +141,15 @@ func TestGateResolution(t *testing.T) {
 			},
 			wantAction: types.ActionApprove,
 		},
+		{
+			name: "unreadable findings are never auto-resolved (fail closed)",
+			gate: stepView{
+				Name:         "review",
+				Status:       string(types.StepStatusAwaitingApproval),
+				FindingsJSON: `{"findings":[{"severity":"error","description":"truncated`,
+			},
+			wantAction: types.ApprovalAction(""),
+		},
 	}
 
 	for _, tt := range tests {

@@ -73,7 +73,7 @@ func TestExecutor_AutoFixContradictingIntentParksForApproval(t *testing.T) {
 			}
 			return &StepOutcome{
 				Findings: `{"findings":[{"severity":"error","action":"ask-user",` +
-					`"description":"fix deletes the intent-required guarded removal, leaving rejected retry-only"}],"risk_level":"high"}`,
+					`"description":"fix deletes the intent-required guarded removal, leaving rejected retry-only; decision: keep the REQUIRED guarded-removal criterion or change it to retry-only; keeping it restores stale-lock recovery, changing it leaves wedged locks unrecoverable; recommendation: keep the criterion"}],"risk_level":"high"}`,
 			}, nil
 		},
 	}
@@ -102,6 +102,74 @@ func TestExecutor_AutoFixContradictingIntentParksForApproval(t *testing.T) {
 	}
 
 	// Resolve so the executor goroutine exits cleanly.
+	exec.Respond(types.StepReview, types.ActionApprove, nil)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+}
+
+// The same conformance park must hold when the rereview classifies the
+// contradiction ask-master (the criterion stands; restoring it needs
+// non-local implementation judgment): the manual-findings boundary parks the
+// fix cycle at fix_review through the same predicate, with no executor
+// special-casing of either manual level.
+func TestExecutor_AutoFixConformanceAskMasterParksForApproval(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	intent := "REQUIRED: on packed-refs.lock, retry then guarded removal of a " +
+		"provably-stale lock. REJECTED: retry-only."
+	if err := database.UpdateRunIntent(run.ID, db.RunIntent{Summary: intent, Source: db.RunIntentSourceAgent, Score: 1}); err != nil {
+		t.Fatalf("persist intent: %v", err)
+	}
+	run.Intent = &intent
+	source := db.RunIntentSourceAgent
+	run.IntentSource = &source
+
+	cfg := &config.Config{AutoFix: config.AutoFix{Review: 3}}
+
+	call := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			call++
+			if call == 1 {
+				return &StepOutcome{
+					AutoFixable:   true,
+					NeedsApproval: true,
+					Findings: `{"findings":[{"severity":"error","action":"auto-fix",` +
+						`"description":"unlink can race a live lock; avoid automatic unlinking"}],"risk_level":"high"}`,
+				}, nil
+			}
+			// Rereview: the criterion stands, but restoring the guarded
+			// removal needs a cross-path lifecycle decision - ask-master.
+			return &StepOutcome{
+				Findings: `{"findings":[{"severity":"error","action":"ask-master",` +
+					`"description":"fix deletes the intent-required guarded removal; restoring it needs a cross-path lock-lifecycle decision; invariant to preserve: provably-stale locks are removed after bounded retries"}],"risk_level":"high"}`,
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	if call != 2 {
+		t.Errorf("expected 2 calls (initial + one auto-fix rereview), got %d", call)
+	}
+	got, _ := database.GetRun(run.ID)
+	if got.AwaitingAgentSince == nil {
+		t.Error("expected run to be parked awaiting the agent, but awaiting_agent_since is nil")
+	}
+
 	exec.Respond(types.StepReview, types.ActionApprove, nil)
 	select {
 	case err := <-done:
