@@ -15,6 +15,8 @@ Every pipeline agent invocation is prompt-steered to keep intentional writes ins
 This is a soft boundary, not OS-level sandbox enforcement.
 The steering still allows requested test evidence under the managed temporary `no-mistakes-evidence` directory or the configured in-repo evidence directory, plus incidental temp or cache writes from normal development tools.
 Configured shell commands and one-shot agent subprocesses are scoped to their step: when the invocation exits, fails, or is cancelled, no-mistakes terminates remaining child processes it spawned so background workers do not outlive the run.
+When a run is started with design context - via repeatable `--design-context` files or repo-config `design_context.files` - no-mistakes materializes that text once at run start and injects it into the review and fix prompts as the author's design contract for the agent to check the implementation against, not as instructions that override no-mistakes rules.
+See [Design context](/no-mistakes/guides/agents/#design-context-for-reviews-and-fixes).
 
 ## Intent
 

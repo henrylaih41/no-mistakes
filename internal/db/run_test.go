@@ -6,6 +6,32 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestUpdateRunDesignContextRoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/repo", "https://github.com/test/repo.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	raw, err := types.MarshalDesignContextJSON(types.DesignContext{
+		Files: []types.DesignContextFile{{Source: "docs/design.md", Content: "contract"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.UpdateRunDesignContext(run.ID, raw); err != nil {
+		t.Fatalf("UpdateRunDesignContext: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.DesignContextJSON == nil || *got.DesignContextJSON != raw {
+		t.Fatalf("DesignContextJSON = %v, want %q", got.DesignContextJSON, raw)
+	}
+}
+
 func TestRunInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

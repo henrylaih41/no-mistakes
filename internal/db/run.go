@@ -33,6 +33,10 @@ type Run struct {
 	IntentSource    *string
 	IntentSessionID *string
 	IntentScore     *float64
+	// DesignContextJSON is the immutable materialized design context for this
+	// run, encoded as types.DesignContext JSON. Steps parse this copy instead
+	// of rereading mutable files during later rounds.
+	DesignContextJSON *string
 	// Route is the name of the local route selected for this run (empty for the
 	// implicit default route). Persisted so a rerun re-resolves the SAME route
 	// the original push selected instead of silently retargeting the default.
@@ -41,7 +45,7 @@ type Run struct {
 	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, route, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), design_context_json, intent, intent_source, intent_session_id, intent_score, route, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -49,6 +53,7 @@ func scanRun(row interface {
 	return row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
 		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
+		&r.DesignContextJSON,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.Route, &r.CreatedAt, &r.UpdatedAt,
 	)
@@ -213,6 +218,15 @@ func (d *DB) UpdateRunHeadSHA(id, headSHA string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run head sha: %w", err)
+	}
+	return nil
+}
+
+// UpdateRunDesignContext persists the materialized design context for a run.
+func (d *DB) UpdateRunDesignContext(id, raw string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET design_context_json = ?, updated_at = ? WHERE id = ?`, nullableString(strings.TrimSpace(raw)), now(), id)
+	if err != nil {
+		return fmt.Errorf("update run design context: %w", err)
 	}
 	return nil
 }

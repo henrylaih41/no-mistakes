@@ -82,14 +82,16 @@ An active run on another branch does not block starting validation for the curre
 ```sh
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
+no-mistakes axi run --intent "the user's goal" --design-context docs/design.md
 no-mistakes axi run --intent "the user's goal" --yes
 ```
 
-| Flag          | Type     | Default | Description                                                      |
-| ------------- | -------- | ------- | ---------------------------------------------------------------- |
-| `--intent`    | `string` | (none)  | What the user set out to accomplish; required to start a new run |
-| `-y`, `--yes` | `bool`   | `false` | Auto-resolve every gate until a decision point or outcome        |
-| `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
+| Flag               | Type       | Default | Description                                                                |
+| ------------------ | ---------- | ------- | -------------------------------------------------------------------------- |
+| `--intent`         | `string`   | (none)  | What the user set out to accomplish; required to start a new run           |
+| `-y`, `--yes`      | `bool`     | `false` | Auto-resolve every gate until a decision point or outcome                  |
+| `--skip`           | `string`   | (none)  | Comma-separated pipeline steps to skip                                     |
+| `--design-context` | `string[]` | Empty   | Repeatable design-context text file path for review and fix prompts        |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
@@ -100,6 +102,11 @@ Reattaching to an in-flight run does not require `--intent`.
 Reattaching to an in-flight run can proceed while the daemon is already running even if the global config file has become invalid, but starting a fresh run still requires valid global config.
 Starting a fresh run also requires a runnable effective pipeline agent.
 If the configured native agent or ACP bridge is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
+`--design-context` supplies run-scoped design notes, ADRs, issue agreements, or other text context that reviewers and fixers should check the implementation against.
+Relative paths resolve from the current working tree before the run is triggered; absolute paths are allowed because the flag is explicit local user input.
+The daemon reads those files once at run start and stores the materialized context on the run, so later review and fix rounds use the same contract even if the files change.
+Missing, unreadable, non-text, or invalid context files fail loudly instead of being silently ignored.
+Reattaching to an in-flight run does not add or replace its design context.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.

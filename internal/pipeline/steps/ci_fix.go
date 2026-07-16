@@ -105,6 +105,7 @@ CI logs:
 	}
 	prompt += devinFindingsPromptSection(devinFindings)
 	prompt += userIntentPromptSection(sctx)
+	prompt += designContextPromptSection(sctx)
 
 	sctx.Log("running agent to fix CI issues...")
 	_, err := sctx.Agent.Run(ctx, agent.RunOpts{

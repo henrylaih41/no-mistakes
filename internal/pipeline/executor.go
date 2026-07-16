@@ -658,6 +658,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			round:    func() int { return roundNum + 1 },
 		}
 	}
+	designContext := types.DesignContext{}
+	if run != nil && run.DesignContextJSON != nil {
+		parsed, err := types.ParseDesignContextJSON(*run.DesignContextJSON)
+		if err != nil {
+			return false, fmt.Errorf("parse run design context: %w", err)
+		}
+		designContext = parsed
+	}
 	// Default the review panel to the wrapped implementation agent. Configured
 	// panel members retain their independent identities, while receiving the
 	// same lifecycle wrapper so activity/provenance stays visible.
@@ -682,6 +690,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		DB:               e.db,
 		StepResultID:     sr.ID,
 		UserIntent:       userIntent,
+		DesignContext:    designContext,
 		IntentSource:     userIntentSource,
 		Sessions:         e.sessions,
 		Shared:           e.shared,

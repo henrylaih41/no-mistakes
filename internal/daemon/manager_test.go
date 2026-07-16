@@ -130,6 +130,52 @@ func TestPushReceivedSkipStepsConfiguresExecutor(t *testing.T) {
 	}
 }
 
+func TestPushReceivedMaterializesDesignContext(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{step}
+	})
+
+	_, headSHA := setupTestGitRepo(t, p, d, "design-context-repo")
+	contextPath := filepath.Join(t.TempDir(), "contract.md")
+	if err := os.WriteFile(contextPath, []byte("ship the agreed contract"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var result ipc.PushReceivedResult
+	err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:               p.RepoDir("design-context-repo"),
+		Ref:                "refs/heads/main",
+		Old:                "0000000000000000000000000000000000000000",
+		New:                headSHA,
+		DesignContextPaths: []string{contextPath},
+	}, &result)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := waitForRunTerminalState(t, d, result.RunID)
+	if run.DesignContextJSON == nil {
+		t.Fatal("expected design context JSON to be persisted on run")
+	}
+	designCtx, err := types.ParseDesignContextJSON(*run.DesignContextJSON)
+	if err != nil {
+		t.Fatalf("ParseDesignContextJSON: %v", err)
+	}
+	if len(designCtx.Files) != 1 {
+		t.Fatalf("design context files = %d, want 1", len(designCtx.Files))
+	}
+	if designCtx.Files[0].Source != contextPath || designCtx.Files[0].Content != "ship the agreed contract" {
+		t.Fatalf("design context file = %+v", designCtx.Files[0])
+	}
+}
+
 func TestPushReceivedAllowsDifferentBranchRunsConcurrently(t *testing.T) {
 	started := make(chan string, 2)
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {

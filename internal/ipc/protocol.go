@@ -69,13 +69,14 @@ func (e *RPCError) Error() string { return e.Message }
 // supply a base or fork URL.
 type PushReceivedParams struct {
 	// Gate is the absolute path to the gate bare repo.
-	Gate      string           `json:"gate"`
-	Ref       string           `json:"ref"`
-	Old       string           `json:"old"`
-	New       string           `json:"new"`
-	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
-	Intent    string           `json:"intent,omitempty"`
-	Route     string           `json:"route,omitempty"`
+	Gate               string           `json:"gate"`
+	Ref                string           `json:"ref"`
+	Old                string           `json:"old"`
+	New                string           `json:"new"`
+	SkipSteps          []types.StepName `json:"skip_steps,omitempty"`
+	Intent             string           `json:"intent,omitempty"`
+	Route              string           `json:"route,omitempty"`
+	DesignContextPaths []string         `json:"design_context_paths,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.
@@ -105,13 +106,15 @@ type GetActiveRunParams struct {
 	Branch string `json:"branch,omitempty"`
 }
 
-// RerunParams requests a new run for the latest gate head on a branch.
-// Intent, when set, is stamped onto the new run like PushReceivedParams.Intent.
+// RerunParams requests a new run for the latest gate head on a branch. Intent
+// and DesignContextPaths, when set, are stamped/materialized onto the new run
+// like PushReceivedParams.
 type RerunParams struct {
-	RepoID    string           `json:"repo_id"`
-	Branch    string           `json:"branch"`
-	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
-	Intent    string           `json:"intent,omitempty"`
+	RepoID             string           `json:"repo_id"`
+	Branch             string           `json:"branch"`
+	SkipSteps          []types.StepName `json:"skip_steps,omitempty"`
+	Intent             string           `json:"intent,omitempty"`
+	DesignContextPaths []string         `json:"design_context_paths,omitempty"`
 	// ExpectedHeadSHA, when set, permits bootstrapping the FIRST run for a branch
 	// the gate already mirrors but has never run: HandleRerun starts a fresh run
 	// only when this matches the current gate head. `axi run` sets it to the head

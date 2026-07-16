@@ -129,6 +129,19 @@ Changing agents most directly affects:
 
 It does **not** change the pipeline order or the meaning of a passed gate.
 
+## Design context for reviews and fixes
+
+When a branch has a design-first agreement, ADR, issue contract, or other text file that reviewers and fixers should check against, pass it when starting the run:
+
+```sh
+no-mistakes axi run --intent "the user's goal" --design-context docs/design.md
+```
+
+The flag is repeatable, and explicit CLI paths may be absolute.
+no-mistakes reads those files once at run start and stores the materialized contract on the run.
+Reviewer and fixer prompts treat that context as the author's design contract to check against, not as instructions that override no-mistakes rules.
+Repo-wide defaults can be declared with `design_context.files` in `.no-mistakes.yaml`.
+
 ## Review panels
 
 By default, the review step runs once with the resolved `agent`.
