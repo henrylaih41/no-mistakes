@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,8 +14,35 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestCIManualOutcomesRouteToMaster(t *testing.T) {
+	t.Parallel()
+	tests := map[string]*pipeline.StepOutcome{
+		"failures":     ciFailureOutcome([]string{"test"}, true, "CI failures require manual intervention"),
+		"mergeability": ciMergeabilityOutcome("mergeability check timed out", "unknown mergeability"),
+		"timeout":      ciMonitoringTimeoutOutcome(),
+	}
+	for name, outcome := range tests {
+		t.Run(name, func(t *testing.T) {
+			var findings Findings
+			if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+				t.Fatal(err)
+			}
+			if len(findings.Items) == 0 {
+				t.Fatal("expected findings")
+			}
+			for _, finding := range findings.Items {
+				if finding.Action != types.ActionAskMaster {
+					t.Errorf("finding action = %q, want %q", finding.Action, types.ActionAskMaster)
+				}
+			}
+		})
+	}
+}
 
 func TestCIStep_PendingChecksUseAdaptivePollIntervals(t *testing.T) {
 	t.Parallel()

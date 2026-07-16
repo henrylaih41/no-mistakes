@@ -106,6 +106,15 @@ func TestPreserveGateFixGuidance_SyncedAcrossSurfaces(t *testing.T) {
 	}
 }
 
+func TestAxiRunYesNamesEveryActionableAuthorityLevel(t *testing.T) {
+	help := newAxiRunCmd().Long
+	for _, want := range []string{"auto-fix", "ask-master", "ask-user"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("axi run --yes help missing %q", want)
+		}
+	}
+}
+
 func TestPreserveGateFixGuidance_InPointOfUseOutputs(t *testing.T) {
 	gate := stepView{
 		Name:   "review",

@@ -69,7 +69,7 @@ func newAxiRunCmd() *cobra.Command {
 		Long: "Triggers a pipeline run for the current branch and drives it. Without\n" +
 			"--yes it blocks until the first approval gate, CI-ready point, or final outcome and\n" +
 			"prints it. With --yes it auto-resolves every gate (fixing actionable\n" +
-			"findings - including ask-user findings, with no escalation - then\n" +
+			"auto-fix, ask-master, and ask-user findings with no escalation - then\n" +
 			"accepting the result) until a decision point or outcome. --yes still\n" +
 			"stops at an awaiting_triage gate when review reaches max_fix_rounds: it\n" +
 			"never supplies the override implicitly. Report the residual findings for\n" +

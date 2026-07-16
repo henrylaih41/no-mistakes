@@ -112,12 +112,12 @@ Missing, unreadable, non-text, or invalid context files fail loudly instead of b
 Reattaching to an in-flight run does not add or replace its design context.
 `--review-loop=off` disables only the post-PR Devin review loop for the run.
 Use it when the PR base repo is not Devin-applicable or the run should rely on normal CI checks only; it does not skip the `ci` step, so GitHub checks, merge, and close monitoring continue.
-With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
+With `--yes`, `axi run` treats `action: auto-fix`, `action: ask-master`, and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 `--yes` does not override a review step parked at `awaiting_triage`; it returns that gate for master triage instead.
 When a step parks at `awaiting_agent_retry` after an exhausted transient agent/provider failure, `--yes` auto-retries that step at most once, records the retry on the run, and leaves a second consecutive transient parked for an explicit `--action retry`.
-Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
-Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
+Without `--yes`, `ask-master` routes to the documented gate owner for implementation judgment; if none exists it falls back to the user. `ask-user` routes only the concise unresolved choice, options, consequences, and recommendation to the user.
+Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking findings plus `ask-master` and `ask-user` review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 When `review.max_fix_rounds` is reached, review gates render `status: awaiting_triage`.
 Residual findings stay visible; a plain `axi respond --action fix` is refused, and another fix round requires explicit master triage with `--fix-override --override-reason`.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
@@ -154,7 +154,7 @@ no-mistakes axi respond --action skip
 | `--override-reason` | `string` | (none)     | Required master triage reason for `--fix-override`; persisted         |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve every subsequent gate until a decision point or outcome |
 
-After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix` and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when CI is green but the PR still needs a human merge.
+After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix`, `ask-master`, and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when CI is green but the PR still needs a human merge.
 It also stops at `awaiting_triage`; it never supplies `--fix-override` implicitly.
 Use `--action retry` only when a step is parked at `awaiting_agent_retry` after an agent invocation exhausted bounded retries for a transient provider/runtime failure; it takes no findings, fix instructions, or `--fix-override`, and does not create a review fix round.
 Under `--yes`, that transient park auto-retries at most once per step, with the auto retry persisted on the run; a second consecutive transient stays parked for an explicit `--action retry`.

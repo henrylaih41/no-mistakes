@@ -109,11 +109,17 @@ func TestReviewStep_FixMode(t *testing.T) {
 	if !strings.Contains(ag.calls[1].Prompt, "Do not re-open decisions recorded in this contract") {
 		t.Error("expected review prompt to tell reviewers not to re-open design decisions")
 	}
-	if !strings.Contains(ag.calls[1].Prompt, "challenges the author's deliberate intent") {
-		t.Error("expected review prompt action to cover intent-challenging scenarios")
-	}
-	if !strings.Contains(ag.calls[1].Prompt, `"ask-user"`) {
-		t.Error("expected review prompt to include ask-user action for ambiguous findings")
+	for _, want := range []string{
+		`"auto-fix": there is exactly one correct, bounded correction`,
+		`"ask-master": the defect is real and stays within approved product behavior`,
+		`"ask-user": a genuine unresolved decision owned by the user`,
+		"When uncertain HOW to fix",
+		"When uncertain WHAT the product should do",
+		"The description MUST state the exact decision, the options",
+	} {
+		if !strings.Contains(ag.calls[1].Prompt, want) {
+			t.Errorf("expected review prompt to contain %q", want)
+		}
 	}
 	if !strings.Contains(ag.calls[1].Prompt, "inspect surrounding code, call sites, shared helpers, tests, and invariants") {
 		t.Error("expected review prompt to allow surrounding-code inspection for root cause")
@@ -306,7 +312,7 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 			}
 			prompt := ag.calls[0].Prompt
 
-			hasConformance := strings.Contains(prompt, "Intent conformance (required)")
+			hasConformance := strings.Contains(prompt, "Intent conformance is required")
 			if hasConformance != tc.wantConformance {
 				t.Errorf("conformance obligation present = %v, want %v\nprompt:\n%s", hasConformance, tc.wantConformance, prompt)
 			}
@@ -315,8 +321,15 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 				t.Errorf("authoritative framing present = %v, want %v\nprompt:\n%s", hasAuthority, tc.wantAuthority, prompt)
 			}
 			if tc.wantConformance {
-				if !strings.Contains(prompt, `you MUST emit an "ask-user" finding`) {
-					t.Errorf("conformance clause missing the ask-user obligation:\n%s", prompt)
+				for _, want := range []string{
+					"auto-fix when restoring conformance is clear and bounded",
+					"ask-master when restoring conformance requires non-local implementation",
+					"ask-user only when the criterion is internally conflicting",
+					"Never silently resolve an intent contradiction",
+				} {
+					if !strings.Contains(prompt, want) {
+						t.Errorf("conformance clause missing %q:\n%s", want, prompt)
+					}
 				}
 			}
 		})
@@ -347,7 +360,7 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 			// Rereview: the change now contradicts the authoritative criteria,
 			// so the reviewer emits an ask-user finding even though retry-only
 			// is otherwise risk-clean.
-			if !strings.Contains(opts.Prompt, "Intent conformance (required)") {
+			if !strings.Contains(opts.Prompt, "Intent conformance is required") {
 				t.Errorf("rereview prompt missing conformance obligation:\n%s", opts.Prompt)
 			}
 			findings := Findings{

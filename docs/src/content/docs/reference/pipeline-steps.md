@@ -10,7 +10,7 @@ intent → rebase → review → test → document → lint → push → pr → 
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
-In the TUI, yolo mode is an explicit override that auto-resolves paused steps: `auto-fix` and `ask-user` findings are fixed once with every finding selected, fix-review gates are approved, and gates with only `no-op` findings are approved as-is.
+In the TUI, yolo mode is an explicit override that auto-resolves paused steps: `auto-fix`, `ask-master`, and `ask-user` findings are fixed once with every finding selected, fix-review gates are approved, and gates with only `no-op` findings are approved as-is.
 Every pipeline agent invocation is prompt-steered to keep intentional writes inside the run worktree and avoid mutating system state outside it.
 This is a soft boundary, not OS-level sandbox enforcement.
 The steering still allows requested test evidence under the managed temporary `no-mistakes-evidence` directory or the configured in-repo evidence directory, plus incidental temp or cache writes from normal development tools.
@@ -46,7 +46,7 @@ Fetches the latest authoritative remote state, fetches the configured pushed-bra
 - If the branch is not the default branch, tries rebasing onto the pushed-branch target first, then `origin/<default_branch>`
 - If the push rewrote branch history, skips the pushed-branch rebase target so prior remote autofix commits do not get reintroduced
 - If the push rewrote the default branch and `origin/<default_branch>` advanced after that rewrite, pauses for manual approval before updating the branch
-- If the branch carries commits from the contributor's local default branch that are not on `origin/<default_branch>`, pauses with an `ask-user` finding instead of silently bundling that local work into the PR
+- If the branch carries commits from the contributor's local default branch that are not on `origin/<default_branch>`, pauses with an `ask-master` finding instead of silently bundling that local work into the PR
 - The local-default check is best-effort and only fires when the local default tip is ahead of `origin/<default_branch>` and is an ancestor of the branch `HEAD`
 - Skips targets that don't exist or are already ancestors
 - If a fast-forward is possible, does a hard-reset instead of a rebase
@@ -69,14 +69,14 @@ AI code review of your diff.
 - Treats authoritative intent as enforceable for source-verifiable acceptance criteria, but does not report the absence of a remote branch, push, pull request, or CI state that this run's later Push, PR, or CI step owns
 - Removes any returned finding whose sole claim is that one of those same-run delivery outcomes is not present yet, while keeping findings about pre-existing or external pull requests, third-party artifacts, and lifecycle state that the current run does not own
 - Keeps the later Push, PR, and CI steps responsible for strictly validating their own outcomes after review completes
-- Each reviewer returns findings with severity (`error`, `warning`, `info`), file location, description, and an `action` (`no-op`, `auto-fix`, `ask-user`)
+- Each reviewer returns findings with severity (`error`, `warning`, `info`), file location, description, and an `action` (`no-op`, `auto-fix`, `ask-master`, `ask-user`)
 - In review-panel mode, merged findings keep a reviewer `source`, get reviewer-namespaced IDs, concatenate reviewer summaries/rationales, and use the highest reported `risk_level`
 - `review.max_parallel` bounds concurrent reviewers; `review.fail_open: false` (the default) fails the review step on any reviewer error, while `true` drops failed reviewers if at least one reviewer succeeds
 - Also returns a `risk_level` (`low`, `medium`, `high`) and `risk_rationale`
 - With the default `session_reuse: true`, the single-reviewer path can reuse one Claude or Codex reviewer session across the initial review and every full rereview, while the pipeline agent uses a separate fixer session across review-fix turns; configured panel reviewers run independently and cold
 - A resume failure retries the same turn in a fresh session for that role, never skips the full rereview, and unsupported agents run cold
 
-**Approval:** required if any finding has severity `error` or `warning`. Findings with `action: ask-user` pause for approval instead of entering the normal auto-fix loop. This is for findings that challenge the author's intent, not routine correctness, reliability, or security fixes that may need to re-add a small amount of deleted logic. With the default `auto_fix.review: 0`, blocking review findings park for approval even when their action is `auto-fix`; setting repo or global `auto_fix.review` above `0` re-enables the automatic review fix loop for eligible `auto-fix` findings. Findings with `action: no-op` are informational only. The shared [finding-action model](/no-mistakes/concepts/auto-fix/#finding-actions) owns the behavior for a missing `action`.
+**Approval:** required if any finding has severity `error` or `warning`. Findings with `action: ask-master` or `action: ask-user` always pause instead of entering the normal auto-fix loop, including at `info` severity. `ask-master` means approved behavior is known but implementation needs non-local judgment; `ask-user` means authoritative evidence does not settle a choice that changes behavior or an agreed guarantee. With the default `auto_fix.review: 0`, blocking review findings park for approval even when their action is `auto-fix`; setting repo or global `auto_fix.review` above `0` re-enables the automatic review fix loop for eligible `auto-fix` findings. Findings with `action: no-op` are informational only. The shared [finding-action model](/no-mistakes/concepts/auto-fix/#finding-actions) owns missing and unknown actions.
 
 `review.max_fix_rounds` caps review fix/rereview rounds, including automatic and owner-approved fixes. The default `0` is unlimited. At the cap the step parks at `awaiting_triage` with residual findings intact; one additional round requires `--fix-override --override-reason "<master triage reason>"`, and the reason is persisted.
 
@@ -94,14 +94,14 @@ Runs baseline tests and gathers evidence for the intended behavior.
 
 **Behavior:**
 - If `commands.test` is set in repo config: runs it first as a baseline via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) and captures output. Non-zero exit produces `error` findings.
-- If `commands.test` is empty, or user intent is available after the baseline command passes: the agent validates the change with evidence-oriented tests or manual checks, returning structured findings with severity, description, and `action` (`no-op`, `auto-fix`, `ask-user`). For UI, HTML, CSS, browser, visual layout, or copy-placement changes, the agent attempts reviewer-visible visual evidence and explains in `testing_summary` when screenshots, images, videos, GIFs, or rendered HTML artifacts are not captured.
+- If `commands.test` is empty, or user intent is available after the baseline command passes: the agent validates the change with evidence-oriented tests or manual checks, returning structured findings with severity, description, and `action` (`no-op`, `auto-fix`, `ask-master`, `ask-user`). For UI, HTML, CSS, browser, visual layout, or copy-placement changes, the agent attempts reviewer-visible visual evidence and explains in `testing_summary` when screenshots, images, videos, GIFs, or rendered HTML artifacts are not captured.
 - The step records the exact tests and checks it exercised in a `tested` array, may include a short natural-language `testing_summary`, and includes an `artifacts` array for reviewer-visible evidence; `path` artifacts may be repository-relative paths or absolute paths under the temporary `no-mistakes-evidence/<runID>` directory, `url` artifacts must be externally visible, and `content` artifacts should be short logs or command output shown directly in the PR.
 - By default, evidence is stored under the temporary `no-mistakes-evidence/<runID>` directory. With `test.evidence.store_in_repo: true`, evidence is stored under `<test.evidence.dir>/<branch-slug>` inside the worktree, staged during push, and published with the branch. Unsafe, symlinked, or Git-ignored evidence directories fall back to temporary storage for that run.
 - Before finishing, test agents are instructed to remove transient working-tree artifacts they created, such as downloaded models, caches, build outputs, large binaries, or generated data directories, while preserving intentional source or test-file changes and evidence files under the dedicated evidence directory.
-- Missing evidence for user intent can be reported as a warning with `action: ask-user`.
+- Missing evidence for an already-approved requirement is `ask-master`; evidence that exposes a genuine unresolved behavior or guarantee choice is `ask-user`.
 - If the agent creates new test files (detected via `git status --porcelain`), approval is required even if tests pass.
 
-**Approval:** test findings with `action: ask-user` pause for approval, including missing-evidence warnings for user intent. `action: auto-fix` findings stay eligible for the fix loop. `action: no-op` findings are informational only.
+**Approval:** test findings with `action: ask-master` or `action: ask-user` pause for approval. `action: auto-fix` findings stay eligible for the fix loop. `action: no-op` findings are informational only.
 
 **Auto-fix:** the agent receives the previous test findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles, then tests run again. Fix commits use `no-mistakes(test): <summary>`.
 
@@ -133,7 +133,7 @@ Runs linters and static analysis.
 - If `commands.lint` is set: runs it via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows). Non-zero exit produces `warning` findings.
 - If `commands.lint` is empty: consumes lint-category findings from the document step's combined housekeeping pass, avoiding a second cold agent invocation. If no usable combined result exists, the lint step detects appropriate linters/formatters, applies safe fixes, reruns the relevant checks, commits any agent changes, and returns structured findings only for unresolved issues.
 
-**Approval:** lint findings with `action: ask-user` pause for approval.
+**Approval:** lint findings with `action: ask-master` or `action: ask-user` pause for approval.
 `action: auto-fix` findings stay eligible for the fix loop when `commands.lint` is configured.
 `action: no-op` findings are informational only.
 Combined-pass lint findings use the same gate: `error` and `warning` findings pause for a decision, while `info` findings do not.

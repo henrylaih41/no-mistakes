@@ -64,8 +64,8 @@ func intentSourceIsAuthoritative(sctx *pipeline.StepContext) bool {
 
 // intentConformanceReviewClause returns a review-prompt directive that turns
 // the authoritative acceptance criteria into a hard conformance obligation: a
-// fixer change that contradicts them must park for a human via an ask-user
-// finding, even when it is otherwise risk-clean. This is the missing "is the
+// fixer change that contradicts them must be classified by the authority needed
+// to restore or change the criterion, even when it is otherwise risk-clean. This is the missing "is the
 // required behavior still present?" question - a risk-only rereview scores a
 // removed feature as clean because a deleted behavior has no risk.
 //
@@ -82,7 +82,7 @@ func intentConformanceReviewClause(sctx *pipeline.StepContext) string {
 	// Pipeline-owned delivery outcomes (push, PR open/update, CI) are owned by
 	// later steps; review must not treat their absence as an intent
 	// contradiction. Source-verifiable required/forbidden behavior stays hard.
-	return "\n\nIntent conformance (required): the User intent above is authoritative acceptance criteria, not a hint. If the change contradicts it - it removes or omits a source-verifiable behavior the criteria mark as REQUIRED, or adds a behavior they mark as FORBIDDEN - you MUST emit an \"ask-user\" finding that quotes the specific criterion and the contradicting diff hunk (or, for a removed required behavior, notes what the criteria require that is now absent from the change), even if the change is otherwise risk-clean. Do not resolve such a contradiction yourself and do not classify it \"auto-fix\". Do not treat deferred pipeline-owned delivery outcomes (remote branch not yet pushed, pull request not yet opened or updated, CI not yet observed for this run) as contradictions at this phase; later pipeline steps own those."
+	return "\n\nIntent conformance is required. The User intent above is authoritative acceptance criteria, not a hint. When the change removes or omits a source-verifiable behavior the criteria mark as REQUIRED, or adds a behavior they mark as FORBIDDEN, emit a finding and quote the criterion plus the contradicting diff hunk (or note the required behavior now absent). Classify it: auto-fix when restoring conformance is clear and bounded; ask-master when restoring conformance requires non-local implementation or design judgment while preserving the criterion; ask-user only when the criterion is internally conflicting, demonstrably cannot be met under the approved constraints, or must itself be changed. For ask-user, state the exact criterion change, its guarantee consequences, and a recommendation. Never silently resolve an intent contradiction by weakening or deleting the authoritative criterion. Do not treat deferred pipeline-owned delivery outcomes (remote branch not yet pushed, pull request not yet opened or updated, CI not yet observed for this run) as contradictions at this phase; later pipeline steps own those."
 }
 
 // cleanedUserIntent returns the trimmed, secret-redacted, adversarial-stripped

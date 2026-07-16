@@ -206,7 +206,7 @@ Press `e` to add or edit extra guidance for the current finding. Press `+` to ad
 Reviewer-sourced findings can be selected and annotated like any other pipeline finding, but they are not user-authored and cannot be deleted with `D`.
 
 Press `y` to toggle yolo mode when you want paused approval gates to resolve automatically.
-Yolo fixes gates with `auto-fix` and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
+Yolo fixes gates with `auto-fix`, `ask-master`, and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
 It approves gates with no findings or only `action: no-op` findings as-is, and fixes each step at most once so unresolved findings do not loop forever.
 Yolo auto-resumes a step parked at `awaiting_agent_retry` at most once per step; a second consecutive transient park waits for you to press `u`.
 Yolo does not resolve a review step parked at `awaiting_triage`: when `review.max_fix_rounds` is reached the gate waits for a triage decision instead of auto-resolving.

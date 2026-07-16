@@ -212,7 +212,7 @@ When an agent makes an additional fix after a gate round has already produced fi
 Never abort-and-restart, reset the branch, or open a new branch in a way that drops prior gate-fix commits, including the pipeline's own `no-mistakes(review|document|lint): ...` commits.
 A fresh run re-validates the branch's current state, so already-resolved findings do not re-surface.
 
-The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, or relay `ask-user` findings, and how to interpret `axi status` fields like `awaiting_agent` and `active_steps` - is owned by the skill itself and by the live `axi` output.
+The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, route `ask-master`, or escalate `ask-user`, and how to interpret `axi status` fields like `awaiting_agent` and `active_steps` - is owned by the skill itself and by the live `axi` output.
 Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
 The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 
@@ -271,7 +271,7 @@ Transient API and network failures are retried up to three times with exponentia
 ## Intent extraction
 
 When an agent starts a run through `no-mistakes axi run --intent`, no-mistakes uses that supplied intent verbatim as authoritative acceptance criteria and skips transcript-based inference, even if `intent.enabled` is false.
-Review checks the diff against those criteria, and a change that removes required behavior or adds forbidden behavior becomes an `ask-user` finding instead of being resolved automatically.
+Review checks the diff against those criteria. A clear bounded restoration is `auto-fix`, a non-local restoration decision is `ask-master`, and `ask-user` is reserved for cases where the criterion itself is conflicting, infeasible under approved constraints, or must change.
 Otherwise, when `intent.enabled` is true, no-mistakes reads recent local transcripts from Claude Code, Codex, OpenCode, Rovo Dev, Pi, and the GitHub Copilot CLI during the `intent` pipeline step.
 It matches sessions against non-deleted changed files when present, falls back to all changed files for all-deletion diffs, summarizes the likely author intent with the configured pipeline agent, includes that summary as an untrusted, low-confidence hint in rebase fixes, review checks and fixes, test detection, evidence validation, and fixes, lint detection and fixes, documentation checks and fixes, CI auto-fixes, and PR prompts, and renders it in generated PR descriptions.
 

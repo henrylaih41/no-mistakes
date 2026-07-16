@@ -204,6 +204,10 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 		"If automated testing cannot produce the needed evidence, execute manual verification steps",
 		"Always include an \"artifacts\" array",
 		"If sufficient evidence is not possible, report a warning finding",
+		`Set action to "ask-master" when evidence is missing but the approved requirement is clear`,
+		`Set action to "ask-user" only when the test exposes a genuine unresolved product or guarantee decision`,
+		"When uncertain HOW to fix or demonstrate approved behavior, choose ask-master",
+		"When uncertain WHAT the product should do, choose ask-user",
 		"remove any transient artifacts your testing created in the working tree",
 	} {
 		if !strings.Contains(prompt, want) {

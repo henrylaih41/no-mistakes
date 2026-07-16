@@ -383,7 +383,7 @@ func TestExecutor_AutoFixSkipsHumanReviewFindings(t *testing.T) {
 	}
 }
 
-func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *testing.T) {
+func TestExecutor_AskMasterFindingsRequireApprovalWithoutNeedsApprovalFlag(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
 
@@ -393,7 +393,7 @@ func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *
 			return &StepOutcome{
 				NeedsApproval: false,
 				AutoFixable:   true,
-				Findings:      `{"findings":[{"severity":"info","description":"design choice","action":"ask-user"}],"summary":"1 issue"}`,
+				Findings:      `{"findings":[{"severity":"info","description":"implementation choice","action":"ask-master"}],"summary":"1 issue"}`,
 			}, nil
 		},
 	}

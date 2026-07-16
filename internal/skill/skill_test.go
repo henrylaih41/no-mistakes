@@ -58,8 +58,9 @@ func TestBodyDocumentsAxiGateGuidance(t *testing.T) {
 		"drive it with `no-mistakes axi respond`",
 		"when it still matches your current `HEAD`",
 		"**Review auto-fix is disabled by default**",
-		"blocking and",
-		"ask-user review findings park for your decision",
+		"`ask-master` and `ask-user` review findings park",
+		"do not relay raw findings automatically to the end user",
+		"bring only the unresolved user-owned decision to the user",
 		"`auto_fix.review > 0`",
 	} {
 		if !strings.Contains(md, want) {

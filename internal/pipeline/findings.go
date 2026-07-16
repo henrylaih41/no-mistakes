@@ -238,15 +238,15 @@ func autoFixableFindingsJSON(raw string) string {
 	return fixableRaw
 }
 
-func hasAskUserFindingsJSON(raw string) bool {
+func hasManualFindingsJSON(raw string) bool {
 	if raw == "" {
 		return false
 	}
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil {
-		return false
+		return true
 	}
-	return types.HasAskUserFindings(findings)
+	return types.HasManualFindings(findings)
 }
 
 // combineSelectedFindingIDs returns the ordered list of finding IDs that

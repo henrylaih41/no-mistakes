@@ -70,9 +70,11 @@ func TestFindingsTally(t *testing.T) {
 			{ID: "b", Action: types.ActionAutoFix, Description: "y"},
 			{ID: "c", Action: types.ActionNoOp, Description: "z"},
 			{ID: "d", Action: types.ActionAskUser, Description: "w"},
+			{ID: "e", Action: types.ActionAskMaster, Description: "m"},
+			{ID: "f", Action: "future-owner", Description: "unknown"},
 		}, "s")},
 	}}
-	if got := rv.findingsTally(); got != "2 awaiting, 1 auto-fix, 1 info" {
+	if got := rv.findingsTally(); got != "2 ask-master, 2 ask-user, 1 auto-fix, 1 info" {
 		t.Errorf("findingsTally = %q", got)
 	}
 

@@ -184,12 +184,14 @@ func ciFailureOutcome(failing []string, mergeConflict bool, summary string) *pip
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "warning",
 			Description: fmt.Sprintf("CI check failing: %s", name),
+			Action:      types.ActionAskMaster,
 		})
 	}
 	if mergeConflict {
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "warning",
 			Description: "PR has merge conflicts with the base branch",
+			Action:      types.ActionAskMaster,
 		})
 	}
 	findingsJSON, _ := json.Marshal(findings)
@@ -312,7 +314,7 @@ func ciMergeabilityOutcome(summary, description string) *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: description,
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)
@@ -328,7 +330,7 @@ func ciMonitoringTimeoutOutcome() *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: "PR was still open when CI monitoring timed out",
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)

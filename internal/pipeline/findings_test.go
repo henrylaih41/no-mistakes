@@ -114,6 +114,30 @@ func TestAutoFixableFindingsJSON_AllNoOp(t *testing.T) {
 	}
 }
 
+func TestHasManualFindingsJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"ask-master", `{"findings":[{"action":"ask-master"}]}`, true},
+		{"ask-user", `{"findings":[{"action":"ask-user"}]}`, true},
+		{"missing action", `{"findings":[{"description":"unclassified"}]}`, true},
+		{"unknown action", `{"findings":[{"action":"future-owner"}]}`, true},
+		{"auto-fix", `{"findings":[{"action":"auto-fix"}]}`, false},
+		{"no-op", `{"findings":[{"action":"no-op"}]}`, false},
+		{"empty", "", false},
+		{"malformed", "{", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasManualFindingsJSON(tt.raw); got != tt.want {
+				t.Errorf("hasManualFindingsJSON() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMergeFindingsJSON_DeduplicatesShiftedUniqueDismissedFinding(t *testing.T) {
 	existingRaw := `{"findings":[{"id":"dismissed-1","severity":"warning","file":"internal/pipeline/findings.go","line":42,"description":"still unresolved"}],"summary":"1 finding"}`
 	additionalRaw := `{"findings":[{"id":"dismissed-2","severity":"warning","file":"internal/pipeline/findings.go","line":57,"description":"still unresolved"}],"summary":"1 finding"}`

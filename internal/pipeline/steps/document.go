@@ -74,7 +74,7 @@ var housekeepingFindingsSchema = json.RawMessage(`{
 					"file": {"type": "string"},
 					"line": {"type": "integer"},
 					"description": {"type": "string"},
-					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]},
+					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-master", "ask-user"]},
 					"category": {"type": "string", "enum": ["documentation", "lint"]}
 				},
 				"required": ["severity", "description", "action", "category"]
@@ -306,15 +306,15 @@ func splitHousekeepingFindings(findings Findings) (doc Findings, lint Findings) 
 	return doc, lint
 }
 
-// documentApprovalOutcome builds a single ask-user finding for cases where the
-// agent's structured output is missing or unparsable, so a human can confirm
-// the documentation state instead of silently trusting an opaque response.
+// documentApprovalOutcome builds a single ask-master finding for cases where
+// the agent's structured output is missing or unparsable, so the gate owner can
+// inspect or retry it without misrepresenting the failure as a product choice.
 func documentApprovalOutcome(summary string) *pipeline.StepOutcome {
 	findings := Findings{
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: summary,
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 		Summary: summary,
 	}

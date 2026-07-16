@@ -121,7 +121,7 @@ Resolution precedence is: an explicit `-o no-mistakes.route=<name>` &rarr; the c
 
 **Trust:** routes are local-only. They live in the gate database and are never read from a pushed branch or any in-repo file, so a contributor's feature branch can neither define nor redirect a route. The push-option only *selects* a pre-defined local route by name — it can never supply a base or fork URL.
 
-From the TUI you act on each **finding**: **auto-fix** ones are applied for you (or approve to let them), **ask-user** ones are a judgement call you approve, fix, or skip.
+From the TUI you act on each **finding**: **auto-fix** restores established behavior, **ask-master** needs implementation judgment, and **ask-user** needs a genuine product or guarantee decision.
 Once every check is green, the gate forwards your branch to the configured push target and opens the PR for you, so there is no manual `git push origin` and no hand-written PR body.
 Prefer to let your coding agent drive the same flow headlessly?
 Use `/no-mistakes` (see below).
