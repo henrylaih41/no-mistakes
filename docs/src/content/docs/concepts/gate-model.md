@@ -181,7 +181,8 @@ An agent-supplied AXI intent is stored directly on the run.
 Raw transcript text is not stored in this database.
 Legacy `user_fix` rounds are still read as `auto-fix` for backward compatibility.
 Run records also store the nullable `awaiting_agent_since` timestamp used only to render the AXI parked signal while a gate is waiting for the driving agent, plus accumulated `parked_ms` for local performance reporting.
-Each agent invocation records local-only purpose, provider/model metadata, session mode and a truncated session-identity hash, timing, failure category, and token usage; prompts, outputs, diffs, and credentials are never stored there.
+Recorded pipeline-agent invocations retain local-only purpose, provider/model metadata, session mode and a truncated session-identity hash, timing, failure category, and token usage; prompts, outputs, diffs, and credentials are never stored there.
+The [environment reference](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) owns the exact recording scope and local/remote boundary.
 Use `no-mistakes stats --agents` for aggregates or `no-mistakes stats --run <id>` for a run timeline and parked time.
 Repo records store the parent `upstream_url` and an optional `fork_url`; branch pushes use `fork_url` when present, while PR and CI provider context stays anchored to the parent.
 Local push [routes](/no-mistakes/reference/cli/#no-mistakes-route) live in their own table keyed by repo, each a named base/fork pair, with an optional per-repo default route; the route a run resolved to is recorded on the run so reruns re-resolve the same target. Routes are read only from this local database, never from a pushed branch.

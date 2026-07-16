@@ -333,7 +333,7 @@ no-mistakes stats
 Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
 
 Use `--agents` for local, per-purpose agent performance aggregates: duration and the subprocess-vs-model time split, session mode, errors, the token totals (input, output, cache-read, cache-creation, fresh input, reasoning), and the model round-trip and tool-category activity histogram, with a `METRICS` coverage count that tells a real zero apart from missing instrumentation.
-Use `--run <id>` to inspect the individual agent invocations for one run - including each invocation's per-round token deltas next to the raw (cumulative for resumed sessions) counters, tool-category breakdown, workload size, finding count, and fallback reason - plus the total time parked at approval gates; it implies `--agents`.
+Use `--run <id>` to inspect the recorded pipeline-agent invocations for one run - including each invocation's per-round token deltas next to the raw (cumulative for resumed sessions) counters, tool-category breakdown, workload size, finding count, and fallback reason - plus the total time parked at approval gates; it implies `--agents`.
 Nullable fields an adapter did not report render as `-` (unknown), which is distinct from a recorded `0`; the legacy raw input, output, and cache-read counters remain numeric.
 
 ```sh
@@ -368,7 +368,7 @@ Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem 
 For `agent: acp:<target>`, `doctor` verifies that `acpx` resolves but does not invoke the target or test its credentials.
 Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
 
-For `agent: auto`, Rovo Dev and Grok additionally require `acli rovodev --help` and `grok --version` to succeed.
+During `gate validation`, Rovo Dev and Grok pipeline-agent candidates additionally require `acli rovodev --help` and `grok --version` to succeed, whether selected explicitly, through `auto`, or from a fallback list.
 
 `doctor` checks `gh` and `az` availability. For GitLab PR and CI steps, install and authenticate `glab`. For Bitbucket Cloud PR and CI steps, set `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN`. For Azure DevOps PR and CI steps, install the `azure-devops` extension and provide a PAT.
 

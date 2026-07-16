@@ -105,7 +105,7 @@ Safest local verification sequence after non-trivial changes:
 
 **Review-Loop Agent Sessions (`internal/pipeline/sessions.go`)**
 
-- Per run, the review loop keeps ONE durable reviewer session across the initial review and every full rereview, and a SEPARATE fixer session across review-fix turns; roles never share a session (the reviewer must never inherit the fixer's rationale), no other step uses sessions, and sessions are keyed strictly by run. Every review turn is still a full adversarial review of the complete branch diff.
+- Per run, the default single-reviewer path keeps ONE durable reviewer session across the initial review and every full rereview, and the pipeline agent keeps a SEPARATE fixer session across review-fix turns; configured panel reviewers stay independent and cold. Roles never share a session (the reviewer must never inherit the fixer's rationale), no other step uses sessions, and sessions are keyed strictly by run. Every review turn is still a full adversarial review of the complete branch diff.
 - Fail-safe rules: unsupported adapter runs cold; a failed resume drops the identity and re-runs the same turn in a fresh same-role session, never skipping the review; a cancelled ctx gets no fallback retry; `session_reuse: false` forces everything cold. Persistence is minimum metadata only, never prompts or transcripts.
 - `codex exec resume` has a narrower flag surface than `codex exec`, so an unsupported override fails the resume and falls back; the e2e fakeagent must keep parsing both codex argv shapes (`extractCodexPrompt`).
 - Regressions: `internal/pipeline/sessions_test.go`, `internal/pipeline/steps/review_session_test.go`, `internal/agent/session_test.go`.

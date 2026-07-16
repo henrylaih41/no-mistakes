@@ -236,7 +236,8 @@ Three global config fields tune resolution and invocation, and the [Global Confi
 
 ## Review session reuse
 
-With the default `session_reuse: true`, Claude and Codex keep one durable reviewer session and a separate review-fixer session per run, every rereview still evaluates the entire branch diff, and resume failures fall back to fresh same-role sessions instead of skipping review.
+With the default `session_reuse: true`, the single-reviewer path can keep one durable Claude or Codex reviewer session, and the pipeline agent can keep a separate review-fixer session per run; configured panel reviewers stay independent and cold.
+Every rereview still evaluates the entire branch diff, and resume failures fall back to fresh same-role sessions instead of skipping review.
 The [`session_reuse` field reference](/no-mistakes/reference/global-config/#session_reuse) owns the exact reuse, fallback, privacy, and restart-recovery semantics.
 
 ## Agent interface
@@ -260,7 +261,7 @@ Each invocation returns:
 - **SessionID** and **Resumed** - the adapter-native session identity and whether this invocation resumed it, when supported
 - **Model** and **Provider** - adapter-reported serving metadata when available
 
-One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, and acpx) are invocation-scoped.
+One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, Grok, and acpx) are invocation-scoped.
 After no-mistakes starts one, it terminates any remaining child processes when the invocation exits, fails, or is cancelled, so agent-spawned test workers, build watchers, and dev servers do not survive the step.
 Step logs record their process lifecycle, including start and exit lines with the PID, and AXI status exposes that PID while the subprocess is still active.
 Persistent server agents (Rovo Dev and OpenCode) use their managed server lifecycle instead.
@@ -375,4 +376,4 @@ The `gate validation` line is the decisive result: when the configured global ru
 For `agent: acp:<target>`, doctor verifies that `acpx` is installed on `PATH` or resolves through `acpx_path` in global config.
 It does not invoke the target or test its credentials.
 Every new validation run resolves its effective agent again after applying any trusted repository-level override.
-For `agent: auto`, Rovo Dev and Grok additionally require `acli rovodev --help` and `grok --version` to succeed.
+The global [`agent` reference](/no-mistakes/reference/global-config/#agent) owns the additional Rovo Dev and Grok pipeline-agent support probes; they apply to explicit selections and fallback lists as well as `auto`.

@@ -103,7 +103,9 @@ Default agent for all repos and setup-wizard suggestions. Can be overridden per-
 | Values  | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok`, `acp:<target>` |
 | Default | `auto`                                                                            |
 
-`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `grok` (when `grok --version` succeeds).
+`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `grok`.
+As a pipeline-agent candidate, Rovo Dev is runnable only when `acli rovodev --help` succeeds, and Grok is runnable only when `grok --version` succeeds.
+Those support probes apply to explicit selections and fallback lists as well as `auto`: an unsupported list entry is skipped, while an unsupported sole selection fails gate setup.
 `acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`.
 ACP agents are opt-in and are not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
@@ -311,8 +313,9 @@ Per-run, per-role agent session reuse for the review loop.
 | Type    | `bool` |
 | Default | `true` |
 
-When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), each run keeps one durable reviewer session across the initial full review and every full rereview, and a separate durable fixer session across review-fix turns.
-The roles never share a session, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
+When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), the default single-reviewer path keeps one durable reviewer session across the initial full review and every full rereview, and the pipeline agent keeps a separate durable fixer session across review-fix turns.
+Configured `review.reviewers` panel members remain independent cold reviewers because each member can use a different family, binary, or model override; only the pipeline agent's fixer role is eligible for reuse in panel mode.
+Reviewer and fixer roles never share a session, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 Every review turn still performs a full review of the complete branch diff; only the reviewer's own prior context is carried.
 When resume is unavailable or fails, the invocation falls back to a cold run or a fresh same-role session and the fallback is recorded in the local `agent_invocations` performance record.
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts.
