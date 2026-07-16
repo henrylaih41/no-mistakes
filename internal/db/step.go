@@ -139,7 +139,7 @@ func (d *DB) CompleteStep(id string, exitCode int, durationMS int64, logPath str
 // CompleteStepWithStatus marks a step as finished with timing and result info.
 func (d *DB) CompleteStepWithStatus(id string, status types.StepStatus, exitCode int, durationMS int64, logPath string) error {
 	_, err := d.sql.Exec(
-		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
+		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, error = NULL, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
 		status, exitCode, durationMS, logPath, now(), now(), fmt.Sprintf("status: %s", status), id,
 	)
 	if err != nil {

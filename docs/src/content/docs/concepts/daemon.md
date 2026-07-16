@@ -116,6 +116,8 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 
 Daemon logs go to `~/.no-mistakes/logs/daemon.log`. The setup wizard captures managed agent-server output in `~/.no-mistakes/logs/wizard-agent.log`. Each pipeline step also writes to its own log at `~/.no-mistakes/logs/<runID>/<step>.log`, and fatal step errors are appended there so the step log includes the failure reason even when the detail comes from command stderr. `daemon stop`, `daemon restart`, and `update` invocations are logged separately to `~/.no-mistakes/logs/cli.log` with the caller's PID, parent PID, and parent command line.
 
+Lifecycle edges are logged too. The daemon records why it exits — a clean listener close, an explicit stop request, an OS signal, a fatal startup or run error, or a panic — and it logs every managed worktree cleanup with the responsible actor and reason, whether a finishing or cancelled run, a failed run setup, or startup orphan recovery. That way no daemon exit or worktree removal happens without a trail in `daemon.log`.
+
 Set the log level in global config:
 
 ```yaml
