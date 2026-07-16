@@ -95,6 +95,7 @@ no-mistakes axi run --intent "the user's goal" --yes
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
 Err on the side of completeness: include the goal, important decisions and tradeoffs, constraints or approaches ruled in or out, and explicit requests that might otherwise look surprising in the diff.
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
+`axi run` starts a run even when there are no new commits to push, including the first run for a branch the gate already mirrors but has never validated — for example a push whose hook notification was dropped while the daemon was down — rather than failing with `no previous run for branch`.
 Reattaching to an in-flight run does not require `--intent`.
 Reattaching to an in-flight run can proceed while the daemon is already running even if the global config file has become invalid, but starting a fresh run still requires valid global config.
 Starting a fresh run also requires a runnable effective pipeline agent.
@@ -265,6 +266,7 @@ no-mistakes rerun
 ```
 
 Starts a new pipeline run using the last-known head SHA on the current branch.
+Unlike `axi run`, plain `rerun` is replay-only: it requires a prior run on the branch and reports `no previous run for branch` when none exists, so use `no-mistakes axi run` to bootstrap the first run for a branch that has never been validated.
 If another run is active on that branch, rerun cancels it before starting over.
 Treat rerun as a between-runs action after a failed or cancelled outcome, or after you have committed a separate fix outside an active run; do not use it to bypass a gate.
 

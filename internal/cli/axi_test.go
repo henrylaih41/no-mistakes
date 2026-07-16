@@ -440,9 +440,12 @@ func TestConfigErrorForFreshAxiRunAllowsReattach(t *testing.T) {
 }
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
-	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal")
+	params := rerunParams("repo-1", "feature/x", "head-abc", []types.StepName{types.StepReview}, "user goal")
 	if params.RepoID != "repo-1" || params.Branch != "feature/x" || params.Intent != "user goal" {
 		t.Fatalf("unexpected rerun params: %#v", params)
+	}
+	if params.ExpectedHeadSHA != "head-abc" {
+		t.Fatalf("ExpectedHeadSHA = %q, want head-abc", params.ExpectedHeadSHA)
 	}
 	if len(params.SkipSteps) != 1 || params.SkipSteps[0] != types.StepReview {
 		t.Fatalf("SkipSteps = %#v, want review", params.SkipSteps)

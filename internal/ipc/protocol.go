@@ -112,6 +112,12 @@ type RerunParams struct {
 	Branch    string           `json:"branch"`
 	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
 	Intent    string           `json:"intent,omitempty"`
+	// ExpectedHeadSHA, when set, permits bootstrapping the FIRST run for a branch
+	// the gate already mirrors but has never run: HandleRerun starts a fresh run
+	// only when this matches the current gate head. `axi run` sets it to the head
+	// it just pushed; the plain `rerun` command leaves it empty, keeping its
+	// replay-only "no previous run" behavior.
+	ExpectedHeadSHA string `json:"expected_head_sha,omitempty"`
 }
 
 // SubscribeParams starts an event stream for a run.
