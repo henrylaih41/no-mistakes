@@ -100,23 +100,26 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
+On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon stopped while they were active):
 
-- Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
+- Resumes a run only when it has one fully recorded approval gate, a matching worktree and head, an unambiguous branch owner, a valid step plan, and compatible saved review-session metadata
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
-- Marks every other stale active run as `failed` with the message "daemon crashed during execution"
+- Marks every other stale active run as `failed` with the message "daemon crashed during execution" rather than guessing how to resume it
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed
 - Refreshes legacy no-mistakes-managed `post-receive` hooks, installs missing managed hooks, and leaves custom hooks untouched
 - Reapplies per-worktree gate hook-path isolation to existing bare repos when Git supports `config --worktree`, so shared `core.hookspath` writes cannot disable `post-receive`
 - Enables Git push-option support on existing gate repos so per-push options like `no-mistakes.skip=...` keep working after upgrades
-- Clears any parked-awaiting-agent marker so a recovered failed run is not shown as still waiting for `axi respond`
+- Clears any parked-awaiting-agent marker on a run it fails, preserving the elapsed wait in that run's parked-time total
 
 ## Logging
 
 Daemon logs go to `~/.no-mistakes/logs/daemon.log`. The setup wizard captures managed agent-server output in `~/.no-mistakes/logs/wizard-agent.log`. Each pipeline step also writes to its own log at `~/.no-mistakes/logs/<runID>/<step>.log`, and fatal step errors are appended there so the step log includes the failure reason even when the detail comes from command stderr. `daemon stop`, `daemon restart`, and `update` invocations are logged separately to `~/.no-mistakes/logs/cli.log` with the caller's PID, parent PID, and parent command line.
 
 Lifecycle edges are logged too. The daemon records why it exits — a clean listener close, an explicit stop request, an OS signal, a fatal startup or run error, or a panic — and it logs every managed worktree cleanup with the responsible actor and reason, whether a finishing or cancelled run, a failed run setup, or startup orphan recovery. That way no daemon exit or worktree removal happens without a trail in `daemon.log`.
+
+Approval-gate entry, exit, and terminal-cleanup transactions also write structured records to `daemon.log`.
+Each record identifies the transition and phase, daemon PID, canonical state root, database path and stable file identity, run and step, target status, awaiting marker, affected-row counts, and elapsed time; failures retain the same identity fields plus the database error.
 
 Set the log level in global config:
 

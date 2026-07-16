@@ -302,11 +302,12 @@ func writeDaemonPIDFile(path string, record daemonPIDFile) error {
 	return nil
 }
 
-// recoverOnStartup cleans up after a previous daemon crash by marking stale
-// runs/steps as failed, killing orphaned managed-server subprocesses
-// (opencode, rovodev), and removing orphaned worktree directories. It also
-// best-effort migrates gate bare repos in place so older installs pick up
-// the per-worktree hookspath isolation introduced for issue #122 when Git
+// recoverOnStartup cleans up after a previous daemon exit. It preserves and
+// resumes only active runs that RunManager proves are complete parked gates,
+// marks every other stale run/step failed, kills orphaned managed-server
+// subprocesses (opencode, rovodev), and removes orphaned worktree directories.
+// It also best-effort migrates gate bare repos in place so older installs pick
+// up the per-worktree hookspath isolation introduced for issue #122 when Git
 // supports config --worktree.
 func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	reapOrphanedServers(p)
@@ -338,11 +339,10 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 // its run row is terminal, or when there is no matching run row at all.
 // This is what keeps cleanup from deleting the checkout out from under a
 // pipeline that is still actually running (see skipWorktreeCleanup).
-// Called from recoverOnStartup after
-// RecoverStaleRuns, so in the normal single-daemon path every run this loop
-// sees has already been resolved to a terminal status; it is factored out
-// separately so it can also be exercised - and its DB-aware skip behavior
-// verified - independent of stale-run recovery's side effects.
+// Called from recoverOnStartup after RecoverStaleRunsExcept, so stale runs are
+// terminal while safely recoverable parked runs remain active and are skipped.
+// It is factored out so its DB-aware skip behavior can also be verified
+// independently of stale-run recovery's side effects.
 func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 	wtRoot := p.WorktreesDir()
 	entries, err := os.ReadDir(wtRoot)

@@ -158,13 +158,17 @@ A step can implement bounded approval-gate reconciliation so a stale gate clears
 
 While the executor is paused at an approval, agent-retry, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
 That timestamp is observability only and does not alter approval behavior.
-When the wait ends, it atomically clears the marker and adds the elapsed wall time to the run's local parked-time total, so a crash cannot leave that time undercounted.
+The executor publishes the timestamp together with the step's gate status, execution duration, and any retry reason in one bounded SQLite transaction.
+If that transaction cannot update exactly one run and one step, it rolls back, clears the in-memory waiter, and fails the step instead of entering a gate that status clients cannot see.
+When the wait ends, another transaction atomically moves the step to its next durable state, clears the marker, and adds the elapsed wall time to the run's local parked-time total.
+If that exit cannot commit, a bounded terminal-cleanup transaction fails the step and run together and clears the marker, so a failed run does not retain a live-looking gate.
 While a step is running or fixing, the executor also records the latest meaningful step activity from log lines and native subprocess lifecycle events.
 AXI renders that activity in `active_steps`, including a quiet prefix when no activity has arrived for longer than the configured `step_quiet_warning`.
 
 ### IPC
 
 Communication between the CLI and daemon uses JSON-RPC 2.0 over the Unix socket. The `subscribe` method streams real-time events (step progress, log chunks, findings) to the TUI, while the `axi` commands use request/response IPC for non-interactive agent control.
+Run-state responses (`get_run`, `get_runs`, exact-head run lists, and `get_active_run`) read each run and its steps in one SQLite snapshot, so a response cannot combine the run marker from one side of a gate transition with step state from the other.
 
 ### Database
 

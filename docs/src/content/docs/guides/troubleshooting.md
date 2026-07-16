@@ -262,6 +262,9 @@ The step log records native subprocess start, exit, and retry lines plus markers
 If the step is parked at a gate, use `no-mistakes axi respond` instead of waiting.
 If the run is genuinely stuck and you want to discard it, use `no-mistakes axi abort` and then start a new run.
 
+If a run instead fails with `publish approval gate` or `publish agent retry gate`, the daemon deliberately refused to wait because it could not publish a complete, visible gate in the database.
+Search `~/.no-mistakes/logs/daemon.log` for `approval gate transition failed`; the structured record includes the transition, daemon, state-root, database identity, run, step, target status, marker, and database error needed to distinguish a row mismatch from contention or the wrong state database.
+
 ## Worktree won't clean up
 
 Symptom: `~/.no-mistakes/worktrees/<repoID>/<runID>/` sticks around after a run ends.

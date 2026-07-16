@@ -19,11 +19,10 @@ type Run struct {
 	PRURL   *string
 	Error   *string
 	// AwaitingAgentSince is the unix-seconds timestamp at which the run parked
-	// at a gate awaiting the driving agent's response (an awaiting_approval or
-	// fix_review step). It is nil whenever the run is not parked: the executor
-	// sets it on gate entry and clears it the moment the agent responds (or the
-	// wait is cancelled). It is observability only and does not affect gate
-	// resolution.
+	// at an awaiting_approval, fix_review, awaiting_agent_retry, or
+	// awaiting_triage gate. It is nil whenever the run is not durably parked;
+	// gate transitions change it atomically with the corresponding step state.
+	// It is observability only and does not affect gate resolution.
 	AwaitingAgentSince *int64
 	// ParkedMS accumulates the run's total parked-at-gate wall time in
 	// milliseconds across every gate wait (local performance telemetry;
@@ -284,8 +283,9 @@ func (d *DB) UpdateRunIntent(id string, intent RunIntent) error {
 	return nil
 }
 
-// AddRunParkedDuration accumulates parked-at-gate wall time onto a run's
-// total. Called by the executor when a gate wait ends.
+// AddRunParkedDuration accumulates parked-at-gate wall time without changing
+// gate state. Approval-gate exits use ExitApprovalGate so the step state,
+// marker, and parked total change atomically.
 func (d *DB) AddRunParkedDuration(id string, ms int64) error {
 	if ms <= 0 {
 		return nil

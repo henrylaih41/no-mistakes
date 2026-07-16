@@ -99,8 +99,9 @@ Safest local verification sequence after non-trivial changes:
 
 **Parked / Awaiting-Agent Signal**
 
-- `runs.awaiting_agent_since` is non-nil **iff** a step is actually parked at an `awaiting_approval`/`fix_review` gate: the executor sets it on gate entry, clears it when `waitForApproval` returns, and `RecoverStaleRuns` clears it on crash recovery. It is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
-- Tests: `internal/db/run_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
+- `runs.awaiting_agent_since` is non-nil **iff** one step is durably parked at `awaiting_approval`, `fix_review`, `awaiting_agent_retry`, or `awaiting_triage`. `EnterApprovalGate` and `ExitApprovalGate` own the marker, step status/duration/reason, parked time, and exact-one-row checks in bounded transactions; never split those writes again. Publication failure must clear the in-memory waiter and fail instead of entering the approval wait; exit failure must use `FailApprovalGate` so the run cannot remain terminal with a live-looking marker. The signal is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
+- IPC `get_run`, `get_runs`, `get_runs_for_head`, and `get_active_run` responses pair run and step rows from one read transaction. Gate-transition logs retain the transition/daemon/root/database identity, target status, marker, affected-row, and elapsed-time evidence needed to diagnose a future mismatch.
+- Regressions: `internal/db/gate_transition_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/db/run_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
 
 **Review-Loop Agent Sessions (`internal/pipeline/sessions.go`)**
 
