@@ -7,7 +7,7 @@ This ledger implements Amendment 1 of `design-no-mistakes-integration-v137-recon
 - v1.37 base: `fc0845a`
 - Re-port branch: `feat/integration-v137-reconciliation`
 - Accounting set: all 326 paths changed by `ce637efb..origin/integration`
-- Result before ancestry closure: all 326 paths exist; 245 are blob-identical, 79 are ported onto v1.37 content, 2 release-history paths are superseded by upstream, and 0 are intentionally dropped.
+- Result at the reviewed head: all 326 paths exist; 245 are blob-identical, 79 are ported onto v1.37 content, 2 release-history paths are superseded by upstream, and 0 are intentionally dropped.
 
 ## Feature-preservation evidence
 
@@ -34,6 +34,8 @@ Each port was completed as a logical tested commit (or a small code/docs series)
 
 - v1.37 parked-gate reconciliation is preserved as the substrate; atomic enter/exit wraps its one `waitForApprovalOrReconcile` path rather than adding a competing wait loop.
 - Panel fan-out preserves the lifecycle wrapper for each configured panel member. Performance recording remains implementation-agent scoped, while the durable reviewer session applies to the default single-reviewer path, matching the fork end state.
+- Trusted-route config selection uses the persisted route name as the retargeting signal on v1.37, rather than raw URL inequality, because the bare-gate layout may point an implicit-default worktree origin at its local mirror; routed runs still fetch and pin trusted config from the route-resolved base into an isolated ref.
+- v1.37 agent constructors are pure struct construction, so the manager retains the upstream construction-failure path without the fork's redundant close-created-agents loop; no live resource or lifecycle behavior is dropped.
 - No checklist guarantee was replaced by a weaker upstream behavior.
 - No fork-delta path is absent from the re-port head.
 

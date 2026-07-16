@@ -814,7 +814,7 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 		return resolved, err == nil, "auto", err
 	}
 	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
-		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, grok, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
 	bin := c.AgentPathFor(name)
 	resolvedBin, err := lookPath(bin)
@@ -826,6 +826,14 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 	}
 	if name == types.AgentRovoDev {
 		ok, probeErr := probeRovoDevSupport(ctx, resolvedBin)
+		if probeErr != nil {
+			return "", false, bin, probeErr
+		}
+		if !ok {
+			return "", false, bin, nil
+		}
+	} else if name == types.AgentGrok {
+		ok, probeErr := probeGrokSupport(ctx, resolvedBin)
 		if probeErr != nil {
 			return "", false, bin, probeErr
 		}

@@ -176,8 +176,8 @@ func (d *DB) SetStepAgentActivity(id string, text string, agentPID *int) error {
 // finished step.
 func (d *DB) ParkStep(id string, status types.StepStatus, errMsg string, durationMS int64) error {
 	_, err := d.sql.Exec(
-		`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = NULL WHERE id = ?`,
-		status, errMsg, durationMS, id,
+		`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = NULL, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
+		status, errMsg, durationMS, now(), fmt.Sprintf("status: %s", status), id,
 	)
 	if err != nil {
 		return fmt.Errorf("park step: %w", err)

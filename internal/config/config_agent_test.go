@@ -125,6 +125,69 @@ func TestResolveAgent_ExplicitAgentMustBeRunnable(t *testing.T) {
 	}
 }
 
+func TestResolveAgent_ExplicitGrokRequiresSupportProbe(t *testing.T) {
+	cfg := &Config{Agent: types.AgentGrok}
+	originalProbe := probeGrokSupport
+	probeGrokSupport = func(_ context.Context, bin string) (bool, error) {
+		if bin != "/usr/local/bin/grok" {
+			t.Fatalf("unexpected grok probe for %q", bin)
+		}
+		return false, nil
+	}
+	t.Cleanup(func() { probeGrokSupport = originalProbe })
+
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		if bin != "grok" {
+			t.Fatalf("lookPath(%q), want grok", bin)
+		}
+		return "/usr/local/bin/grok", nil
+	})
+	if err == nil {
+		t.Fatal("expected unsupported explicit grok agent to fail resolution")
+	}
+	for _, want := range []string{"no runnable agent", "grok", "gate cannot validate"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ResolveAgent() error should contain %q, got: %v", want, err)
+		}
+	}
+}
+
+func TestResolveAgent_ListSkipsUnsupportedGrok(t *testing.T) {
+	cfg := &Config{Agents: []types.AgentName{types.AgentGrok, types.AgentCodex}}
+	originalProbe := probeGrokSupport
+	probeGrokSupport = func(_ context.Context, bin string) (bool, error) {
+		if bin != "/usr/bin/grok" {
+			t.Fatalf("unexpected grok probe for %q", bin)
+		}
+		return false, nil
+	}
+	t.Cleanup(func() { probeGrokSupport = originalProbe })
+
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		return "/usr/bin/" + bin, nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentCodex {
+		t.Fatalf("agent = %q, want %q", cfg.Agent, types.AgentCodex)
+	}
+	if len(cfg.Agents) != 1 || cfg.Agents[0] != types.AgentCodex {
+		t.Fatalf("agents = %v, want [codex]", cfg.Agents)
+	}
+}
+
+func TestResolveAgent_UnknownAgentListsGrok(t *testing.T) {
+	cfg := &Config{Agent: "unknown"}
+	err := cfg.ResolveAgent(context.Background(), func(string) (string, error) {
+		t.Fatal("lookPath should not run for an unknown agent")
+		return "", nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "grok") {
+		t.Fatalf("ResolveAgent() error = %v, want valid-options list to include grok", err)
+	}
+}
+
 func TestResolveAgent_ExplicitACPAgent(t *testing.T) {
 	cfg := &Config{Agent: "acp:gemini"}
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
