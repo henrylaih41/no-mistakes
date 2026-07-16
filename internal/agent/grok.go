@@ -12,8 +12,8 @@ import (
 )
 
 // grokAgent spawns the Grok Build CLI in single-turn headless mode for each
-// invocation. Grok emits one final response on stdout; --json-schema switches
-// that response to schema-constrained JSON when structured output is required.
+// invocation. With --json-schema, Grok wraps the schema-constrained result in
+// a response envelope whose text may contain intermediate progress summaries.
 type grokAgent struct {
 	bin       string
 	extraArgs []string
@@ -51,10 +51,44 @@ func (a *grokAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	}
 
 	text := strings.TrimSpace(stdout.String())
-	if opts.OnChunk != nil && text != "" {
-		opts.OnChunk(text)
+	result, err := finalizeGrokResult(text, opts.JSONSchema, TokenUsage{})
+	if err != nil {
+		if opts.OnChunk != nil && text != "" {
+			opts.OnChunk(text)
+		}
+		return nil, err
 	}
-	return finalizeTextResult("grok", text, opts.JSONSchema, TokenUsage{})
+	if opts.OnChunk != nil && result.Text != "" {
+		opts.OnChunk(result.Text)
+	}
+	return result, nil
+}
+
+type grokResponse struct {
+	Text             string          `json:"text"`
+	StructuredOutput json.RawMessage `json:"structuredOutput"`
+}
+
+func finalizeGrokResult(text string, schema json.RawMessage, usage TokenUsage) (*Result, error) {
+	if len(schema) == 0 {
+		return finalizeTextResult("grok", text, nil, usage)
+	}
+
+	var response grokResponse
+	if err := json.Unmarshal([]byte(text), &response); err == nil &&
+		len(response.StructuredOutput) > 0 &&
+		!bytes.Equal(bytes.TrimSpace(response.StructuredOutput), []byte("null")) {
+		result, err := finalizeTextResult("grok", string(response.StructuredOutput), schema, usage)
+		if err != nil {
+			return nil, err
+		}
+		result.Text = response.Text
+		return result, nil
+	}
+
+	// Preserve compatibility with Grok versions that print the structured
+	// object directly instead of returning the CLI response envelope.
+	return finalizeTextResult("grok", text, schema, usage)
 }
 
 // buildArgs constructs the managed Grok CLI invocation. Permitted user CLI
