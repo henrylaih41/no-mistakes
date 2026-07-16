@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -46,6 +47,14 @@ func TestProjectPath(t *testing.T) {
 				t.Fatalf("ProjectPath(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestReplyToReviewCommentUnsupported(t *testing.T) {
+	t.Parallel()
+	host := New(nil, nil, "", "")
+	if err := host.ReplyToReviewComment(context.Background(), 1, 2, "body"); !errors.Is(err, scm.ErrUnsupported) {
+		t.Fatalf("ReplyToReviewComment() error = %v, want ErrUnsupported", err)
 	}
 }
 

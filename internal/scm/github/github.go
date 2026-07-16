@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -132,7 +133,7 @@ func repoOwner(slug string) string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitHub }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, Reviews: true}
 }
 
 func (h *Host) Available(ctx context.Context) error {
@@ -355,6 +356,407 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, _ *scm.PR, branch, head
 		}
 	}
 	return "", nil
+}
+
+// DefaultBotLogin is the GitHub account a reviewing bot posts under when the
+// caller does not override it. It mirrors the config default; the two layers are
+// independent (the github package does not import config), so the literal is
+// duplicated deliberately.
+const DefaultBotLogin = "devin-ai-integration[bot]"
+
+// apiArgs builds the args for `gh api repos/{owner}/{repo}/<suffix>`. The repo
+// slug is embedded in the path because `gh api` (unlike `gh pr`) does not accept
+// --repo; this is the gh-api equivalent of repoArgs(). When the slug is unknown
+// the {owner}/{repo} placeholder lets gh resolve the repo from its working dir.
+func (h *Host) apiArgs(suffix string) []string {
+	repo := h.repo
+	if repo == "" {
+		repo = "{owner}/{repo}"
+	}
+	return []string{"api", "repos/" + repo + "/" + suffix}
+}
+
+// paginatedAPIArgs is apiArgs plus --paginate, so gh follows the Link headers
+// and returns every page merged into a single JSON array. Without it a list read
+// (PR review comments, issue comments, or reviews) silently stops at the first
+// page (~30 items): a severe finding or the head-SHA review object that lands
+// beyond page 1 would be dropped, and the review gate could then wrongly treat a
+// changes-requested PR as approved.
+func (h *Host) paginatedAPIArgs(suffix string) []string {
+	return append(h.apiArgs(suffix), "--paginate")
+}
+
+type ghUser struct {
+	Login string `json:"login"`
+}
+
+// reviewThreadsQuery reads the PR's review threads together with their
+// resolution and outdated state so the read layer can keep only LIVE findings.
+// GitHub re-anchors a bot's old inline comments onto the latest commit, so a
+// REST read of pulls/{n}/comments reports already-addressed comments as live and
+// the verdict never clears. The GraphQL reviewThreads API exposes the truth:
+// isResolved (a human/bot resolved the thread) and isOutdated (the code the
+// comment was anchored to has changed = effectively addressed). The first
+// comment in a thread carries its author, anchor (path/line), and databaseId
+// (the REST id needed to reply); replies follow.
+//
+// It is CURSOR-PAGINATED via $cursor / pageInfo: reviewThreads returns threads
+// oldest-first and counts live, outdated, and resolved threads alike toward the
+// first:100 window. On a busy PR a newest live severe finding could land past
+// the first page, get truncated, and wrongly read as APPROVED, so GetBotFindings
+// walks every page (after:$cursor) before filtering.
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login} databaseId path line originalLine body url}}}}}}}`
+
+// ghReviewThreadsResponse is the `gh api graphql` payload for reviewThreadsQuery.
+type ghReviewThreadsResponse struct {
+	Data struct {
+		Repository struct {
+			PullRequest struct {
+				ReviewThreads struct {
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+					Nodes []ghReviewThread `json:"nodes"`
+				} `json:"reviewThreads"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	} `json:"data"`
+}
+
+// ghReviewThread is one PR review thread: its resolution/outdated state plus the
+// ordered comments it contains (the first is the anchoring comment).
+type ghReviewThread struct {
+	IsResolved bool `json:"isResolved"`
+	IsOutdated bool `json:"isOutdated"`
+	Comments   struct {
+		Nodes []ghThreadComment `json:"nodes"`
+	} `json:"comments"`
+}
+
+// ghThreadComment is a single comment node within a review thread. DatabaseID is
+// the comment's REST id, used as ReviewComment.ID so the loop can reply to it.
+type ghThreadComment struct {
+	Author       ghUser `json:"author"`
+	DatabaseID   int64  `json:"databaseId"`
+	Path         string `json:"path"`
+	Line         int    `json:"line"`
+	OriginalLine int    `json:"originalLine"`
+	Body         string `json:"body"`
+	URL          string `json:"url"`
+}
+
+// ownerName resolves the repo slug into its owner and name. When the slug is
+// unknown it falls back to gh's {owner}/{repo} placeholders, which `gh api`
+// (including graphql -F field values) fills from the working-dir repo — the
+// graphql analogue of apiArgs()'s placeholder fallback.
+func (h *Host) ownerName() (string, string) {
+	owner, name, ok := strings.Cut(h.repo, "/")
+	owner, name = strings.TrimSpace(owner), strings.TrimSpace(name)
+	if !ok || owner == "" || name == "" {
+		return "{owner}", "{repo}"
+	}
+	return owner, name
+}
+
+// reviewThreadsArgs builds the `gh api graphql` invocation that fetches one page
+// of the PR's review threads (reviewThreadsQuery) bound to this host's repo and
+// prNumber. cursor is the endCursor of the previous page ("" for the first page,
+// where $cursor resolves to null = start from the beginning). It reuses the same
+// CmdFactory as every other gh call; only the args differ.
+//
+// owner and name are passed with -f (raw string), not -F: -F magic-coerces an
+// all-numeric value (e.g. a repo literally named "123") into a JSON number,
+// which then fails to bind to the String! GraphQL variable. The integer number
+// variable still uses -F so it binds to Int!.
+func (h *Host) reviewThreadsArgs(prNumber int, cursor string) []string {
+	owner, name := h.ownerName()
+	args := []string{
+		"api", "graphql",
+		"-f", "query=" + reviewThreadsQuery,
+		"-f", "owner=" + owner,
+		"-f", "name=" + name,
+		"-F", fmt.Sprintf("number=%d", prNumber),
+	}
+	if cursor != "" {
+		args = append(args, "-f", "cursor="+cursor)
+	}
+	return args
+}
+
+// ghReview is a PR review object from `gh api repos/{owner}/{repo}/pulls/{n}/reviews`.
+type ghReview struct {
+	State       string `json:"state"`
+	CommitID    string `json:"commit_id"`
+	SubmittedAt string `json:"submitted_at"`
+	HTMLURL     string `json:"html_url"`
+	User        ghUser `json:"user"`
+}
+
+// GetBotFindings returns botLogin's LIVE, file-scoped findings on the PR. It
+// reads the PR's review threads via `gh api graphql` (reviewThreadsQuery) and
+// keeps only threads that are still actionable:
+//
+//   - the thread's FIRST comment was authored by botLogin (replies are ignored);
+//   - the thread is NOT resolved (isResolved==false) and NOT outdated
+//     (isOutdated==false); and
+//   - the thread is file-scoped (its anchor has a path).
+//
+// isOutdated is the primary liveness signal — more reliable than commit_id
+// matching. GitHub re-anchors a bot's old inline comments onto the latest
+// commit, so a REST commit_id read reports already-addressed comments as live;
+// an outdated thread means the anchored code changed (the comment was
+// effectively addressed) and a resolved thread means someone closed it. Both are
+// excluded so a fixed-but-lingering comment no longer counts as a phantom
+// finding and the post-PR review loop can converge.
+//
+// Top-level (issue) comments are not review threads and so never appear here:
+// they carry no path, are review summaries rather than actionable file-scoped
+// findings, and do not drive the verdict. Severity is parsed from each body.
+func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLogin string) ([]scm.ReviewComment, error) {
+	botLogin = strings.TrimSpace(botLogin)
+	if botLogin == "" {
+		botLogin = DefaultBotLogin
+	}
+
+	// Fail-safe: without a head SHA we cannot confirm we are reading the current
+	// commit's review state, so report no findings rather than risk surfacing a
+	// stale thread. Mirrors GetReviewVerdict's empty-head short-circuit and keeps
+	// the two consistent (and short-circuits before any gh round-trip).
+	if strings.TrimSpace(headSHA) == "" {
+		return nil, nil
+	}
+
+	// Walk every page of review threads before filtering. reviewThreads returns
+	// threads oldest-first and counts resolved/outdated threads toward the
+	// first:100 window, so on a busy PR a newest live severe finding can land past
+	// page 1; reading only the first page could truncate it and wrongly read the
+	// verdict as APPROVED. The empty-endCursor guard prevents an infinite loop if
+	// the API ever reports hasNextPage:true without advancing the cursor.
+	var threads []ghReviewThread
+	cursor := ""
+	for {
+		out, err := h.cmd(ctx, "gh", h.reviewThreadsArgs(prNumber, cursor)...).Output()
+		if err != nil {
+			return nil, fmt.Errorf("gh api graphql reviewThreads: %w", err)
+		}
+		var resp ghReviewThreadsResponse
+		if err := json.Unmarshal(out, &resp); err != nil {
+			return nil, fmt.Errorf("parse review threads: %w", err)
+		}
+		rt := resp.Data.Repository.PullRequest.ReviewThreads
+		threads = append(threads, rt.Nodes...)
+		if !rt.PageInfo.HasNextPage || strings.TrimSpace(rt.PageInfo.EndCursor) == "" {
+			break
+		}
+		cursor = rt.PageInfo.EndCursor
+	}
+
+	findings := make([]scm.ReviewComment, 0, len(threads))
+	for _, t := range threads {
+		// A resolved thread (someone marked it done) or an outdated thread (the
+		// anchored code changed = effectively addressed) is no longer live and must
+		// not count toward the verdict — this is the convergence mechanism.
+		if t.IsResolved || t.IsOutdated {
+			continue
+		}
+		if len(t.Comments.Nodes) == 0 {
+			continue
+		}
+		first := t.Comments.Nodes[0]
+		if !strings.EqualFold(strings.TrimSpace(first.Author.Login), botLogin) {
+			continue
+		}
+		if strings.TrimSpace(first.Path) == "" {
+			continue // not a file-scoped finding
+		}
+		findings = append(findings, scm.ReviewComment{
+			ID:       first.DatabaseID,
+			Path:     first.Path,
+			Line:     pickLine(first.Line, first.OriginalLine),
+			Body:     first.Body,
+			Severity: severityFromBody(first.Body),
+			URL:      first.URL,
+		})
+	}
+	return findings, nil
+}
+
+// GetReviewVerdict derives botLogin's verdict for headSHA from the PR's review
+// objects + its LIVE findings, never from a commit status check. It also returns
+// the findings it read so callers do not need a second GetBotFindings round-trip
+// (the verdict already required them).
+//
+// Why derive: Devin posts PR reviews with state=COMMENTED (never
+// CHANGES_REQUESTED) and publishes no commit status check, so a status rollup is
+// empty even when it has flagged blocking issues. It also re-reviews per commit,
+// so there can be several review objects per head SHA.
+//
+// Derivation:
+//   - NONE: the bot has never reviewed the PR.
+//   - PENDING: the bot has reviewed before but not yet headSHA.
+//   - CHANGES_REQUESTED: the bot reviewed headSHA and EITHER its MOST RECENT
+//     review on the matching head is a native CHANGES_REQUESTED state, OR it left
+//     at least one severe (high/medium) LIVE file-scoped finding.
+//   - APPROVED: the bot reviewed headSHA, its most recent head review is not
+//     CHANGES_REQUESTED, and no severe LIVE file-scoped findings remain.
+//
+// Only the MOST RECENT bot review targeting the head (by submitted_at) decides
+// the native state: a bot that requested changes and then re-reviewed the same
+// SHA as APPROVED must clear, so the states are not OR-ed across the head's
+// review history. A native CHANGES_REQUESTED state is honored directly: a
+// reviewer that uses GitHub's request-changes flow must not be treated as
+// approved just because no inline body parsed as severe. Otherwise only live
+// file-scoped findings drive CHANGES_REQUESTED: GetBotFindings already excludes
+// resolved/outdated review threads, so a finding the bot left but whose code has
+// since changed (or whose thread was resolved) no longer keeps the verdict
+// not-green — which is what finally lets the loop converge to APPROVED.
+func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botLogin string) (scm.ReviewVerdict, []scm.ReviewComment, error) {
+	botLogin = strings.TrimSpace(botLogin)
+	if botLogin == "" {
+		botLogin = DefaultBotLogin
+	}
+
+	// Fail-safe: without a head SHA we cannot scope reviews to the current commit.
+	// Rather than letting an empty SHA act as a wildcard that matches every review
+	// in the PR's history, report not-yet-reviewed so the caller's grace window /
+	// fail policy decides. This also keeps GetReviewVerdict and GetBotFindings
+	// consistent (GetBotFindings likewise returns nothing on an empty head).
+	if strings.TrimSpace(headSHA) == "" {
+		return scm.VerdictNone, nil, nil
+	}
+
+	reviewsOut, err := h.cmd(ctx, "gh", h.paginatedAPIArgs(fmt.Sprintf("pulls/%d/reviews", prNumber))...).Output()
+	if err != nil {
+		return "", nil, fmt.Errorf("gh api pulls reviews: %w", err)
+	}
+	var reviews []ghReview
+	if err := json.Unmarshal(reviewsOut, &reviews); err != nil {
+		return "", nil, fmt.Errorf("parse PR reviews: %w", err)
+	}
+
+	head := strings.TrimSpace(headSHA)
+	reviewedAny, reviewedHead, headChangesRequested := false, false, false
+	// Track the most recent bot review targeting the head (by submitted_at) so its
+	// state — not the OR of every state in the head's history — decides the native
+	// verdict. Ties (or unparseable timestamps) fall back to API order, which is
+	// already chronological, so the last matching review wins.
+	var latestHeadAt time.Time
+	var haveLatestHead bool
+	for _, r := range reviews {
+		if !strings.EqualFold(strings.TrimSpace(r.User.Login), botLogin) {
+			continue
+		}
+		reviewedAny = true
+		if !strings.EqualFold(strings.TrimSpace(r.CommitID), head) {
+			continue
+		}
+		reviewedHead = true
+		submittedAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(r.SubmittedAt))
+		if haveLatestHead && submittedAt.Before(latestHeadAt) {
+			continue
+		}
+		latestHeadAt = submittedAt
+		haveLatestHead = true
+		headChangesRequested = strings.EqualFold(strings.TrimSpace(r.State), "CHANGES_REQUESTED")
+	}
+	if !reviewedAny {
+		return scm.VerdictNone, nil, nil
+	}
+
+	findings, err := h.GetBotFindings(ctx, prNumber, headSHA, botLogin)
+	if err != nil {
+		// A native CHANGES_REQUESTED on the head is authoritative from the review
+		// state alone, so surface not-green even when the findings read fails.
+		if headChangesRequested {
+			return scm.VerdictChangesRequested, nil, nil
+		}
+		return "", nil, err
+	}
+	if !reviewedHead {
+		return scm.VerdictPending, findings, nil
+	}
+	if headChangesRequested {
+		return scm.VerdictChangesRequested, findings, nil
+	}
+	for _, f := range findings {
+		if f.Path == "" {
+			continue // top-level summary, not a file-scoped finding
+		}
+		if f.Severity == severityHigh || f.Severity == severityMedium {
+			return scm.VerdictChangesRequested, findings, nil
+		}
+	}
+	return scm.VerdictApproved, findings, nil
+}
+
+// ReplyToReviewComment posts a threaded reply under an existing PR review comment
+// (identified by its REST/database id) via
+// `gh api repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies` (a POST: gh
+// switches to POST automatically once a -f field is supplied). It reuses
+// apiArgs() for the repo-scoped path, mirroring every other gh-api call. The
+// review loop calls it best-effort to acknowledge addressed findings; callers
+// should gate on Capabilities().Reviews.
+func (h *Host) ReplyToReviewComment(ctx context.Context, prNumber int, commentID int64, body string) error {
+	args := append(h.apiArgs(fmt.Sprintf("pulls/%d/comments/%d/replies", prNumber, commentID)), "-f", "body="+body)
+	if out, err := h.cmd(ctx, "gh", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("gh api reply to review comment: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+const (
+	severityHigh   = "high"
+	severityMedium = "medium"
+	severityLow    = "low"
+)
+
+// severityFromBody parses a coarse severity bucket from a bot finding body.
+// "high" requires an EXPLICIT marker — only the 🔴 emoji (Devin uses it for
+// bug/high); 🚩 marks medium. The keyword fallback deliberately never escalates
+// to high: a bare-word heuristic false-positives on negated or contextual
+// mentions ("this is not a bug", "no critical issues" would otherwise both
+// register as high), so an unmarked body is treated conservatively as medium
+// (still severe enough to gate) unless it is explicitly low/nit.
+//
+// Keyword matching for low/nit is word-boundary based rather than substring
+// based: a plain strings.Contains for "low" also fires on "allow", "follow",
+// "below", "flow", and "slow", which would silently downgrade a severe unmarked
+// finding to low and drop it from the verdict.
+func severityFromBody(body string) string {
+	switch {
+	case strings.Contains(body, "🔴"):
+		return severityHigh
+	case strings.Contains(body, "🚩"):
+		return severityMedium
+	}
+	words := bodyWordSet(strings.ToLower(body))
+	switch {
+	case words["low"] || words["nit"]:
+		return severityLow
+	default:
+		return severityMedium
+	}
+}
+
+// bodyWordSet splits text into whole words (maximal runs of letters and digits),
+// so keyword lookups are boundary-aware instead of matching arbitrary
+// substrings of longer words.
+func bodyWordSet(text string) map[string]bool {
+	set := map[string]bool{}
+	for _, w := range strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		set[w] = true
+	}
+	return set
+}
+
+func pickLine(line, originalLine int) int {
+	if line > 0 {
+		return line
+	}
+	return originalLine
 }
 
 type githubRun struct {

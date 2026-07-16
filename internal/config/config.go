@@ -65,6 +65,7 @@ type GlobalConfig struct {
 	Intent       IntentRaw
 	Test         TestRaw
 	Review       ReviewRaw
+	ReviewLoop   ReviewLoopRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -84,6 +85,7 @@ type globalConfigRaw struct {
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
 	Review               ReviewRaw           `yaml:"review"`
+	ReviewLoop           ReviewLoopRaw       `yaml:"review_loop"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -125,7 +127,8 @@ type RepoConfig struct {
 	// global panel; an empty reviewer list disables the panel and reverts to
 	// the single-agent default. When the key is absent the repo inherits the
 	// global review config (see Merge).
-	Review *ReviewRaw `yaml:"review"`
+	Review     *ReviewRaw    `yaml:"review"`
+	ReviewLoop ReviewLoopRaw `yaml:"review_loop"`
 }
 
 // DocumentRaw is the YAML representation of document-step settings.
@@ -138,16 +141,17 @@ type DocumentRaw struct {
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent                  agentList   `yaml:"agent"`
-		Commands               Commands    `yaml:"commands"`
-		IgnorePatterns         []string    `yaml:"ignore_patterns"`
-		AllowRepoCommands      bool        `yaml:"allow_repo_commands"`
-		AutoFix                AutoFixRaw  `yaml:"auto_fix"`
-		Intent                 IntentRaw   `yaml:"intent"`
-		Test                   TestRaw     `yaml:"test"`
-		Document               DocumentRaw `yaml:"document"`
-		DisableProjectSettings bool        `yaml:"disable_project_settings"`
-		Review                 *ReviewRaw  `yaml:"review"`
+		Agent                  agentList     `yaml:"agent"`
+		Commands               Commands      `yaml:"commands"`
+		IgnorePatterns         []string      `yaml:"ignore_patterns"`
+		AllowRepoCommands      bool          `yaml:"allow_repo_commands"`
+		AutoFix                AutoFixRaw    `yaml:"auto_fix"`
+		Intent                 IntentRaw     `yaml:"intent"`
+		Test                   TestRaw       `yaml:"test"`
+		Document               DocumentRaw   `yaml:"document"`
+		DisableProjectSettings bool          `yaml:"disable_project_settings"`
+		Review                 *ReviewRaw    `yaml:"review"`
+		ReviewLoop             ReviewLoopRaw `yaml:"review_loop"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -164,6 +168,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Document = raw.Document
 	c.DisableProjectSettings = raw.DisableProjectSettings
 	c.Review = raw.Review
+	c.ReviewLoop = raw.ReviewLoop
 	return nil
 }
 
@@ -216,6 +221,7 @@ type Config struct {
 	Test                 Test
 	Document             Document
 	Review               Review
+	ReviewLoop           ReviewLoop
 	// DisableProjectSettings is the resolved, trusted-only opt-out (see the
 	// RepoConfig field). When true, gate agents are launched with their
 	// project-level settings/instructions suppressed; the daemon fails the run
@@ -260,6 +266,71 @@ type Review struct {
 	Reviewers   []ReviewerSpec
 	MaxParallel int
 	FailOpen    bool
+}
+
+// DefaultReviewLoopBotLogin is the GitHub account whose PR reviews the post-PR
+// review loop reads by default. The reviewer is an external bot (Devin); the
+// fixer that acts on its findings is always no-mistakes itself, so no fixer
+// agent is configured here.
+const DefaultReviewLoopBotLogin = "devin-ai-integration[bot]"
+
+// ReviewLoopRaw is the YAML representation of the post-PR review loop (read
+// layer). Pointer fields distinguish "not set" (nil) from explicit zero/false
+// values so global defaults survive a partially-specified repo block.
+type ReviewLoopRaw struct {
+	Enabled         *bool   `yaml:"enabled"`
+	BotLogin        *string `yaml:"bot_login"`
+	MaxRounds       *int    `yaml:"max_rounds"`
+	FailOpen        *bool   `yaml:"fail_open"`
+	ReplyOnFix      *bool   `yaml:"reply_on_fix"`
+	Retrigger       *bool   `yaml:"retrigger"`
+	DevinAPIKeyFile *string `yaml:"devin_api_key_file"`
+}
+
+// ReviewLoop is the resolved post-PR review-loop config. When Enabled is false
+// (the default) the loop is inert and pipeline behavior is byte-identical.
+// BotLogin selects whose PR reviews are read (default DefaultReviewLoopBotLogin).
+// MaxRounds bounds how many review/fix rounds the loop will run. FailOpen
+// (default true) means a silent reviewer does not block: if the bot never posts
+// a verdict, the loop proceeds rather than holding the PR. The fixer is always
+// no-mistakes (the reviewing bot is review-only), so no fixer agent is config'd.
+//
+// Accepted tradeoff with FailOpen=false: the fail-closed path waits for the bot
+// and relies on the CI step's idle timeout to escalate to the human gate. That
+// idle timer re-arms every time the base branch advances (see CITimeout), so on
+// a PR whose base branch is actively moving while the bot stays silent, the
+// timeout may never elapse and escalation may never fire - the loop just keeps
+// waiting. This is intentional (FailOpen=true is the default and does not have
+// this property); a FailOpen=false user on an active base branch should rely on
+// an explicit `no-mistakes axi abort` rather than the idle timeout to stop a
+// run held open by a permanently-silent reviewer.
+type ReviewLoop struct {
+	Enabled   bool
+	BotLogin  string
+	MaxRounds int
+	FailOpen  bool
+	// ReplyOnFix (default true) controls whether the loop, after it successfully
+	// pushes a fix for the bot's findings, posts a threaded reply on each
+	// addressed review comment so a human (and the bot's re-review) sees what the
+	// loop did. It only takes effect when Enabled, so the loop-disabled path stays
+	// byte-identical.
+	ReplyOnFix bool
+	// Retrigger (default true) controls whether the loop EXPLICITLY (re-)triggers a
+	// Devin review via the Devin HTTP API instead of relying solely on Devin's
+	// auto-review (which is rate-limited / pausable). It only takes effect when
+	// Enabled and only when a Devin API key resolves (see DevinAPIKeyFile), so the
+	// loop-disabled path stays byte-identical. COST: each trigger creates a paid
+	// Devin session (ACUs), so the loop fires it AT MOST ONCE PER HEAD SHA.
+	Retrigger bool
+	// DevinAPIKeyFile is the path read for the Devin API key when the DEVIN_API_KEY
+	// environment variable is empty (a leading ~ expands to the user home dir).
+	// Default ~/.config/devin/api_key.
+	//
+	// SECURITY: this is part of the (already trust-gated) ReviewLoop, honored ONLY
+	// from the trusted default-branch copy. Trust-gating the key-file path is a
+	// security requirement: an untrusted PR branch must not be able to redirect it
+	// to read/exfiltrate an arbitrary file via the Devin trigger.
+	DevinAPIKeyFile string
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -457,6 +528,30 @@ intent:
 #   evidence:
 #     store_in_repo: true
 #     dir: .no-mistakes/evidence
+
+# Post-PR review loop (read layer; off by default). When enabled, no-mistakes
+# reads an external review bot's PR verdict + findings and feeds them back to its
+# own fixer (the bot is review-only; no-mistakes is always the fixer). With the
+# default disabled state the pipeline behaves identically.
+# review_loop:
+#   enabled: false
+#   bot_login: "devin-ai-integration[bot]"
+#   max_rounds: 3
+#   fail_open: true   # a silent reviewer does not block the PR
+#   # Note: with fail_open=false the loop waits for the bot and leans on the CI
+#   # idle timeout to escalate. That timer re-arms whenever the base branch
+#   # advances, so on an actively-moving base a permanently-silent reviewer may
+#   # never trigger escalation - abort the run explicitly if that happens.
+#   retrigger: true   # explicitly (re-)trigger a Devin review via the Devin HTTP
+#                     # API instead of relying solely on Devin's auto-review
+#                     # (which is rate-limited / pausable). Best-effort: a missing
+#                     # key or any API error is logged and the loop continues.
+#                     # COST: each trigger creates a paid Devin session (ACUs); the
+#                     # loop fires it at most once per head SHA to bound the spend.
+#   # devin_api_key_file: "~/.config/devin/api_key"  # read when DEVIN_API_KEY is
+#                     # unset. SECURITY: honored only from the trusted default
+#                     # branch, so a pushed branch cannot redirect it to read an
+#                     # arbitrary file.
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -1083,6 +1178,10 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		return nil, err
 	}
 	cfg.Review = raw.Review
+	if err := validateReviewLoop(raw.ReviewLoop); err != nil {
+		return nil, err
+	}
+	cfg.ReviewLoop = raw.ReviewLoop
 
 	return cfg, nil
 }
@@ -1151,6 +1250,9 @@ func LoadRepoFromBytes(data []byte) (*RepoConfig, error) {
 			return nil, err
 		}
 	}
+	if err := validateReviewLoop(cfg.ReviewLoop); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -1177,12 +1279,15 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // The code-executing selection fields - Commands (run verbatim via sh -c on
 // the daemon host), Agent/Agents (select which processes launch with the
 // maintainer's credentials, including fallback lists and acp: targets), and
-// Review (the panel that selects reviewer processes) - are
+// Review (the panel that selects reviewer processes), and ReviewLoop (which
+// gates post-PR review, selects the bot login, bounds fix rounds, and may read
+// the configured API-key file) - are
 // taken only from the trusted copy when it is present, so a contributor's
 // pushed branch cannot inject shell or pick an agent. Document (the
 // documentation placement policy injected into the document gate prompt) is
 // trusted-only for the same reason: a pushed branch must not weaken the
-// documentation rules that gate itself. DisableProjectSettings and Review are also
+// documentation rules that gate itself. DisableProjectSettings, Review, and
+// ReviewLoop are also
 // trusted-only so a pushed branch cannot enable or defeat the gate-agent
 // project-instruction boundary. When allowRepoCommands is
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
@@ -1190,14 +1295,24 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // agent selection.
 // When there is no trusted copy and the maintainer has not opted in, both
 // fields are forced empty (Agent "" and nil Agents inherit the global agent;
-// Commands{} yields built-in defaults; Review nil inherits the global panel)
+// Commands{} yields built-in defaults; Review nil inherits the global panel;
+// ReviewLoopRaw{} leaves the loop off)
 // rather than falling back to the pushed
 // branch - this blocks the supply-chain vector for repos that ship
 // .no-mistakes.yaml only on feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, intent, test) are always
-// taken from the pushed copy, matching prior behavior, since they cannot
-// run arbitrary shell or select a process.
+// ReviewLoop is gated even though the fixer it drives is always no-mistakes
+// itself (never a contributor-named binary): a pushed branch that could flip
+// enabled, swap bot_login to an attacker-controlled account whose comments are
+// fed verbatim into the fix prompt, change max_rounds, or redirect
+// devin_api_key_file to read/exfiltrate an arbitrary file via the Devin trigger
+// would be steering CI gating, prompt content, and secret-file access — exactly
+// the execution-affecting surface that Review is gated for. So it is taken ONLY
+// from the trusted default-branch copy.
+//
+// The remaining non-executing fields (ignore patterns, auto-fix, intent, test)
+// are always taken from the pushed copy, matching prior behavior, since they
+// cannot run arbitrary shell, select a process, or steer CI gating.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -1224,11 +1339,16 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Agents = copyAgents(trusted.Agents)
 		// SECURITY: reviewer selection is code-executing config.
 		effective.Review = trusted.Review
+		// SECURITY: the review loop gates CI, names the bot login whose comments
+		// become fix-prompt content, and bounds how many fix rounds run - all
+		// execution-affecting, like Review. Take it from the trusted copy only.
+		effective.ReviewLoop = trusted.ReviewLoop
 	} else {
 		effective.Commands = Commands{}
 		effective.Agent = ""
 		effective.Agents = nil
 		effective.Review = nil
+		effective.ReviewLoop = ReviewLoopRaw{}
 	}
 	return &effective
 }
@@ -1318,6 +1438,63 @@ func resolveReview(raw ReviewRaw) Review {
 	}
 }
 
+// reviewLoopDefaults returns the default post-PR review-loop settings. The loop
+// is off by default (Enabled false) so behavior is byte-identical until a user
+// opts in. FailOpen defaults true: a silent reviewer must not block the PR.
+// ReplyOnFix defaults true: when the loop is enabled, acknowledging an addressed
+// finding is the helpful default (it is inert while Enabled is false).
+func reviewLoopDefaults() ReviewLoop {
+	return ReviewLoop{
+		Enabled:         false,
+		BotLogin:        DefaultReviewLoopBotLogin,
+		MaxRounds:       3,
+		FailOpen:        true,
+		ReplyOnFix:      true,
+		Retrigger:       true,
+		DevinAPIKeyFile: DefaultDevinAPIKeyFile,
+	}
+}
+
+// DefaultDevinAPIKeyFile is the default path the review loop reads the Devin API
+// key from when DEVIN_API_KEY is unset (a leading ~ is expanded at use time).
+const DefaultDevinAPIKeyFile = "~/.config/devin/api_key"
+
+// applyReviewLoopOverrides applies non-nil raw values onto resolved defaults.
+func applyReviewLoopOverrides(dst *ReviewLoop, src *ReviewLoopRaw) {
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.BotLogin != nil && strings.TrimSpace(*src.BotLogin) != "" {
+		dst.BotLogin = strings.TrimSpace(*src.BotLogin)
+	}
+	if src.MaxRounds != nil {
+		dst.MaxRounds = *src.MaxRounds
+	}
+	if src.FailOpen != nil {
+		dst.FailOpen = *src.FailOpen
+	}
+	if src.ReplyOnFix != nil {
+		dst.ReplyOnFix = *src.ReplyOnFix
+	}
+	if src.Retrigger != nil {
+		dst.Retrigger = *src.Retrigger
+	}
+	if src.DevinAPIKeyFile != nil && strings.TrimSpace(*src.DevinAPIKeyFile) != "" {
+		dst.DevinAPIKeyFile = strings.TrimSpace(*src.DevinAPIKeyFile)
+	}
+}
+
+// validateReviewLoop rejects a negative max_rounds; the remaining values (a bot
+// login string and booleans) need no shape validation. This is input
+// validation only - the trust boundary (review_loop is execution-affecting and
+// so honored only from the trusted copy) is enforced in EffectiveRepoConfig.
+func validateReviewLoop(raw ReviewLoopRaw) error {
+	if raw.MaxRounds != nil && *raw.MaxRounds < 0 {
+		return fmt.Errorf("invalid review_loop.max_rounds: %d (must be >= 0)", *raw.MaxRounds)
+	}
+	return nil
+}
+
 // autoFixDefaults returns the default auto-fix configuration.
 func autoFixDefaults() AutoFix {
 	return AutoFix{
@@ -1400,6 +1577,10 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		review = resolveReview(*repo.Review)
 	}
 
+	reviewLoop := reviewLoopDefaults()
+	applyReviewLoopOverrides(&reviewLoop, &global.ReviewLoop)
+	applyReviewLoopOverrides(&reviewLoop, &repo.ReviewLoop)
+
 	cfg := &Config{
 		Agent:                global.Agent,
 		Agents:               copyAgents(global.Agents),
@@ -1418,6 +1599,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Test:                 test,
 		Document:             Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		Review:               review,
+		ReviewLoop:           reviewLoop,
 		// repo is the EffectiveRepoConfig result, so this value is already
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,

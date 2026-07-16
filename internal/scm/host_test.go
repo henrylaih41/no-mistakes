@@ -130,3 +130,12 @@ func (fakeHost) GetMergeableState(context.Context, *PR) (MergeableState, error) 
 func (fakeHost) FetchFailedCheckLogs(context.Context, *PR, string, string, []string) (string, error) {
 	return "", ErrUnsupported
 }
+func (fakeHost) GetReviewVerdict(context.Context, int, string, string) (ReviewVerdict, []ReviewComment, error) {
+	return VerdictNone, nil, ErrUnsupported
+}
+func (fakeHost) GetBotFindings(context.Context, int, string, string) ([]ReviewComment, error) {
+	return nil, ErrUnsupported
+}
+func (fakeHost) ReplyToReviewComment(context.Context, int, int64, string) error {
+	return ErrUnsupported
+}

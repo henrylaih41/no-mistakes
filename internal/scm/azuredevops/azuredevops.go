@@ -235,6 +235,20 @@ func (h *Host) FetchFailedCheckLogs(_ context.Context, _ *scm.PR, _ string, _ st
 	return "", scm.ErrUnsupported
 }
 
+// Azure DevOps has no review-bot adapter yet. Keep the provider explicit and
+// fail closed through the optional review surface introduced by the Devin loop.
+func (h *Host) GetReviewVerdict(_ context.Context, _ int, _, _ string) (scm.ReviewVerdict, []scm.ReviewComment, error) {
+	return scm.VerdictNone, nil, scm.ErrUnsupported
+}
+
+func (h *Host) GetBotFindings(_ context.Context, _ int, _, _ string) ([]scm.ReviewComment, error) {
+	return nil, scm.ErrUnsupported
+}
+
+func (h *Host) ReplyToReviewComment(_ context.Context, _ int, _ int64, _ string) error {
+	return scm.ErrUnsupported
+}
+
 func (h *Host) showPR(ctx context.Context, pr *scm.PR) (*azPR, error) {
 	id := h.prID(pr)
 	if id == "" {

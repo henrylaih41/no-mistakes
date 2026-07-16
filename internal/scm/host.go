@@ -153,6 +153,49 @@ func (c Check) Pending() bool { return c.Bucket == CheckBucketPending }
 type Capabilities struct {
 	MergeableState  bool
 	FailedCheckLogs bool
+	// Reviews reports whether the provider can read a reviewing bot's PR
+	// verdict and findings (GetReviewVerdict / GetBotFindings).
+	Reviews bool
+}
+
+// ReviewVerdict is the normalized outcome of a reviewing bot's pass over a PR
+// at a specific head SHA. It is derived from the bot's review objects and
+// inline findings, not from a commit status check: some bots (e.g. Devin) post
+// reviews with state=COMMENTED and never publish a status check, so a status
+// rollup is empty even when the bot has flagged blocking issues.
+type ReviewVerdict string
+
+const (
+	// VerdictApproved means the bot reviewed the current head SHA and left no
+	// severe (high/medium) file-scoped findings.
+	VerdictApproved ReviewVerdict = "APPROVED"
+	// VerdictChangesRequested means the bot reviewed the current head SHA and
+	// left at least one unresolved severe (high/medium) file-scoped finding.
+	VerdictChangesRequested ReviewVerdict = "CHANGES_REQUESTED"
+	// VerdictPending means the bot has reviewed the PR before but not yet the
+	// current head SHA (e.g. a re-review is still in flight after a new push).
+	VerdictPending ReviewVerdict = "PENDING"
+	// VerdictNone means the bot has never reviewed the PR.
+	VerdictNone ReviewVerdict = "NONE"
+)
+
+// ReviewComment is a single finding posted by a reviewing bot on a PR. Path and
+// Line are empty/zero for a top-level (non-file-scoped) comment such as a review
+// summary. Severity is a coarse bucket parsed from the body ("high", "medium",
+// or "low"). CommitID is the commit the finding was made against when known.
+type ReviewComment struct {
+	// ID is the review comment's REST/database id (GitHub's databaseId). It is
+	// the handle ReplyToReviewComment needs to thread a reply under this comment.
+	// It is zero when the source does not expose it (e.g. a top-level summary, a
+	// provider without review support, or an older read path); callers that reply
+	// must skip findings with ID==0.
+	ID       int64
+	Path     string
+	Line     int
+	Body     string
+	Severity string
+	CommitID string
+	URL      string
 }
 
 // ErrUnsupported is returned by optional Host methods that the provider
@@ -185,4 +228,26 @@ type Host interface {
 	// FetchFailedCheckLogs is optional; returns "" when no logs can be retrieved
 	// and ErrUnsupported when the provider has no log-fetching support at all.
 	FetchFailedCheckLogs(ctx context.Context, pr *PR, branch, headSHA string, failingNames []string) (string, error)
+
+	// GetReviewVerdict is optional; implementations without Capabilities().Reviews
+	// must return ErrUnsupported. Callers should consult Capabilities first. It
+	// reads the reviewing bot's verdict for the current head SHA (see
+	// ReviewVerdict) and also returns the findings it read while deriving that
+	// verdict, so a caller needing both does not have to call GetBotFindings a
+	// second time. botLogin selects which account's reviews count.
+	GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botLogin string) (ReviewVerdict, []ReviewComment, error)
+
+	// GetBotFindings is optional; implementations without Capabilities().Reviews
+	// must return ErrUnsupported. It returns the reviewing bot's findings scoped
+	// to the current head SHA (file-scoped inline comments tied to headSHA, plus
+	// the bot's top-level review comments which carry no SHA).
+	GetBotFindings(ctx context.Context, prNumber int, headSHA, botLogin string) ([]ReviewComment, error)
+
+	// ReplyToReviewComment posts a threaded reply under an existing review comment
+	// identified by its REST/database id (see ReviewComment.ID). It is optional;
+	// implementations without Capabilities().Reviews must return ErrUnsupported,
+	// and callers should consult Capabilities first. The post-PR review loop uses
+	// it to acknowledge, on each addressed finding, the fix it pushed so a human
+	// (and the bot's re-review) can see what the loop did.
+	ReplyToReviewComment(ctx context.Context, prNumber int, commentID int64, body string) error
 }
