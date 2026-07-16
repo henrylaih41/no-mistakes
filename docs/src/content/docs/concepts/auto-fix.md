@@ -10,10 +10,10 @@ flowchart TD
   run["Run step"] --> findings{"Findings?"}
   findings -- "no" --> done["Step completes"]
   findings -- "yes" --> eligible{"Auto-fix enabled and eligible findings?"}
-  eligible -- "no" --> pause["Pause for user approval"]
+  eligible -- "no" --> pause["Pause for authority decision"]
   eligible -- "yes" --> fix["Agent applies fixes"]
   fix --> rerun["Re-run step"]
-  rerun --> clean{"Blocking findings remain?"}
+  rerun --> clean{"Blocking or manual findings remain?"}
   clean -- "no" --> done
   clean -- "yes, attempts left" --> eligible
   clean -- "yes, limit hit" --> pause
@@ -27,7 +27,7 @@ flowchart TD
 4. The step re-runs to verify the fixes
 5. If issues remain and attempts are left, the loop continues
 6. Once the limit is reached or all issues are resolved:
-   - If issues remain, the step pauses for user approval
+   - If issues remain, the step pauses for the applicable gate-owner or user decision
    - If everything passes, the step completes and the pipeline moves on
 
 The document step applies fixes during its initial pass instead of relying on a follow-up automatic fix loop.
@@ -38,7 +38,7 @@ Unresolved documentation findings and unresolved blocking lint findings pause fo
 ## Configuration
 
 Per-step attempt limits come from the `auto_fix` config object; the [`auto_fix` field reference](/no-mistakes/reference/global-config/#auto_fix) owns the defaults, per-step meanings, and the legacy alias.
-Setting a step to `0` disables the follow-up auto-fix loop, so the pipeline pauses for human input when that step finds issues; `auto_fix.review` defaults to `0`, so review findings require manual approval unless you opt in.
+Setting a step to `0` disables the follow-up auto-fix loop, so the pipeline pauses for an authority decision when that step finds issues; `auto_fix.review` defaults to `0`, so review findings require manual approval unless you opt in.
 Repo config overlays global config field by field - you can set `auto_fix.lint: 5` in a repo's `.no-mistakes.yaml` to override just that step while inheriting the rest from global.
 
 ## Finding actions
@@ -51,9 +51,10 @@ Agent-driven findings now use an `action` field instead of `requires_human_revie
 - `ask-user` - a genuine unresolved choice that changes product behavior, scope, or an agreed guarantee
 
 If an agent or integration omits `action`, supplies an unknown value, or comes from a newer action vocabulary, no-mistakes fails closed by treating the finding as `ask-master`.
-An unclassified finding is never eligible for automatic fixing.
+An unclassified finding is never eligible for automatic fixing, and both manual actions park at every severity, including `info`.
+If the complete findings JSON is malformed or unreadable, the gate also parks instead of entering auto-fix; AXI labels the payload `findings_unreadable`, and `--yes` does not approve it, including after a fix round.
 
-Action names identify decision authority, not severity. A severe or user-visible defect remains `auto-fix` when current authoritative evidence establishes one bounded correction. When the approved outcome is known but the implementation needs non-local judgment, use `ask-master`. Reserve `ask-user` for choices with at least two materially different outcomes that authoritative evidence does not settle and that change behavior or an agreed correctness, security, durability, performance, scalability, compatibility, or cost guarantee. Uncertainty about **how** to fix routes to Master; uncertainty about **what** the product should do routes to the user.
+Action names identify decision authority, not severity. A severe or user-visible defect remains `auto-fix` when current authoritative evidence establishes one bounded correction. For a user-visible correction, the finding must name the still-current intent criterion, design clause, contract, invariant, or test that fixes the outcome; evidence removed or changed by the diff does not count. When the approved outcome is known but the implementation needs non-local judgment, use `ask-master`. Reserve `ask-user` for choices with at least two materially different outcomes that authoritative evidence does not settle and that change behavior or an agreed correctness, security, durability, performance, scalability, compatibility, or cost guarantee. An `ask-user` finding states the exact choice, viable options, consequence of each, and a recommendation. Uncertainty about **how** to fix routes to Master; uncertainty about **what** the product should do routes to the user.
 
 Agents driving AXI resolve `ask-master` under documented gate-owner authority and bring only the concise unresolved choice, options, consequences, and recommendation for `ask-user` findings to the user. If no Master role exists, `ask-master` falls back to the user.
 In the TUI, yolo mode is an explicit override that auto-resolves paused steps by treating `auto-fix`, `ask-master`, and `ask-user` findings as consent to run one fix round.

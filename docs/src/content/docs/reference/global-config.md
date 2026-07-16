@@ -260,7 +260,7 @@ So an actively-updated green PR keeps its monitor no matter how long it stays op
 If it later develops an actual GitHub, GitLab, or Azure DevOps merge conflict, the CI auto-fix path rebases and re-pushes it, while a clean behind PR needs no command.
 A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
-If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for a user decision.
+If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for gate-owner judgment. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns its finding-action routing.
 
 Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to monitor until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`.
 
@@ -411,7 +411,7 @@ The loop is off by default, so leaving it unset keeps pipeline behavior byte-ide
 
 `retrigger` is best-effort: a missing key or any Devin API error is logged and the loop continues. Each trigger creates a paid Devin review, so the loop fires it at most once per head SHA. When a Devin Review token **and** `devin_org_id` both resolve, the loop prefers the dedicated Devin Review API (`POST /v3/organizations/{org}/pr-reviews`), which is not per-organization ACU-limited and so keeps working when `/v1/sessions` is exhausted (`out_of_quota`); the review token is read from `DEVIN_REVIEW_API_KEY` first and from `devin_review_api_key_file` otherwise (see [`DEVIN_REVIEW_API_KEY`](/no-mistakes/reference/environment/#devin_review_api_key)). Otherwise it falls back to the legacy `/v1/sessions` trigger, whose key is read from `DEVIN_API_KEY` first and from `devin_api_key_file` otherwise (see [`DEVIN_API_KEY`](/no-mistakes/reference/environment/#devin_api_key)).
 
-With `fail_open: false`, the loop waits for the bot and leans on the CI step's idle timeout to escalate to the human gate. That idle timer re-arms whenever the base branch advances (see [`ci_timeout`](#ci_timeout)), so on a PR whose base branch is actively moving while the bot stays silent the timeout may never elapse - abort the run explicitly with `no-mistakes axi abort --run <id>` if that happens.
+With `fail_open: false`, the loop waits for the bot and leans on the CI step's idle timeout to park for gate-owner judgment. That idle timer re-arms whenever the base branch advances (see [`ci_timeout`](#ci_timeout)), so on a PR whose base branch is actively moving while the bot stays silent the timeout may never elapse - abort the run explicitly with `no-mistakes axi abort --run <id>` if that happens.
 
 Like `commands`, `agent`, and `review`, the repo-level `review_loop` is a code-executing selection field: it gates CI, names the bot login whose comments become fix-prompt content, bounds how many fix rounds run, and points at a secret file, so repo-level `review_loop` is read only from the trusted default-branch copy of `.no-mistakes.yaml`.
 Per-repo config overlays the global review loop field by field; fields not set in the repo fall through to the global value and then the built-in default.

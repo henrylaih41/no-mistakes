@@ -154,7 +154,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	}
 
 	// Without trustworthy structured output we cannot confirm the agent
-	// resolved every gap, so surface it for human review. Nothing is stashed
+	// resolved every gap, so surface it for gate-owner review. Nothing is stashed
 	// for the lint step, which therefore re-assesses with its own pass.
 	var findings Findings
 	if result.Output == nil {

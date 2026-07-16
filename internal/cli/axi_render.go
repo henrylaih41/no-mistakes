@@ -188,7 +188,8 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 	return rv
 }
 
-// awaitingStep returns the step currently blocking on a human decision, if any.
+// awaitingStep returns the step currently blocking on an authority decision,
+// if any.
 // At most one step awaits at a time, so the first match is the active gate.
 func (rv runView) awaitingStep() (stepView, bool) {
 	for _, s := range rv.Steps {

@@ -91,7 +91,7 @@ no-mistakes axi run --intent "the user's goal" --yes
 | Flag               | Type       | Default | Description                                                                |
 | ------------------ | ---------- | ------- | -------------------------------------------------------------------------- |
 | `--intent`         | `string`   | (none)  | What the user set out to accomplish; required to start a new run           |
-| `-y`, `--yes`      | `bool`     | `false` | Auto-resolve every gate until a decision point or outcome                  |
+| `-y`, `--yes`      | `bool`     | `false` | Auto-resolve readable gates until a decision point or outcome              |
 | `--skip`           | `string`   | (none)  | Comma-separated pipeline steps to skip                                     |
 | `--design-context` | `string[]` | Empty   | Repeatable design-context text file path for review and fix prompts        |
 | `--review-loop`    | `string`   | (none)  | Set to `off` to disable only Devin for this run; CI monitoring still runs  |
@@ -114,6 +114,7 @@ Reattaching to an in-flight run does not add or replace its design context.
 Use it when the PR base repo is not Devin-applicable or the run should rely on normal CI checks only; it does not skip the `ci` step, so GitHub checks, merge, and close monitoring continue.
 With `--yes`, `axi run` treats `action: auto-fix`, `action: ask-master`, and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
+If a parked gate's findings JSON cannot be parsed, AXI renders `findings_unreadable` with a command for the full step log and `--yes` stops without fixing or approving that gate. The same fail-closed rule applies to `fix_review` and to a gate that `--yes` already tried to fix.
 `--yes` does not override a review step parked at `awaiting_triage`; it returns that gate for master triage instead.
 When a step parks at `awaiting_agent_retry` after an exhausted transient agent/provider failure, `--yes` auto-retries that step at most once, records the retry on the run, and leaves a second consecutive transient parked for an explicit `--action retry`.
 Without `--yes`, `ask-master` routes to the documented gate owner for implementation judgment; if none exists it falls back to the user. `ask-user` routes only the concise unresolved choice, options, consequences, and recommendation to the user.
@@ -152,7 +153,7 @@ no-mistakes axi respond --action skip
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
 | `--fix-override` | `bool`   | `false`       | Permit one review fix round after `awaiting_triage`                   |
 | `--override-reason` | `string` | (none)     | Required master triage reason for `--fix-override`; persisted         |
-| `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve every subsequent gate until a decision point or outcome |
+| `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve readable subsequent gates until a decision point or outcome |
 
 After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix`, `ask-master`, and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when CI is green but the PR still needs a human merge.
 It also stops at `awaiting_triage`; it never supplies `--fix-override` implicitly.

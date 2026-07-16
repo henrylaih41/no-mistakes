@@ -169,7 +169,7 @@ If the overwrite is intentional, push manually to the actual remote after review
 ### Rebase pauses because the branch carries unpushed default-branch commits
 
 This means the branch was created from a local default branch that is ahead of `origin/<default_branch>`, so its history includes commits that exist only on your local default branch.
-`no-mistakes` pauses with an `ask-user` finding instead of silently bundling that unrelated local work into the PR.
+`no-mistakes` pauses instead of silently bundling that unrelated local work into the PR; the [Rebase step reference](/no-mistakes/reference/pipeline-steps/#rebase) owns the finding-action routing.
 
 Push the default branch to `origin` if those commits belong in the shared base, or rebase your feature branch onto `origin/<default_branch>` to remove the unrelated work before running the gate again.
 Approve the finding only when you intentionally want that local default-branch work to stay in the branch.

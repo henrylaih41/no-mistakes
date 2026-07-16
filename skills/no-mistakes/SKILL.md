@@ -292,8 +292,13 @@ appropriate. Resolve manual findings by authority:
   Translate the answer into `--action fix` with their guidance,
   `--action approve`, or `--action skip`.
 
+If a gate renders `findings_unreadable`, do not infer an empty gate or
+approve it. Read the full step log using the command in that field and route the
+unreadable result to the gate owner; `--yes` deliberately stops at this
+gate, including after a fix round.
+
 The one exception is `--yes` (below): it is the user's standing consent to
-drive every gate unattended, so under `--yes` you resolve both manual
+drive every readable gate unattended, so under `--yes` you resolve both manual
 action levels automatically instead of stopping for their owners.
 
 If you have clear consent to drive the run automatically, pass `--yes` to `axi run`

@@ -104,7 +104,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// the contributor's local default branch but were never pushed to
 	// origin/<default>. Rebasing onto the fresh remote default keeps those
 	// commits in the branch's history, so the PR would silently bundle another
-	// workstream's unpushed work. Surface it for a human decision instead.
+	// workstream's unpushed work. Surface it for gate-owner judgment instead.
 	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
 		return outcome, nil
 	}

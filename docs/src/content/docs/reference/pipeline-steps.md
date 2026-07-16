@@ -118,7 +118,8 @@ Updates matching documentation for code changes and reports only unresolved gaps
 - `document.instructions` can add trusted default-branch ownership rules for the repository
 - When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
 - Includes user intent when available
-- Returns findings only for unresolved documentation gaps or human judgment calls
+- Returns findings only for unresolved documentation gaps or authority judgment calls
+- Converts missing or unparsable structured document output into an `ask-master` finding for gate-owner inspection or retry
 - Requires approval whenever any unresolved documentation finding is returned, including `info` findings
 
 **Auto-fix:** documentation fixes happen during the initial document pass. Unresolved findings pause for approval instead of starting another automatic document/fix loop. If you manually trigger a fix from the TUI or AXI interface, the agent receives the selected previous findings plus any per-finding user notes, any selected user-authored findings, and sanitized prior-round history. Fix commits use `no-mistakes(document): <summary>`.
@@ -136,7 +137,7 @@ Runs linters and static analysis.
 **Approval:** lint findings with `action: ask-master` or `action: ask-user` pause for approval.
 `action: auto-fix` findings stay eligible for the fix loop when `commands.lint` is configured.
 `action: no-op` findings are informational only.
-Combined-pass lint findings use the same gate: `error` and `warning` findings pause for a decision, while `info` findings do not.
+Combined-pass lint findings use the same gate: `error` and `warning` findings pause for a decision; `info` findings pause only when their action is `ask-master` or `ask-user`.
 
 **Auto-fix:** when `commands.lint` is configured, the lint step follows the same pattern as test - the agent fixes `action: auto-fix` issues using the previous findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles, then lint re-runs.
 Fix commits use `no-mistakes(lint): <summary>`.
@@ -223,10 +224,10 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 - If a fix attempt produces no changes: automatic mode leaves the failure undeduplicated so it can retry until the auto-fix limit, while manual fix mode returns immediately for manual intervention
 - Deduplicates fix attempts only after a fix is actually committed and pushed
 - Exits cleanly when the PR is merged, closed, or declined
-- If the idle timeout is reached while the PR is still open: pauses for user approval, even when CI checks are currently healthy
-- If the idle timeout is reached while CI failures or, on GitHub, GitLab, or Azure DevOps, a merge conflict are still known: pauses for user approval with findings for the remaining issues
-- If the idle timeout is reached while GitHub, GitLab, or Azure DevOps PR mergeability is still unresolved: pauses for user approval with a finding describing the unresolved mergeability state
-- If CI failures or a GitHub, GitLab, or Azure DevOps merge conflict persist after the auto-fix limit: pauses for user approval with findings listing each failing check and/or the merge conflict
+- If the idle timeout is reached while the PR is still open: pauses with an `ask-master` finding, even when CI checks are currently healthy
+- If the idle timeout is reached while CI failures or, on GitHub, GitLab, or Azure DevOps, a merge conflict are still known: pauses with `ask-master` findings for the remaining issues
+- If the idle timeout is reached while GitHub, GitLab, or Azure DevOps PR mergeability is still unresolved: pauses with an `ask-master` finding describing the unresolved mergeability state
+- If CI failures or a GitHub, GitLab, or Azure DevOps merge conflict persist after the auto-fix limit: pauses with `ask-master` findings listing each failing check and/or the merge conflict
 - A parked idle-timeout (or Devin manual-verify) approval gate self-resolves if the PR is merged or closed out-of-band while it waits, so a PR that merges after the timeout does not leave the run stuck awaiting approval; an open PR stays parked
 
 **Default auto-fix limit:** `3` total CI auto-fix attempts.
@@ -237,9 +238,10 @@ When [`review_loop.enabled`](/no-mistakes/reference/global-config/#review_loop) 
 
 - Reads PR reviews from the configured `review_loop.bot_login` (default `devin-ai-integration[bot]`), counting only live findings on the current head - resolved or outdated review threads are filtered out, as are stale threads whose original commit does not match the head SHA (threads the bot posted on a previous head the loop already fixed but that GitHub did not mark outdated because the anchored lines were untouched); a thread missing the original-commit metadata is treated as current-head so findings are never dropped when the data is absent
 - Reads the review's top-level body as a verdict when no severe file-scoped thread loads: a "No Issues Found" body maps to green, a "found N potential issues" body maps to not-green even if no inline threads could be loaded, and an unrecognized body is treated as pending and logged with an explicit "review body ambiguous" reason so an agent can tell it apart from "the bot has not reviewed this head yet"
-- When the body reports findings on the current head but no file-scoped review thread can be loaded to fix (threads missing, filtered to another commit, or a native changes-requested state with no inline comments), the run parks at the human approval gate for manual verification instead of running the fixer with nothing concrete to change - this state never fails open to green
+- When the body reports findings on the current head but no file-scoped review thread can be loaded to fix (threads missing, filtered to another commit, or a native changes-requested state with no inline comments), the run parks with an `ask-master` finding for manual verification instead of running the fixer with nothing concrete to change - this state never fails open to green
 - Waits a grace window before treating bot silence as a final state; with `review_loop.fail_open: true` (the default) a silent bot does not block the PR, while `fail_open: false` keeps waiting for a verdict and relies on the CI idle timeout to escalate
 - When the bot requests changes, feeds its findings to no-mistakes' own fix agent (the bot is review-only; no-mistakes is always the fixer), commits and force-pushes the fix through the same safety guard as the push step, then re-reviews - bounded by `review_loop.max_rounds` (default `3`)
+- If the review loop exhausts those rounds with unresolved findings, parks with `ask-master` findings for gate-owner triage
 - Uses per-finding fingerprints to avoid re-fixing the same findings on the same commit, with the review-loop fix key kept separate from the CI-failure fix key so the two paths do not thrash each other
 - With `review_loop.reply_on_fix: true` (the default), posts a threaded reply on each addressed review comment after a fix is pushed
 - With `review_loop.retrigger: true` (the default) and a resolved Devin token, explicitly re-triggers a Devin review via the Devin HTTP API instead of relying solely on Devin's rate-limited auto-review; this is best-effort and fires at most once per head SHA because each trigger creates a paid Devin review. When a Devin Review token (`DEVIN_REVIEW_API_KEY` or `review_loop.devin_review_api_key_file`) and `review_loop.devin_org_id` both resolve, it uses the dedicated Devin Review API (`/v3/organizations/{org}/pr-reviews`), which is not per-organization ACU-limited; otherwise it falls back to the legacy `/v1/sessions` key from `DEVIN_API_KEY` or `review_loop.devin_api_key_file`
@@ -254,7 +256,7 @@ Each step progresses through these statuses:
 | `pending` | Not yet started |
 | `running` | Currently executing |
 | `fixing` | Agent is auto-fixing issues |
-| `awaiting_approval` | Paused, waiting for user action |
+| `awaiting_approval` | Paused, waiting for the finding's owning authority |
 | `awaiting_agent_retry` | Paused after an agent invocation exhausted bounded retries for a transient provider/runtime failure; resume with `axi respond --action retry` to retry the step |
 | `fix_review` | Paused after a fix cycle, showing results for review |
 | `awaiting_triage` | Review fix-round cap reached; residual findings require master triage |

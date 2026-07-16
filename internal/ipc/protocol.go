@@ -130,7 +130,7 @@ type SubscribeParams struct {
 	RunID string `json:"run_id"`
 }
 
-// RespondParams sends a user action for a step awaiting approval.
+// RespondParams sends an approval response for a step awaiting authority action.
 //
 // Instructions carries optional per-finding notes keyed by finding ID, which
 // the daemon attaches to the corresponding finding before dispatching a fix.

@@ -122,7 +122,7 @@ func (e *Executor) SetGateReconcileTimings(interval, timeout time.Duration) {
 	}
 }
 
-// Respond sends a user approval action to the currently waiting step.
+// Respond sends an approval response to the currently waiting step.
 // The step parameter must match the step currently awaiting approval.
 // Returns an error if no step is awaiting approval or if the step name doesn't match.
 func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string) error {
@@ -1279,7 +1279,7 @@ func (e *Executor) reviewFixRoundCapReached(stepName types.StepName, stepResultI
 	return count >= max, count, max, nil
 }
 
-// waitForApprovalOrReconcile blocks until a user action arrives, the parked
+// waitForApprovalOrReconcile blocks until an approval response arrives, the parked
 // gate's external source of truth makes it obsolete, or the context is
 // cancelled. Reconciliation runs synchronously under a bounded child context,
 // so no watcher goroutine can outlive approval, cancellation, or shutdown.

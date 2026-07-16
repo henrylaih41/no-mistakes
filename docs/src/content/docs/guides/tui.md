@@ -16,7 +16,7 @@ Bare `no-mistakes` can also open the [Setup Wizard](/no-mistakes/guides/setup-wi
 
 ```mermaid
 flowchart LR
-  running["Step running"] --> decision{"Needs human judgment?"}
+  running["Step running"] --> decision{"Needs an authority decision?"}
   decision -- "no" --> next["Advance to next step"]
   decision -- "yes" --> pause["Pause in TUI"]
   pause --> approve["Approve"]

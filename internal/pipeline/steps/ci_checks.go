@@ -252,7 +252,7 @@ func devinSeverityToFinding(severity string) string {
 }
 
 // devinFailureOutcome escalates an unresolved post-PR review-loop state to the
-// human approval gate, surfacing the bot's outstanding findings as actionable
+// gate owner, surfacing the bot's outstanding findings as actionable
 // items. Used when the loop exhausts its bounded rounds with Devin still
 // requesting changes.
 func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline.StepOutcome {
@@ -281,13 +281,13 @@ func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline
 	}
 }
 
-// devinManualReviewOutcome parks the run at the human approval gate when the
+// devinManualReviewOutcome parks the run for gate-owner judgment when the
 // review bot signals a problem on the current head SHA but no concrete
 // file-scoped findings could be loaded to auto-fix (its body reports findings
 // yet the inline threads are missing, or it used a native CHANGES_REQUESTED
 // state with no inline comments). It deliberately does NOT synthesize or
 // fabricate any file-scoped finding summary — it surfaces the single, honest
-// reason and hands the decision to a human (ruling #11).
+// reason and hands the decision to the gate owner (ruling #11).
 //
 // Like every parked CI gate, this is reconciled by CIStep.ReconcileApprovalGate
 // against the PR's current state. A merge or close therefore self-heals through

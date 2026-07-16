@@ -364,8 +364,8 @@ func rerunParams(repoID, branch, expectedHead string, skipSteps []types.StepName
 
 // driveRun polls a run until it reaches an approval gate, a terminal state, or
 // CI checks pass, streaming step transitions to progress (stderr). When
-// autoApprove is set it resolves each gate and continues; otherwise it returns
-// at the first gate so the caller can surface it for a human/agent decision.
+// autoApprove is set it resolves each readable gate and continues; otherwise it
+// returns at the first gate so the caller can surface it to the owning authority.
 //
 // Auto-resolution means "agree to fix every finding": a gate with actionable
 // findings is fixed (every finding selected), and the resulting fix_review is

@@ -160,10 +160,11 @@ Previous review findings to address:
 
 	// The review turn (initial and every post-fix rereview) carries the intent
 	// conformance obligation: when the intent is authoritative acceptance
-	// criteria (explicit --intent), a change that contradicts it must park via
-	// an ask-user finding. The clause is empty for inferred intent, leaving the
-	// prompt unchanged. This is what makes a fixer round that removed a
-	// required behavior park instead of silently completing.
+	// criteria (explicit --intent), a change that contradicts it must become a
+	// finding whose action reflects the authority needed to restore or change
+	// the criterion. The clause is empty for inferred intent, leaving the prompt
+	// unchanged. This is what makes a fixer round that removed a required
+	// behavior get corrected or park instead of silently completing.
 	//
 	// Review is always pre-push (StepReview.Order < StepPush/PR/CI). The phase
 	// clause and the post-parse strip below keep pipeline-owned delivery
