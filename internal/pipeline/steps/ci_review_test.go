@@ -111,7 +111,18 @@ func TestEvalDevinGate(t *testing.T) {
 		{"disabled is inert", scm.VerdictChangesRequested, []scm.ReviewComment{severeFinding()}, disabled, time.Hour, devinDecisionDisabled},
 		{"approved is green", scm.VerdictApproved, nil, enabled, time.Hour, devinDecisionGreen},
 		{"changes requested is not green", scm.VerdictChangesRequested, nil, enabled, time.Minute, devinDecisionNotGreen},
-		{"severe finding overrides pending verdict", scm.VerdictPending, []scm.ReviewComment{severeFinding()}, enabled, time.Minute, devinDecisionNotGreen},
+		// PR #5 regression: a PENDING verdict means Devin has NOT reviewed the
+		// current head. The findings returned alongside a PENDING verdict are from
+		// GetBotFindings, which does NOT filter by head SHA — so they are STALE
+		// threads left over from an older head (the one the loop just fixed). The
+		// verdict is the authoritative signal: CHANGES_REQUESTED already encodes
+		// "Devin reviewed THIS head and found severe issues" (GetReviewVerdict
+		// rolls severe findings on the head up to CHANGES_REQUESTED). Treating
+		// stale severe findings on an unreviewed head as NotGreen drove a redundant
+		// fix round on every poll until MaxRounds, posting a new "Addressed in
+		// <sha>" reply on the same thread for each push. The loop must WAIT for
+		// Devin to re-review the new head instead of re-fixing stale findings.
+		{"stale severe finding on unreviewed head waits for re-review", scm.VerdictPending, []scm.ReviewComment{severeFinding()}, enabled, time.Minute, devinDecisionPending},
 		{"pending within grace waits", scm.VerdictPending, nil, enabled, devinGraceWindow - time.Minute, devinDecisionPending},
 		{"none within grace waits", scm.VerdictNone, nil, enabled, time.Minute, devinDecisionPending},
 		{"silent past grace fails open", scm.VerdictNone, nil, enabled, devinGraceWindow + time.Minute, devinDecisionFailOpen},
@@ -396,6 +407,54 @@ func TestEvalDevinReview_GraceAnchorResetsOnHeadAdvance(t *testing.T) {
 	}
 	if step.devinAnchorSHA != "headB" || !step.devinAnchorAt.Equal(current) {
 		t.Fatalf("anchor not reset: sha=%q at=%v now=%v", step.devinAnchorSHA, step.devinAnchorAt, current)
+	}
+}
+
+// TestEvalDevinReview_StaleSevereFindingsOnUnreviewedHeadWaitsForReReview is the
+// PR #5 multi-reply regression test. The scenario it locks down:
+//
+//  1. Devin reviewed headA and posted a severe finding → CHANGES_REQUESTED → the
+//     loop fixed, pushed headB, posted "Addressed in <headB>" on the thread, and
+//     re-triggered Devin for headB.
+//  2. Next poll: head=headB. Devin has NOT reviewed headB yet, so GetReviewVerdict
+//     returns PENDING. But GetBotFindings does NOT filter by head SHA, so the old
+//     severe thread from headA is still returned (it is not resolved/outdated
+//     because the fix touched different lines than the comment's anchor).
+//
+// On the buggy code, evalDevinGate treated PENDING + severe findings as NotGreen,
+// so handleDevinFixRound ran again, pushed headC, and posted a SECOND
+// "Addressed in <headC>" reply on the same thread — repeating up to MaxRounds
+// (observed 7 replies across 7 commits on PR #5). The fix: a PENDING verdict
+// means Devin has not weighed in on this head, so the loop must WAIT for the
+// re-review (within the grace window) rather than re-fixing stale findings.
+// CHANGES_REQUESTED is the only authoritative NotGreen signal and already
+// encodes severe findings on the current head.
+func TestEvalDevinReview_StaleSevereFindingsOnUnreviewedHeadWaitsForReReview(t *testing.T) {
+	t.Parallel()
+	cfg := config.ReviewLoop{Enabled: true, MaxRounds: 3, FailOpen: true}
+	// PENDING verdict (Devin reviewed an older head, not headB) with the stale
+	// severe finding still live (not resolved/outdated) — exactly poll 2 above.
+	host := &fakeReviewHost{
+		caps:     scm.Capabilities{Reviews: true},
+		verdict:  scm.VerdictPending,
+		findings: []scm.ReviewComment{severeFinding()},
+	}
+
+	step := &CIStep{now: func() time.Time { return time.Unix(0, 0) }}
+	sctx := newReviewTestContext(cfg, "headB", func(string) {})
+	pr := &scm.PR{Number: "42"}
+
+	decision, returnedFindings := step.evalDevinReview(sctx, host, pr)
+	if decision != devinDecisionPending {
+		t.Fatalf("decision = %v, want pending (wait for Devin to re-review headB; stale findings must not re-fix), findings=%v", decision, returnedFindings)
+	}
+	// The loop must not have recorded any fix round or reply for stale findings
+	// on an unreviewed head — handleDevinFixRound is only called on NotGreen.
+	if step.devinFixRounds != 0 {
+		t.Fatalf("devinFixRounds = %d, want 0 (no fix round should run on PENDING)", step.devinFixRounds)
+	}
+	if len(host.replies) != 0 {
+		t.Fatalf("replies = %v, want none (no re-fix → no acknowledgement on PENDING)", host.replies)
 	}
 }
 

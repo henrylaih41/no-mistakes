@@ -53,24 +53,32 @@ const (
 // pure function (no I/O, no clock) so it is exhaustively unit-testable; all host
 // access lives in evalDevinReview.
 //
-// "Not green" is verdict==CHANGES_REQUESTED OR any unresolved severe file-scoped
-// finding on the head SHA (the verdict already encodes this, but the findings
-// are checked directly so a verdict that rolled up to PENDING but still carries
-// a severe finding is not mistaken for "no findings"). A PENDING/NONE verdict
-// with no severe findings means the bot has not weighed in on this head yet:
-// within the grace window that is "pending"; past it, fail-open turns it into a
-// checks-only green and fail-closed keeps it pending.
+// "Not green" is verdict==CHANGES_REQUESTED ONLY. The verdict is the
+// authoritative signal: GetReviewVerdict returns CHANGES_REQUESTED when the bot
+// reviewed the current head and either left a native CHANGES_REQUESTED state or
+// posted any severe file-scoped finding on it (rolled up at the read layer). A
+// PENDING/NONE verdict means the bot has NOT reviewed this head — it reviewed an
+// older one. The findings returned alongside a PENDING/NONE verdict come from
+// GetBotFindings, which does NOT filter by head SHA, so they are STALE threads
+// from a previous head (the one the loop just fixed). Treating those stale
+// severe findings as NotGreen drove a redundant fix round on every poll until
+// MaxRounds, posting a new "Addressed in <sha>" reply on the same thread for
+// each push (observed on a real PR: 7 replies across 7 commits on one thread).
+// The loop must WAIT for the bot to re-review the new head instead of re-fixing
+// stale findings. Within the grace window that wait is "pending"; past it,
+// fail-open turns it into a checks-only green and fail-closed keeps it pending.
 func evalDevinGate(verdict scm.ReviewVerdict, findings []scm.ReviewComment, cfg config.ReviewLoop, elapsed time.Duration) devinGateDecision {
 	if !cfg.Enabled {
 		return devinDecisionDisabled
 	}
-	if verdict == scm.VerdictChangesRequested || hasUnresolvedSevereFindings(findings) {
+	if verdict == scm.VerdictChangesRequested {
 		return devinDecisionNotGreen
 	}
 	if verdict == scm.VerdictApproved {
 		return devinDecisionGreen
 	}
-	// PENDING or NONE with no severe findings: the bot has not reviewed this head.
+	// PENDING or NONE: the bot has not reviewed this head. Stale findings from
+	// older heads must not drive a fix — wait for the re-review.
 	if elapsed < devinGraceWindow {
 		return devinDecisionPending
 	}
@@ -244,13 +252,14 @@ func (s *CIStep) evalDevinReview(sctx *pipeline.StepContext, host scm.Host, pr *
 		verdictFindings = nil
 	}
 
-	// Surface the findings for EVERY non-None verdict — including Approved. The
-	// host's verdict derivation already flags a severe head-scoped finding as
-	// CHANGES_REQUESTED, but evalDevinGate's hasUnresolvedSevereFindings safety net
-	// is defense-in-depth: it only fires if the findings reach it, so a host (or
-	// future change) that returns Approved while still carrying an unresolved
-	// severe inline finding is caught as not-green rather than waved through. A
-	// None verdict (or a read error) carries no findings to surface.
+	// Surface the findings for EVERY non-None verdict — including Approved, so
+	// the caller can log/acknowledge them. The verdict is the authoritative
+	// NotGreen signal: GetReviewVerdict rolls any severe head-scoped finding up
+	// to CHANGES_REQUESTED at the read layer, so evalDevinGate keys NotGreen on
+	// the verdict alone (a PENDING/NONE verdict means the bot has not reviewed
+	// this head, and its findings are stale threads from an older head that must
+	// not drive a fix). A None verdict (or a read error) carries no findings to
+	// surface.
 	var findings []scm.ReviewComment
 	if verdict != scm.VerdictNone {
 		findings = verdictFindings
