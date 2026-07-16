@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,10 @@ func Run() error {
 
 func prepareDaemonEnvironment() error {
 	nmHome := os.Getenv("NM_HOME")
+	testDaemonPath := ""
+	if os.Getenv("NM_TEST_START_DAEMON") == "1" {
+		testDaemonPath = os.Getenv("PATH")
+	}
 	for _, key := range []string{
 		"CLAUDECODE",
 		"CLAUDE_CODE_ENTRYPOINT",
@@ -74,6 +79,11 @@ func prepareDaemonEnvironment() error {
 	if err := applyShellEnvToProcess(); err != nil {
 		return fmt.Errorf("apply login shell environment: %w", err)
 	}
+	if testDaemonPath != "" {
+		if err := prependPathEntries(testDaemonPath); err != nil {
+			return fmt.Errorf("preserve test daemon PATH: %w", err)
+		}
+	}
 	if nmHome != "" {
 		if err := os.Setenv("NM_HOME", nmHome); err != nil {
 			return fmt.Errorf("restore NM_HOME: %w", err)
@@ -81,6 +91,28 @@ func prepareDaemonEnvironment() error {
 	}
 	logDaemonPathSummary()
 	return nil
+}
+
+func prependPathEntries(prefixPath string) error {
+	return os.Setenv("PATH", mergePathLists(prefixPath, os.Getenv("PATH")))
+}
+
+func mergePathLists(pathValues ...string) string {
+	seen := map[string]struct{}{}
+	var merged []string
+	for _, pathValue := range pathValues {
+		for _, entry := range filepath.SplitList(pathValue) {
+			if entry == "" {
+				continue
+			}
+			if _, ok := seen[entry]; ok {
+				continue
+			}
+			seen[entry] = struct{}{}
+			merged = append(merged, entry)
+		}
+	}
+	return strings.Join(merged, string(os.PathListSeparator))
 }
 
 // logDaemonPathSummary records the effective PATH at daemon startup so that
