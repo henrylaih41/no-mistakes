@@ -39,12 +39,13 @@ type approvalResponse struct {
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
-	db     *db.DB
-	paths  *paths.Paths
-	config *config.Config
-	agent  agent.Agent
-	steps  []Step
-	skips  map[types.StepName]bool
+	db        *db.DB
+	paths     *paths.Paths
+	config    *config.Config
+	agent     agent.Agent
+	reviewers []agent.Agent
+	steps     []Step
+	skips     map[types.StepName]bool
 
 	onEvent EventFunc
 
@@ -60,6 +61,14 @@ type Executor struct {
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
+}
+
+// SetReviewers configures the cross-family review panel agents. It is set after
+// NewExecutor (rather than as a constructor argument) to avoid churning the many
+// NewExecutor call sites. When empty (the default), the pipeline reviews with
+// the single impl agent, so behavior is unchanged.
+func (e *Executor) SetReviewers(reviewers []agent.Agent) {
+	e.reviewers = reviewers
 }
 
 // SetSkippedSteps configures steps that should be marked skipped without running.
@@ -649,12 +658,26 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			round:    func() int { return roundNum + 1 },
 		}
 	}
+	// Default the review panel to the wrapped implementation agent. Configured
+	// panel members retain their independent identities, while receiving the
+	// same lifecycle wrapper so activity/provenance stays visible.
+	reviewers := e.reviewers
+	if len(reviewers) == 0 {
+		reviewers = []agent.Agent{stepAgent}
+	} else {
+		wrapped := make([]agent.Agent, 0, len(reviewers))
+		for _, reviewer := range reviewers {
+			wrapped = append(wrapped, &lifecycleAgent{inner: reviewer, onLifecycle: onAgentLifecycle})
+		}
+		reviewers = wrapped
+	}
 	sctx := &StepContext{
 		Ctx:              ctx,
 		Run:              run,
 		Repo:             repo,
 		WorkDir:          workDir,
 		Agent:            stepAgent,
+		Reviewers:        reviewers,
 		Config:           e.config,
 		DB:               e.db,
 		StepResultID:     sr.ID,

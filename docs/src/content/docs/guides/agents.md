@@ -27,6 +27,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
+- Configure `review.reviewers` when you want multiple agent families to independently review the same diff.
 - Set explicit `commands.test` and `commands.lint` if you want deterministic baseline command execution regardless of agent choice.
 
 That last point matters: the agent helps fill in gaps, but explicit repo
@@ -127,6 +128,29 @@ Changing agents most directly affects:
 - branch name and commit subject suggestions in the setup wizard
 
 It does **not** change the pipeline order or the meaning of a passed gate.
+
+## Review panels
+
+By default, the review step runs once with the resolved `agent`.
+Set `review.reviewers` in global or repo config to fan the same review prompt out to multiple reviewers, for example Codex plus Claude.
+The configured pipeline `agent` still applies review fixes; reviewers only produce reports.
+
+```yaml
+review:
+  reviewers:
+    - agent: codex
+    - agent: claude
+  max_parallel: 2
+  fail_open: false
+```
+
+Merged review findings keep a `source` showing which reviewer reported them, and their IDs are namespaced by reviewer so the AXI and TUI approval flows can address them normally.
+In a reviewer spec, `agent: auto` expands to the already resolved pipeline `agent`; name a reviewer family explicitly when you want a different model family.
+`review.max_parallel` limits concurrent reviewers; `0` means all reviewers run at once.
+`review.fail_open` defaults to `false`, so any reviewer error fails the review step instead of silently reducing coverage.
+
+Repo-level `review` is code-executing config because it selects extra agent processes.
+Like repo `commands` and `agent`, it is read from the trusted default-branch `.no-mistakes.yaml` unless `allow_repo_commands: true` is already set there.
 
 ## Driving no-mistakes as an agent
 
