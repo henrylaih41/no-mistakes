@@ -226,6 +226,17 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 
 **Default auto-fix limit:** `3` total CI auto-fix attempts.
 
+**Post-PR review loop (optional, off by default):**
+
+When [`review_loop.enabled`](/no-mistakes/reference/global-config/#review_loop) is set, the CI step also reads an external review bot's verdict and findings on the open PR and converges on a bot-green verdict. The loop is inert when disabled, so the default CI behavior is unchanged.
+
+- Reads PR reviews from the configured `review_loop.bot_login` (default `devin-ai-integration[bot]`), counting only live findings - resolved or outdated review threads are filtered out
+- Waits a grace window before treating bot silence as a final state; with `review_loop.fail_open: true` (the default) a silent bot does not block the PR, while `fail_open: false` keeps waiting for a verdict and relies on the CI idle timeout to escalate
+- When the bot requests changes, feeds its findings to no-mistakes' own fix agent (the bot is review-only; no-mistakes is always the fixer), commits and force-pushes the fix through the same safety guard as the push step, then re-reviews - bounded by `review_loop.max_rounds` (default `3`)
+- Uses per-finding fingerprints to avoid re-fixing the same findings on the same commit, with the review-loop fix key kept separate from the CI-failure fix key so the two paths do not thrash each other
+- With `review_loop.reply_on_fix: true` (the default), posts a threaded reply on each addressed review comment after a fix is pushed
+- With `review_loop.retrigger: true` (the default) and a resolved Devin API key, explicitly re-triggers a Devin review via the Devin HTTP API instead of relying solely on Devin's rate-limited auto-review; this is best-effort and fires at most once per head SHA because each trigger creates a paid Devin session. The key comes from `DEVIN_API_KEY` or `review_loop.devin_api_key_file`
+
 ## Step statuses
 
 Each step progresses through these statuses:

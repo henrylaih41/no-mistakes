@@ -61,6 +61,15 @@ review:
   max_parallel: 2
   fail_open: false
 
+review_loop:
+  enabled: false
+  bot_login: "devin-ai-integration[bot]"
+  max_rounds: 3
+  fail_open: true
+  reply_on_fix: true
+  retrigger: true
+  devin_api_key_file: "~/.config/devin/api_key"
+
 intent:
   enabled: true
   threshold: 0.2
@@ -349,6 +358,34 @@ Identical resolved reviewers are de-duplicated.
 Per-repo config can override the global review block wholesale.
 An absent repo `review` block inherits the global panel; an explicit repo block with `reviewers: []` disables the inherited panel and reverts to the single-agent default.
 
+### review_loop
+
+Optional post-PR review loop (read layer). When enabled, the CI step reads an external review bot's PR verdict and findings, feeds them back to no-mistakes' own fix agent, optionally re-triggers the bot, and converges on a bot-green verdict before the PR is allowed through.
+The bot is review-only; no-mistakes is always the fixer, so no fixer agent is configured here.
+The loop is off by default, so leaving it unset keeps pipeline behavior byte-identical.
+
+| | |
+|---|---|
+| Type | `object` |
+| Default | Disabled |
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `review_loop.enabled` | `bool` | `false` | Turn the post-PR review loop on |
+| `review_loop.bot_login` | `string` | `devin-ai-integration[bot]` | GitHub account whose PR reviews are read |
+| `review_loop.max_rounds` | `int` | `3` | Maximum review/fix rounds before escalating (must be `>= 0`) |
+| `review_loop.fail_open` | `bool` | `true` | When `true`, a silent reviewer does not block the PR; when `false`, the loop waits for the bot's verdict |
+| `review_loop.reply_on_fix` | `bool` | `true` | After pushing a fix, post a threaded reply on each addressed review comment |
+| `review_loop.retrigger` | `bool` | `true` | Explicitly re-trigger a Devin review via the Devin HTTP API instead of relying solely on Devin's auto-review |
+| `review_loop.devin_api_key_file` | `string` | `~/.config/devin/api_key` | Path read for the Devin API key when `DEVIN_API_KEY` is unset (a leading `~` expands to the home directory) |
+
+`retrigger` is best-effort: a missing key or any Devin API error is logged and the loop continues. Each trigger creates a paid Devin session (ACUs), so the loop fires it at most once per head SHA. The API key is read from the `DEVIN_API_KEY` environment variable first and from `devin_api_key_file` otherwise; see [`DEVIN_API_KEY`](/no-mistakes/reference/environment/#devin_api_key).
+
+With `fail_open: false`, the loop waits for the bot and leans on the CI step's idle timeout to escalate to the human gate. That idle timer re-arms whenever the base branch advances (see [`ci_timeout`](#ci_timeout)), so on a PR whose base branch is actively moving while the bot stays silent the timeout may never elapse - abort the run explicitly with `no-mistakes axi abort --run <id>` if that happens.
+
+Like `commands`, `agent`, and `review`, the repo-level `review_loop` is a code-executing selection field: it gates CI, names the bot login whose comments become fix-prompt content, bounds how many fix rounds run, and points at a secret file, so repo-level `review_loop` is read only from the trusted default-branch copy of `.no-mistakes.yaml`.
+Per-repo config overlays the global review loop field by field; fields not set in the repo fall through to the global value and then the built-in default.
+
 ### intent
 
 Transcript-based user-intent extraction settings.
@@ -397,4 +434,4 @@ These are global defaults. Per-repo config can override either field.
 
 ## Environment variables
 
-See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, `NM_DAEMON_CONNECT_TIMEOUT`, Bitbucket Cloud credentials, and update-check suppression.
+See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, `NM_DAEMON_CONNECT_TIMEOUT`, provider credentials, the `DEVIN_API_KEY` review-loop token, and update-check suppression.
