@@ -60,7 +60,10 @@ Combined lint duty (same pass - no separate lint agent will run):
 Set "category" on every finding: "documentation" for documentation findings, "lint" for lint findings.`
 
 // housekeepingFindingsSchema extends findingsSchema with the per-finding
-// category that routes combined-pass findings to their owning gates.
+// category that routes combined-pass findings to their owning gates. The
+// document/housekeeping prompt intentionally defines no action vocabulary
+// (schema-only); only the review and test prompts teach the four-level
+// authority contract.
 var housekeepingFindingsSchema = json.RawMessage(`{
 	"type": "object",
 	"properties": {

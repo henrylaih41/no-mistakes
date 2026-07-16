@@ -105,6 +105,15 @@ func TestAutoFixableFindingsJSON_EmptyInput(t *testing.T) {
 	}
 }
 
+// A payload that cannot be parsed must never round-trip back as an
+// auto-fixable payload: it fails closed to "" so the executor's
+// manual-findings boundary parks it instead of dispatching a fix round.
+func TestAutoFixableFindingsJSON_MalformedInputFailsClosed(t *testing.T) {
+	if got := autoFixableFindingsJSON(`{"findings":[`); got != "" {
+		t.Fatalf("expected empty string for malformed input, got %q", got)
+	}
+}
+
 func TestAutoFixableFindingsJSON_AllNoOp(t *testing.T) {
 	raw := `{"findings":[{"id":"review-1","severity":"info","description":"note","action":"no-op"}],"risk_level":"low","risk_rationale":"Clean."}`
 

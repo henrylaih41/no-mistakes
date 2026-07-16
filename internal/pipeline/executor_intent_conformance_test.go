@@ -15,10 +15,13 @@ import (
 // requires a guarded removal; the initial review raises an error/auto-fix race
 // finding; the fixer "resolves" it by deleting the required behavior. Before
 // the fix the intent-contradicting auto-fix completed silently. After the fix,
-// the rereview's conformance obligation surfaces the contradiction as an
-// ask-user finding, and one ask-user finding parks the run with no executor
-// change (executor.go gate). The step is modeled with a scripted step whose
-// rereview turn returns what the fixed ReviewStep returns on a contradiction.
+// the rereview's conformance obligation surfaces the contradiction; the
+// scripted reviewer here classifies it ask-user (the fixer's retry-only
+// direction disputes the criterion itself, the ask-user case of the
+// four-level conformance clause), and one manual finding parks the run with
+// no executor change (executor.go manual-findings gate; an ask-master
+// classification parks through the same predicate). The step is modeled with
+// a scripted step whose rereview turn returns such a contradiction finding.
 //
 // The park is observable as the step reaching fix_review with the run's
 // awaiting-agent marker set; the run row itself stays "running" while a gate is

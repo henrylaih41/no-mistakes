@@ -338,9 +338,12 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 
 // A post-fix rereview that detects a contradiction with the authoritative
 // acceptance criteria (here: the fixer resolved a finding by deleting a
-// required behavior) surfaces it as an ask-user finding, so the run parks for
-// a human instead of silently completing. This is the forensic's removal-delete
-// regression, caught by the conformance obligation.
+// required behavior, disputing the criterion itself - the ask-user case of
+// the four-level conformance clause) surfaces it as an ask-user finding, so
+// the run parks instead of silently completing. This is the forensic's
+// removal-delete regression, caught by the conformance obligation; a bounded
+// restoration would instead be auto-fix and a non-local one ask-master, both
+// exercised elsewhere.
 func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
