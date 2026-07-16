@@ -22,9 +22,21 @@ import (
 func TestCIManualOutcomesRouteToMaster(t *testing.T) {
 	t.Parallel()
 	tests := map[string]*pipeline.StepOutcome{
-		"failures":     ciFailureOutcome([]string{"test"}, true, "CI failures require manual intervention"),
-		"mergeability": ciMergeabilityOutcome("mergeability check timed out", "unknown mergeability"),
-		"timeout":      ciMonitoringTimeoutOutcome(),
+		"failures": ciFailureOutcome([]string{"test"}, true, "CI failures require manual intervention"),
+		"devin-manual-verify": withDevinManualVerify(
+			ciFailureOutcome([]string{"test"}, false, "CI failures require manual intervention"),
+			cimonitor.ReviewManualVerifyMsg,
+		),
+		"devin-findings": devinFailureOutcome([]scm.ReviewComment{{
+			Path:     "internal/example.go",
+			Line:     12,
+			Severity: "high",
+			Body:     "unresolved finding",
+		}}, "Devin review exhausted"),
+		"devin-fallback":      devinFailureOutcome(nil, "Devin review exhausted"),
+		"devin-manual-review": devinManualReviewOutcome(cimonitor.ReviewManualVerifyMsg),
+		"mergeability":        ciMergeabilityOutcome("mergeability check timed out", "unknown mergeability"),
+		"timeout":             ciMonitoringTimeoutOutcome(),
 	}
 	for name, outcome := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -41,6 +53,14 @@ func TestCIManualOutcomesRouteToMaster(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	source, err := os.ReadFile("ci_checks.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(source), "types.ActionAskUser") {
+		t.Fatal("ci_checks.go must not route operational findings to ask-user")
 	}
 }
 

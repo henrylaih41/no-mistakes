@@ -218,7 +218,7 @@ func withDevinManualVerify(outcome *pipeline.StepOutcome, reason string) *pipeli
 	parsed.Items = append(parsed.Items, Finding{
 		Severity:    "warning",
 		Description: reason,
-		Action:      types.ActionAskUser,
+		Action:      types.ActionAskMaster,
 	})
 	if parsed.Summary != "" {
 		parsed.Summary += "; " + reason
@@ -264,14 +264,14 @@ func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline
 		out.Items = append(out.Items, Finding{
 			Severity:    devinSeverityToFinding(f.Severity),
 			Description: fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Body),
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		})
 	}
 	if len(out.Items) == 0 {
 		out.Items = append(out.Items, Finding{
 			Severity:    "warning",
 			Description: "Devin still requested changes when the review loop exhausted its rounds",
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		})
 	}
 	findingsJSON, _ := json.Marshal(out)
@@ -298,7 +298,7 @@ func devinManualReviewOutcome(reason string) *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: reason,
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)

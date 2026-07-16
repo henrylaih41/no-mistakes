@@ -98,8 +98,8 @@ func TestWithDevinManualVerify_FoldsSignalIntoCIFailureOutcome(t *testing.T) {
 		}
 		if it.Description == cimonitor.ReviewManualVerifyMsg {
 			foundManual = true
-			if it.Action != types.ActionAskUser {
-				t.Errorf("manual-verify finding action = %q, want %q", it.Action, types.ActionAskUser)
+			if it.Action != types.ActionAskMaster {
+				t.Errorf("manual-verify finding action = %q, want %q", it.Action, types.ActionAskMaster)
 			}
 		}
 	}
