@@ -14,11 +14,12 @@ import (
 var logMu sync.Mutex
 
 type invocation struct {
-	Time   string   `json:"time"`
-	Agent  string   `json:"agent"`
-	Args   []string `json:"args"`
-	Prompt string   `json:"prompt"`
-	CWD    string   `json:"cwd,omitempty"`
+	Time       string   `json:"time"`
+	Agent      string   `json:"agent"`
+	Executable string   `json:"executable,omitempty"`
+	Args       []string `json:"args"`
+	Prompt     string   `json:"prompt"`
+	CWD        string   `json:"cwd,omitempty"`
 }
 
 func logInvocation(agent, prompt string, args []string) {
@@ -28,11 +29,12 @@ func logInvocation(agent, prompt string, args []string) {
 	}
 	cwd, _ := os.Getwd()
 	rec := invocation{
-		Time:   time.Now().UTC().Format(time.RFC3339Nano),
-		Agent:  agent,
-		Args:   args,
-		Prompt: prompt,
-		CWD:    cwd,
+		Time:       time.Now().UTC().Format(time.RFC3339Nano),
+		Agent:      agent,
+		Executable: os.Args[0],
+		Args:       args,
+		Prompt:     prompt,
+		CWD:        cwd,
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {

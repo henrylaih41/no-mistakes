@@ -40,7 +40,8 @@ type Harness struct {
 	AgentLog    string // every fake-agent invocation appended here, one JSON per line
 	Scenario    string // optional path to a scenario yaml; empty = built-in default
 
-	agentName         string   // claude / codex / opencode
+	agentName         string   // claude / codex / opencode / grok
+	agentArgs         []string // optional native CLI args for the implementation agent
 	allowRepoCommands *bool    // mirrors SetupOpts.AllowRepoCommands
 	reviewers         []string // mirrors SetupOpts.Reviewers (global config panel)
 	repoReviewers     []string // mirrors SetupOpts.RepoReviewers (trusted repo panel)
@@ -48,11 +49,16 @@ type Harness struct {
 
 // SetupOpts controls per-test setup.
 type SetupOpts struct {
-	// Agent picks which fake the harness wires up: "claude", "codex", or
-	// "opencode". The other two binaries are still on PATH (so `auto`
+	// Agent picks which fake the harness wires up: "claude", "codex",
+	// "opencode", or "grok". The other binaries are still on PATH (so `auto`
 	// detection finds the requested one first via config), but only the
 	// chosen one is exercised.
 	Agent string
+
+	// AgentArgs writes agent_args_override for Agent in the global config.
+	// This lets a journey prove that user-controlled model/reasoning flags reach
+	// the native CLI without taking over no-mistakes-managed arguments.
+	AgentArgs []string
 
 	// Scenario is an optional path to a YAML scenario file. If empty the
 	// fake agent uses its built-in clean-response default.
@@ -112,6 +118,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		AgentLog:          filepath.Join(root, "fakeagent.log"),
 		Scenario:          opts.Scenario,
 		agentName:         opts.Agent,
+		agentArgs:         append([]string(nil), opts.AgentArgs...),
 		allowRepoCommands: opts.AllowRepoCommands,
 		reviewers:         opts.Reviewers,
 		repoReviewers:     opts.RepoReviewers,
@@ -125,12 +132,12 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	h.writeLoginShellPathSeed()
 
 	// Symlink each agent name to the same fake binary. Codex and Claude
-	// dispatch by argv[0] basename; opencode the same. Symlinks (not
+	// dispatch by argv[0] basename; opencode and grok do the same. Symlinks (not
 	// copies) keep the build cheap on subsequent tests. The `gh` symlink
 	// is a guard rail: BinDir is prepended to PATH, so any stray invocation
 	// of gh by the pipeline (e.g. PR/CI on a misconfigured origin) hits
 	// the fakeagent stub instead of a real, authenticated system gh.
-	for _, name := range []string{"claude", "codex", "opencode", "gh"} {
+	for _, name := range []string{"claude", "codex", "opencode", "grok", "gh"} {
 		linkPath := filepath.Join(h.BinDir, name)
 		if err := os.Symlink(fakeBin, linkPath); err != nil {
 			t.Fatalf("symlink %s: %v", linkPath, err)
@@ -221,6 +228,12 @@ agent_path_override:
   document: 0
   ci: 0
 `, h.agentName, overrides.String())
+	if len(h.agentArgs) > 0 {
+		cfg += "agent_args_override:\n  " + h.agentName + ":\n"
+		for _, arg := range h.agentArgs {
+			cfg += fmt.Sprintf("    - %q\n", arg)
+		}
+	}
 	cfg += reviewPanelYAML(h.reviewers, 0)
 	if err := os.WriteFile(configPath, []byte(cfg), 0o644); err != nil {
 		h.t.Fatalf("write config: %v", err)
@@ -717,11 +730,12 @@ func (h *Harness) AgentInvocations() []Invocation {
 
 // Invocation is a single fake-agent call captured in $FAKEAGENT_LOG.
 type Invocation struct {
-	Time   string   `json:"time"`
-	Agent  string   `json:"agent"`
-	Args   []string `json:"args"`
-	Prompt string   `json:"prompt"`
-	CWD    string   `json:"cwd,omitempty"`
+	Time       string   `json:"time"`
+	Agent      string   `json:"agent"`
+	Executable string   `json:"executable,omitempty"`
+	Args       []string `json:"args"`
+	Prompt     string   `json:"prompt"`
+	CWD        string   `json:"cwd,omitempty"`
 }
 
 func (h *Harness) runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {

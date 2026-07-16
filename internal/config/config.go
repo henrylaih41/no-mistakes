@@ -460,7 +460,7 @@ const defaultConfigYAML = `# no-mistakes global configuration
 
 # Agent to use for code generation. This may also be an ordered fallback list,
 # for example: agent: [codex, claude]
-# Options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target>
+# Options: auto, claude, codex, rovodev, opencode, pi, copilot, grok, acp:<target>
 # "auto" detects the first available native agent on your system
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
@@ -504,6 +504,7 @@ log_level: info
 # agent_path_override:
 #   claude: /usr/local/bin/claude
 #   codex: /opt/codex
+#   grok: /Users/you/.local/bin/grok
 
 # Extra native agent CLI flags (optional, global only)
 # Codex service_tier controls speed/priority; model_reasoning_effort controls reasoning depth.
@@ -515,6 +516,9 @@ log_level: info
 #     - service_tier="priority"
 #     - -c
 #     - model_reasoning_effort="low"
+#   grok:
+#     - --reasoning-effort
+#     - high
 #
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.
@@ -603,6 +607,7 @@ var defaultBinary = map[types.AgentName]string{
 	types.AgentOpenCode: "opencode",
 	types.AgentPi:       "pi",
 	types.AgentCopilot:  "copilot",
+	types.AgentGrok:     "grok",
 }
 
 // agentProbeOrder is the priority order for auto-detecting agents.
@@ -613,6 +618,7 @@ var agentProbeOrder = []types.AgentName{
 	types.AgentRovoDev,
 	types.AgentPi,
 	types.AgentCopilot,
+	types.AgentGrok,
 }
 
 func isACPAgent(name types.AgentName) bool {
@@ -652,6 +658,26 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 		return false, fmt.Errorf("probe rovodev support via %q: %w", bin, err)
 	}
 	return false, fmt.Errorf("probe rovodev support via %q: %w", bin, err)
+}
+
+var probeGrokSupport = func(ctx context.Context, bin string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, "--version")
+	if err := cmd.Run(); err == nil {
+		return true, nil
+	} else if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if ctx.Err() != nil {
+		return false, fmt.Errorf("probe grok via %q: %w", bin, ctx.Err())
+	} else {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("probe grok via %q: %w", bin, err)
+	}
 }
 
 // ResolveAgent resolves configured agent names to available agents. A single
@@ -720,6 +746,14 @@ func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (st
 		if err == nil {
 			if name == types.AgentRovoDev {
 				ok, probeErr := probeRovoDevSupport(ctx, resolvedBin)
+				if probeErr != nil {
+					return "", probeErr
+				}
+				if !ok {
+					continue
+				}
+			} else if name == types.AgentGrok {
+				ok, probeErr := probeGrokSupport(ctx, resolvedBin)
 				if probeErr != nil {
 					return "", probeErr
 				}
@@ -951,6 +985,7 @@ var agentArgsOverrideAgents = map[string]bool{
 	string(types.AgentOpenCode): true,
 	string(types.AgentPi):       true,
 	string(types.AgentCopilot):  true,
+	string(types.AgentGrok):     true,
 }
 
 // reservedAgentArgs lists flags that no-mistakes manages internally and that
@@ -1003,6 +1038,17 @@ var reservedAgentArgs = map[string]map[string]bool{
 		"--output-format": true,
 		"--no-color":      true,
 	},
+	string(types.AgentGrok): {
+		"-p":                true,
+		"--single":          true,
+		"--prompt-file":     true,
+		"--prompt-json":     true,
+		"--output-format":   true,
+		"--json-schema":     true,
+		"--permission-mode": true,
+		"--always-approve":  true,
+		"--cwd":             true,
+	},
 }
 
 // validateAgentArgsOverride ensures each agent key is a known agent name and
@@ -1011,7 +1057,7 @@ var reservedAgentArgs = map[string]map[string]bool{
 func validateAgentArgsOverride(override map[string][]string) error {
 	for name, args := range override {
 		if !agentArgsOverrideAgents[name] {
-			return fmt.Errorf("invalid agent name in agent_args_override: %q (valid: claude, codex, rovodev, opencode, pi, copilot)", name)
+			return fmt.Errorf("invalid agent name in agent_args_override: %q (valid: claude, codex, rovodev, opencode, pi, copilot, grok)", name)
 		}
 		reserved := reservedAgentArgs[name]
 		for i, arg := range args {
@@ -1067,7 +1113,7 @@ func validateReviewerSpec(i int, spec ReviewerSpec) error {
 		return fmt.Errorf("invalid review.reviewers[%d]: missing agent", i)
 	}
 	if spec.Agent != types.AgentAuto && !isACPAgent(spec.Agent) && !isNativeAgent(spec.Agent) {
-		return fmt.Errorf("invalid review.reviewers[%d]: unknown agent %q (valid: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target>)", i, name)
+		return fmt.Errorf("invalid review.reviewers[%d]: unknown agent %q (valid: auto, claude, codex, rovodev, opencode, pi, copilot, grok, acp:<target>)", i, name)
 	}
 	for j, arg := range spec.Args {
 		if strings.TrimSpace(arg) == "" {

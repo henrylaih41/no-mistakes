@@ -16,12 +16,21 @@ import (
 )
 
 func TestAgentPath_Override(t *testing.T) {
-	cfg := &Config{
-		Agent:             types.AgentClaude,
-		AgentPathOverride: map[string]string{"claude": "/custom/claude"},
+	tests := []struct {
+		agent types.AgentName
+		path  string
+	}{
+		{types.AgentClaude, "/custom/claude"},
+		{types.AgentGrok, "/custom/grok"},
 	}
-	if got := cfg.AgentPath(); got != "/custom/claude" {
-		t.Errorf("AgentPath() = %q, want %q", got, "/custom/claude")
+	for _, tt := range tests {
+		cfg := &Config{
+			Agent:             tt.agent,
+			AgentPathOverride: map[string]string{string(tt.agent): tt.path},
+		}
+		if got := cfg.AgentPath(); got != tt.path {
+			t.Errorf("AgentPath() for %q = %q, want %q", tt.agent, got, tt.path)
+		}
 	}
 }
 
@@ -36,6 +45,7 @@ func TestAgentPath_DefaultBinaries(t *testing.T) {
 		{types.AgentOpenCode, "opencode"},
 		{types.AgentPi, "pi"},
 		{types.AgentCopilot, "copilot"},
+		{types.AgentGrok, "grok"},
 	}
 	for _, tt := range tests {
 		cfg := &Config{Agent: tt.agent}
@@ -253,6 +263,113 @@ func TestResolveAgent_AutoPicksClaude(t *testing.T) {
 	}
 }
 
+func TestResolveAgent_AutoPicksGrokLast(t *testing.T) {
+	cfg := &Config{Agent: types.AgentAuto}
+	originalProbe := probeGrokSupport
+	probeGrokSupport = func(_ context.Context, bin string) (bool, error) {
+		if bin != "/usr/bin/grok" {
+			t.Fatalf("unexpected grok probe for %q", bin)
+		}
+		return true, nil
+	}
+	t.Cleanup(func() { probeGrokSupport = originalProbe })
+
+	var probed []string
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		probed = append(probed, bin)
+		if bin == "grok" {
+			return "/usr/bin/grok", nil
+		}
+		return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentGrok {
+		t.Fatalf("agent = %q, want %q", cfg.Agent, types.AgentGrok)
+	}
+	if got := probed[len(probed)-1]; got != "grok" {
+		t.Fatalf("last probe = %q, want grok (all existing agents must retain priority); probes=%v", got, probed)
+	}
+}
+
+func TestResolveAgent_AutoKeepsCopilotAheadOfGrok(t *testing.T) {
+	cfg := &Config{Agent: types.AgentAuto}
+	originalProbe := probeGrokSupport
+	probeGrokSupport = func(context.Context, string) (bool, error) {
+		t.Fatal("grok version probe should not run when copilot is available")
+		return false, nil
+	}
+	t.Cleanup(func() { probeGrokSupport = originalProbe })
+
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "copilot", "grok":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentCopilot {
+		t.Fatalf("agent = %q, want %q", cfg.Agent, types.AgentCopilot)
+	}
+}
+
+func TestResolveAgent_AutoSkipsGrokWhenVersionProbeFails(t *testing.T) {
+	cfg := &Config{Agent: types.AgentAuto}
+	originalProbe := probeGrokSupport
+	probeGrokSupport = func(_ context.Context, bin string) (bool, error) {
+		if bin != "/usr/bin/grok" {
+			t.Fatalf("unexpected grok probe for %q", bin)
+		}
+		return false, nil
+	}
+	t.Cleanup(func() { probeGrokSupport = originalProbe })
+
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		if bin == "grok" {
+			return "/usr/bin/grok", nil
+		}
+		return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+	})
+	if err == nil {
+		t.Fatal("expected no supported agent when grok --version probe fails")
+	}
+	if cfg.Agent != types.AgentAuto {
+		t.Fatalf("agent = %q, want auto", cfg.Agent)
+	}
+}
+
+func TestProbeGrokSupportRequiresSuccessfulVersion(t *testing.T) {
+	dir := t.TempDir()
+	name := "grok"
+	successScript := "#!/bin/sh\necho 'grok test'\n"
+	failureScript := "#!/bin/sh\nexit 1\n"
+	if runtime.GOOS == "windows" {
+		name = "grok.cmd"
+		successScript = "@echo off\r\necho grok test\r\n"
+		failureScript = "@echo off\r\nexit /b 1\r\n"
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(successScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := probeGrokSupport(context.Background(), path)
+	if err != nil || !ok {
+		t.Fatalf("successful --version probe = (%v, %v), want (true, nil)", ok, err)
+	}
+	if err := os.WriteFile(path, []byte(failureScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = probeGrokSupport(context.Background(), path)
+	if err != nil || ok {
+		t.Fatalf("failed --version probe = (%v, %v), want (false, nil)", ok, err)
+	}
+}
+
 func TestResolveAgent_AutoRespectsPathOverride(t *testing.T) {
 	cfg := &Config{
 		Agent:             types.AgentAuto,
@@ -313,7 +430,7 @@ func TestResolveAgent_AutoSkipsRovoDevWithoutSubcommand(t *testing.T) {
 
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		switch bin {
-		case "claude", "codex", "opencode", "pi", "copilot":
+		case "claude", "codex", "opencode", "pi", "copilot", "grok":
 			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
 		case "acli":
 			return "/usr/bin/acli", nil
