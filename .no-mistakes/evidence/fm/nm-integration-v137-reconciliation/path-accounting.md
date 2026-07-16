@@ -7,7 +7,7 @@ This ledger implements Amendment 1 of `design-no-mistakes-integration-v137-recon
 - v1.37 base: `fc0845a`
 - Re-port branch: `feat/integration-v137-reconciliation`
 - Accounting set: all 326 paths changed by `ce637efb..origin/integration`
-- Result at the reviewed head: all 326 paths exist; 245 are blob-identical, 79 are ported onto v1.37 content, 2 release-history paths are superseded by upstream, and 0 are intentionally dropped.
+- Result at the reviewed head: all 326 paths exist; 244 are blob-identical, 80 are ported onto v1.37 content, 2 release-history paths are superseded by upstream, and 0 are intentionally dropped.
 
 ## Feature-preservation evidence
 
@@ -158,7 +158,7 @@ Each port was completed as a logical tested commit (or a small code/docs series)
 - `internal/cli/update.go` — kept — blob-identical to the `ce06d605` integration end state.
 - `internal/cli/update_test.go` — kept — blob-identical to the `ce06d605` integration end state.
 - `internal/config/config.go` — ported — fork behavior/tests are retained on v1.37 abstractions; the current blob intentionally differs because it also contains upstream changes.
-- `internal/config/config_agent_test.go` — kept — blob-identical to the `ce06d605` integration end state.
+- `internal/config/config_agent_test.go` — ported — all fork tests are retained and the current blob adds explicit-Grok resolution regressions for the v1.37 port.
 - `internal/config/config_args_override_test.go` — kept — blob-identical to the `ce06d605` integration end state.
 - `internal/config/config_design_context_test.go` — kept — blob-identical to the `ce06d605` integration end state.
 - `internal/config/config_global_test.go` — kept — blob-identical to the `ce06d605` integration end state.
