@@ -125,6 +125,9 @@ func annotateRunView(env *axiEnv, rv *runView) {
 				step.FixRoundCount = stats.FixRounds
 				step.PendingFixSource = stats.PendingFixSource
 			}
+			if retries, err := env.d.CountStepAgentAutoRetries(step.ID); err == nil {
+				step.AgentAutoRetries = retries
+			}
 		}
 		if step.LastActivityAt == nil {
 			logPath := filepath.Join(env.p.RunLogDir(rv.ID), step.Name+".log")

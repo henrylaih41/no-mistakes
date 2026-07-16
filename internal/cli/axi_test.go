@@ -342,6 +342,30 @@ func TestWriteGateShapeAwaitingTriage(t *testing.T) {
 	}
 }
 
+func TestWriteGateShapeAwaitingAgentRetry(t *testing.T) {
+	gate := stepView{
+		Name:             "test",
+		Status:           string(types.StepStatusAwaitingRetry),
+		Error:            "agent provider/transient failure: claude empty-stderr exit-1 after retries; resume with `no-mistakes axi respond --action retry` to retry this step",
+		AgentAutoRetries: 1,
+	}
+	out := axiDoc(gateFields(gate)...)
+
+	for _, want := range []string{
+		"status: awaiting_agent_retry",
+		"reason: \"agent provider/transient failure",
+		"auto_retries: 1",
+		"no-mistakes axi respond --action retry",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("agent retry gate missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "findings[") {
+		t.Errorf("agent retry gate should not render a findings table:\n%s", out)
+	}
+}
+
 // TestGateNote_ReviewOnly verifies the review-auto-fix-disabled note appears
 // only at the review gate, while the keep-driving reminder appears at every
 // gate.

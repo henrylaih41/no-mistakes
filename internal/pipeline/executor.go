@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -36,6 +37,7 @@ type approvalResponse struct {
 	instructions      map[string]string
 	addedFindings     []types.Finding
 	fixOverrideReason string
+	autoRetry         bool
 }
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
@@ -62,6 +64,8 @@ type Executor struct {
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
+	waitingStepResultID   string
+	waitingAgentRetry     bool
 	waitingAtFixRoundCap  bool // true when the review step is parked for triage at max_fix_rounds
 	waitingMaxFixRounds   int
 	waitingFixRoundCount  int
@@ -135,8 +139,9 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 // RespondWithOverrideReason is like RespondWithOverrides but also carries the
 // explicit master/triage reason for allowing one more review fix round after
 // review.max_fix_rounds has already been consumed.
-func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, fixOverrideReason string) error {
+func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, fixOverrideReason string, autoRetryValue ...bool) error {
 	fixOverrideReason = strings.TrimSpace(fixOverrideReason)
+	autoRetry := len(autoRetryValue) > 0 && autoRetryValue[0]
 
 	e.mu.Lock()
 	if !e.waiting {
@@ -150,6 +155,30 @@ func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.A
 	if fixOverrideReason != "" && action != types.ActionFix {
 		e.mu.Unlock()
 		return fmt.Errorf("fix override reason is only valid with --action fix")
+	}
+	if e.waitingAgentRetry {
+		if action != types.ActionRetry {
+			e.mu.Unlock()
+			return fmt.Errorf("agent transient park for %q requires --action retry", step)
+		}
+		if len(findingIDs) > 0 || len(instructions) > 0 || len(addedFindings) > 0 {
+			e.mu.Unlock()
+			return fmt.Errorf("--action retry does not accept findings or fix instructions")
+		}
+		if autoRetry {
+			count, err := e.db.CountStepAgentAutoRetries(e.waitingStepResultID)
+			if err != nil {
+				e.mu.Unlock()
+				return fmt.Errorf("count agent auto retries for %q: %w", step, err)
+			}
+			if count >= 1 {
+				e.mu.Unlock()
+				return fmt.Errorf("agent transient auto-retry already consumed for %q; parked for manual retry", step)
+			}
+		}
+	} else if action == types.ActionRetry {
+		e.mu.Unlock()
+		return fmt.Errorf("--action retry is only valid while a step is awaiting_agent_retry")
 	}
 	if action == types.ActionFix {
 		if e.waitingAtFixRoundCap {
@@ -173,6 +202,7 @@ func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.A
 		instructions:      instructions,
 		addedFindings:     addedFindings,
 		fixOverrideReason: fixOverrideReason,
+		autoRetry:         autoRetry,
 	}
 	return nil
 }
@@ -750,6 +780,76 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			durationMS := executionMS + roundDuration
+			var transient *agent.TransientError
+			if errors.As(err, &transient) {
+				executionMS = durationMS
+				reason := agentTransientParkReason(transient)
+				fmt.Fprintf(logFile, "\n%s\n", reason)
+				parkStart := time.Now()
+
+				e.mu.Lock()
+				e.waiting = true
+				e.waitingStep = stepName
+				e.waitingStepResultID = sr.ID
+				e.waitingAgentRetry = true
+				e.waitingAtFixRoundCap = false
+				e.waitingFixRoundCount = 0
+				e.waitingMaxFixRounds = 0
+				e.mu.Unlock()
+
+				if dbErr := e.db.SetRunAwaitingAgent(run.ID); dbErr != nil {
+					slog.Warn("failed to set awaiting-agent marker in db", "step", stepName, "run", run.ID, "error", dbErr)
+				}
+				if dbErr := e.db.ParkStep(sr.ID, types.StepStatusAwaitingRetry, reason, executionMS); dbErr != nil {
+					slog.Warn("failed to park step in db", "step", stepName, "status", types.StepStatusAwaitingRetry, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusAwaitingRetry), "", "", reason, &executionMS)
+
+				response, _, waitErr := e.waitForApprovalOrReconcile(ctx, approvalOnlyStep{Step: step}, sctx, false)
+				if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+					slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
+				}
+				if waitErr != nil {
+					if dbErr := e.db.FailStep(sr.ID, waitErr.Error(), executionMS); dbErr != nil {
+						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+					}
+					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", waitErr.Error(), &executionMS)
+					return false, fmt.Errorf("step %s: waiting for agent retry: %w", stepName, waitErr)
+				}
+				if response.action != types.ActionRetry {
+					retryErr := fmt.Errorf("step %s: agent transient park requires retry action, got %s", stepName, response.action)
+					if dbErr := e.db.FailStep(sr.ID, retryErr.Error(), executionMS); dbErr != nil {
+						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+					}
+					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", retryErr.Error(), &executionMS)
+					return false, retryErr
+				}
+				trigger := db.RoundTriggerAgentManualRetry
+				if response.autoRetry {
+					trigger = db.RoundTriggerAgentAutoRetry
+				}
+				if _, dbErr := e.db.InsertStepRound(sr.ID, roundNum, trigger, nil, nil, 0); dbErr != nil {
+					persistErr := fmt.Errorf("step %s: persist agent retry attribution: %w", stepName, dbErr)
+					if failErr := e.db.FailStep(sr.ID, persistErr.Error(), executionMS); failErr != nil {
+						slog.Warn("failed to mark step as failed in db", "step", stepName, "error", failErr)
+					}
+					e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", persistErr.Error(), &executionMS)
+					return false, persistErr
+				}
+
+				telemetry.Track("agent_retry", telemetry.Fields{
+					"step":  string(stepName),
+					"auto":  response.autoRetry,
+					"agent": transient.Agent,
+					"label": transient.Label,
+				})
+				phaseStart = time.Now()
+				if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusRunning); dbErr != nil {
+					slog.Warn("failed to update step status in db", "step", stepName, "status", "running", "error", dbErr)
+				}
+				e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
+				continue
+			}
 			// Persist the failure reason to the step's own log file. The error
 			// often carries the only detail of why the step failed (e.g. git
 			// stderr from a rejected push); without this the step log shows the
@@ -875,6 +975,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.mu.Lock()
 		e.waiting = true
 		e.waitingStep = stepName
+		e.waitingStepResultID = sr.ID
+		e.waitingAgentRetry = false
 		e.waitingAtFixRoundCap = reviewCapReached
 		e.waitingFixRoundCount = reviewFixRoundCount
 		e.waitingMaxFixRounds = reviewMaxFixRounds
@@ -1125,6 +1227,30 @@ func pluralize(n int, singular, plural string) string {
 	return plural
 }
 
+func agentTransientParkReason(err *agent.TransientError) string {
+	agentName := "agent"
+	label := "transient provider failure"
+	if err != nil {
+		if strings.TrimSpace(err.Agent) != "" {
+			agentName = strings.TrimSpace(err.Agent)
+		}
+		if strings.TrimSpace(err.Label) != "" {
+			label = strings.TrimSpace(err.Label)
+		}
+	}
+	reason := fmt.Sprintf("agent provider/transient failure: %s %s after retries; resume with `no-mistakes axi respond --action retry` to retry this step", agentName, label)
+	if err != nil && err.Err != nil {
+		reason += fmt.Sprintf(" (last error: %v)", err.Err)
+	}
+	return reason
+}
+
+// approvalOnlyStep deliberately exposes only Step, even when the underlying
+// step also implements ApprovalGateReconciler. A transient-provider retry gate
+// represents operator intent and must not be cleared by unrelated external
+// state reconciliation (for example, a CI step observing a closed PR).
+type approvalOnlyStep struct{ Step }
+
 func (e *Executor) reviewFixRoundCapReached(stepName types.StepName, stepResultID string) (bool, int, int, error) {
 	if stepName != types.StepReview || e.config == nil {
 		return false, 0, 0, nil
@@ -1153,6 +1279,8 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		e.mu.Lock()
 		e.waiting = false
 		e.waitingStep = ""
+		e.waitingStepResultID = ""
+		e.waitingAgentRetry = false
 		e.waitingAtFixRoundCap = false
 		e.waitingFixRoundCount = 0
 		e.waitingMaxFixRounds = 0
@@ -1355,7 +1483,7 @@ func shouldTrackStepTelemetry(eventType ipc.EventType, status string) bool {
 		return false
 	}
 	switch types.StepStatus(status) {
-	case types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusAwaitingTriage, types.StepStatusFailed:
+	case types.StepStatusAwaitingApproval, types.StepStatusAwaitingRetry, types.StepStatusFixReview, types.StepStatusAwaitingTriage, types.StepStatusFailed:
 		return true
 	default:
 		return false

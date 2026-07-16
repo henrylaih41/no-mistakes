@@ -358,13 +358,13 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	placeholders, args := recoveryExclusionClause(preserved)
 	stepArgs := []any{
 		types.StepStatusFailed, errMsg, ts,
-		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview, types.StepStatusAwaitingTriage,
+		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusAwaitingRetry, types.StepStatusFixing, types.StepStatusFixReview, types.StepStatusAwaitingTriage,
 		types.RunPending, types.RunRunning,
 	}
 	stepArgs = append(stepArgs, args...)
 	_, err = tx.Exec(
 		`UPDATE step_results SET status = ?, error = ?, completed_at = ?
-		 WHERE status IN (?, ?, ?, ?, ?) AND run_id IN (
+		 WHERE status IN (?, ?, ?, ?, ?, ?) AND run_id IN (
 			SELECT id FROM runs WHERE status IN (?, ?)`+placeholders+`
 		 )`,
 		stepArgs...,

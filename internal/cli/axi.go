@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/skill"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
 
@@ -182,6 +183,7 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 	}
 
 	gated := false
+	retryGate := false
 	fingerprint := env.repo.ID + "|" + daemonState
 	if currentActive != nil {
 		steps, _ := env.d.GetStepsByRun(currentActive.ID)
@@ -190,6 +192,7 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 		fields = append(fields, runObjectFieldWithKey("active_run", rv))
 		if gate, ok := rv.awaitingStep(); ok {
 			gated = true
+			retryGate = gate.Status == string(types.StepStatusAwaitingRetry)
 			fields = append(fields, gateFields(gate)...)
 		}
 		fingerprint += "|" + runStateFingerprint(rv)
@@ -218,7 +221,11 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 			help = append(help, fmt.Sprintf("Another active run is on %s; leave it alone unless you are working on that branch", otherActive.Branch))
 		}
 	case gated:
-		help = append(help, "Run `no-mistakes axi respond --action approve` to clear the current gate")
+		if retryGate {
+			help = append(help, "Run `no-mistakes axi respond --action retry` to retry the parked agent step")
+		} else {
+			help = append(help, "Run `no-mistakes axi respond --action approve` to clear the current gate")
+		}
 	default:
 		help = append(help, "Run `no-mistakes axi status` to inspect the active run")
 	}

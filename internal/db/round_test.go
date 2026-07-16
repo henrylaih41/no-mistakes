@@ -221,6 +221,33 @@ func TestCountStepFixRounds(t *testing.T) {
 	}
 }
 
+func TestCountStepFixRoundsIgnoresAgentRetryRounds(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+
+	d.InsertStepRound(step.ID, 1, "initial", nil, nil, 100)
+	d.InsertStepRound(step.ID, 2, RoundTriggerAgentAutoRetry, nil, nil, 100)
+	d.InsertStepRound(step.ID, 3, RoundTriggerAgentManualRetry, nil, nil, 100)
+
+	fixes, err := d.CountStepFixRounds(step.ID)
+	if err != nil {
+		t.Fatalf("count fix rounds: %v", err)
+	}
+	if fixes != 0 {
+		t.Fatalf("fix round count = %d, want 0", fixes)
+	}
+
+	retries, err := d.CountStepAgentAutoRetries(step.ID)
+	if err != nil {
+		t.Fatalf("count agent auto retries: %v", err)
+	}
+	if retries != 1 {
+		t.Fatalf("agent auto retry count = %d, want 1", retries)
+	}
+}
+
 func TestSetStepRoundFixOverrideReason(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

@@ -74,7 +74,11 @@ func newAxiRunCmd() *cobra.Command {
 			"stops at an awaiting_triage gate when review reaches max_fix_rounds: it\n" +
 			"never supplies the override implicitly. Report the residual findings for\n" +
 			"master triage, then respond with --action fix --fix-override\n" +
-			"--override-reason only after a merge-blocking ruling.\n\n" +
+			"--override-reason only after a merge-blocking ruling. If a step parks at\n" +
+			"awaiting_agent_retry after an exhausted transient agent/provider failure,\n" +
+			"--yes auto-retries that step at most once, with the retry recorded on the\n" +
+			"run; a second consecutive transient remains parked for an explicit\n" +
+			"--action retry.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
@@ -109,7 +113,7 @@ func newAxiRunCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome; still stops at awaiting_triage")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome; still stops at awaiting_triage and only auto-retries awaiting_agent_retry once per step")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringArrayVar(&designContextFiles, "design-context", nil, "path to a design-context text file to inject into review and fix prompts (repeatable)")
@@ -404,7 +408,8 @@ func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
 			}
-			if err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, ""); err != nil {
+			autoRetry := action == types.ActionRetry
+			if err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, "", autoRetry); err != nil {
 				return nil, false, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
 			}
 			if err := waitStepLeavesGate(ctx, client, runID, gate.Name, gate.Status); err != nil {
@@ -458,7 +463,13 @@ func ciLogReader(p *paths.Paths) func(string) []string {
 }
 
 func gateAllowsAutoResolution(gate stepView) bool {
-	return gate.Status != string(types.StepStatusAwaitingTriage)
+	if gate.Status == string(types.StepStatusAwaitingTriage) {
+		return false
+	}
+	if gate.Status == string(types.StepStatusAwaitingRetry) {
+		return gate.AgentAutoRetries == 0
+	}
+	return true
 }
 
 // gateResolution decides how --yes answers an approval gate. A gate with
@@ -469,6 +480,9 @@ func gateAllowsAutoResolution(gate stepView) bool {
 // findings, or actionable findings that carry no IDs (which a fix would resolve
 // to zero selections) are approved.
 func gateResolution(gate stepView, alreadyFixed bool) (types.ApprovalAction, []string) {
+	if gate.Status == string(types.StepStatusAwaitingRetry) {
+		return types.ActionRetry, nil
+	}
 	if alreadyFixed || gate.Status == string(types.StepStatusFixReview) {
 		return types.ActionApprove, nil
 	}
@@ -527,7 +541,7 @@ func getRunInfo(client *ipc.Client, runID string) (*ipc.RunInfo, error) {
 }
 
 // sendRespond issues an approval action to the daemon for a step.
-func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, added []types.Finding, fixOverrideReason string) error {
+func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, added []types.Finding, fixOverrideReason string, autoRetry bool) error {
 	params := &ipc.RespondParams{
 		RunID:             runID,
 		Step:              step,
@@ -536,6 +550,7 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 		Instructions:      instructions,
 		AddedFindings:     added,
 		FixOverrideReason: fixOverrideReason,
+		AutoRetry:         autoRetry,
 	}
 	var result ipc.RespondResult
 	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
@@ -646,8 +661,11 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "respond",
 		Short: "Answer the current approval gate and continue the run",
-		Long: "Sends approve/fix/skip for the step currently awaiting approval, then\n" +
+		Long: "Sends approve/fix/retry/skip for the step currently awaiting approval, then\n" +
 			"blocks until the next gate, CI-ready decision point, or final outcome.\n" +
+			"Use --action retry only when a step is awaiting_agent_retry after an\n" +
+			"exhausted transient agent/provider failure; retry does not take findings\n" +
+			"and does not create a review fix round.\n" +
 			"When review is awaiting_triage after max_fix_rounds, use --action fix\n" +
 			"with --fix-override and --override-reason only after master triage.\n\n" +
 			preserveGateFixCommitsGuidance,
@@ -673,7 +691,7 @@ func newAxiRespondCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip (required)")
+	cmd.Flags().StringVar(&action, "action", "", "approve | fix | retry | skip (required)")
 	cmd.Flags().StringVar(&step, "step", "", "step to respond to (default: the step awaiting approval)")
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
@@ -700,13 +718,13 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 
 	act := types.ApprovalAction(strings.TrimSpace(ra.action))
 	switch act {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip:
+	case types.ActionApprove, types.ActionFix, types.ActionRetry, types.ActionSkip:
 	case "":
 		return emitError(cmd, 2, "--action is required",
-			"Run `no-mistakes axi respond --action approve|fix|skip`")
+			"Run `no-mistakes axi respond --action approve|fix|retry|skip`")
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
-			"Valid actions: approve, fix, skip")
+			"Valid actions: approve, fix, retry, skip")
 	}
 	overrideReason := strings.TrimSpace(ra.overrideReason)
 	if ra.fixOverride {
@@ -758,6 +776,13 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		}
 		stepName = types.StepName(gate.Name)
 	}
+	isRetryGate := false
+	for _, s := range rv.Steps {
+		if s.Name == string(stepName) && s.Status == string(types.StepStatusAwaitingRetry) {
+			isRetryGate = true
+			break
+		}
+	}
 
 	findingIDs := splitCSV(ra.findings)
 	var instructions map[string]string
@@ -783,11 +808,21 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 			added = append(added, f)
 		}
 	}
+	if act == types.ActionRetry {
+		if !isRetryGate {
+			return emitError(cmd, 2, "--action retry is only valid while the step is awaiting_agent_retry",
+				"Run `no-mistakes axi status` to see the active gate")
+		}
+		if len(findingIDs) > 0 || strings.TrimSpace(ra.instructions) != "" || strings.TrimSpace(ra.addFinding) != "" || ra.fixOverride {
+			return emitError(cmd, 2, "--action retry does not accept findings, fix instructions, or --fix-override",
+				"Run `no-mistakes axi respond --action retry` to retry the parked agent step")
+		}
+	}
 
 	if !ra.fixOverride {
 		overrideReason = ""
 	}
-	if err := sendRespond(env.client, runID, stepName, act, findingIDs, instructions, added, overrideReason); err != nil {
+	if err := sendRespond(env.client, runID, stepName, act, findingIDs, instructions, added, overrideReason, false); err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("respond to %s: %v", stepName, err))
 	}
 

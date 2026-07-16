@@ -55,7 +55,7 @@ That is a core design choice, not an implementation detail.
 3. The gate repo's `post-receive` hook notifies the daemon.
 4. The daemon creates a detached worktree for this run.
 5. The pipeline runs in order: `intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci`.
-6. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip.
+6. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip; a step parked at `awaiting_agent_retry` after an exhausted transient agent/provider failure resumes with `--action retry`.
    Use `no-mistakes axi abort` only when you mean to cancel the whole run.
    AXI run objects show `awaiting_agent: parked <duration>` while a non-terminal run is parked at that gate, so a supervising agent can distinguish a waiting run from active work in one status read.
    While a step is actively running or fixing, AXI run objects can also show `active_steps` with the active duration, latest activity, native agent PID, and current execution or fix round.
@@ -156,7 +156,7 @@ branch, marking the remaining steps as skipped.
 
 A step can implement bounded approval-gate reconciliation so a stale gate clears without user action once the external condition that forced the pause resolves on its own - for example a CI idle-timeout or Devin manual-verify gate after the PR is merged or closed out-of-band.
 
-While the executor is paused at an approval, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
+While the executor is paused at an approval, agent-retry, fix-review, or triage gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
 That timestamp is observability only and does not alter approval behavior.
 When the wait ends, it atomically clears the marker and adds the elapsed wall time to the run's local parked-time total, so a crash cannot leave that time undercounted.
 While a step is running or fixing, the executor also records the latest meaningful step activity from log lines and native subprocess lifecycle events.

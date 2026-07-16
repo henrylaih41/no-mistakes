@@ -294,6 +294,31 @@ func TestRunWithRetry_ExhaustsRetries(t *testing.T) {
 	}
 }
 
+func TestRunWithRetry_ExhaustedTransientReturnsTypedError(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	transientErr := errors.New("503 service unavailable")
+	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 1, classifyTransient, nil, func() (*Result, error) {
+		return nil, transientErr
+	})
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	var transient *TransientError
+	if !errors.As(err, &transient) {
+		t.Fatalf("expected TransientError, got %T %[1]v", err)
+	}
+	if transient.Agent != "claude" {
+		t.Fatalf("TransientError.Agent = %q, want claude", transient.Agent)
+	}
+	if transient.Label != "http 503" {
+		t.Fatalf("TransientError.Label = %q, want http 503", transient.Label)
+	}
+	if !errors.Is(err, transientErr) {
+		t.Fatalf("TransientError should wrap original error, got %v", err)
+	}
+}
+
 func TestRunWithRetry_RespectsContextCancellation(t *testing.T) {
 	// Use a real backoff that would normally take ~1s, but cancel ctx
 	// before the first sleep finishes to confirm short-circuit.
@@ -333,6 +358,16 @@ func TestRunWithRetry_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
+func TestClaudeRetryClassifier_EmptyStderrExitOne(t *testing.T) {
+	label, ok := claudeRetryClassifier(errors.New("claude exited: exit status 1: "))
+	if !ok {
+		t.Fatal("expected empty-stderr exit-1 to classify as transient")
+	}
+	if label != "empty-stderr exit-1" {
+		t.Fatalf("label = %q, want empty-stderr exit-1", label)
+	}
+}
+
 func TestRunWithRetry_CombinedClassifierForClaude(t *testing.T) {
 	defer withFastBackoff(t)()
 
@@ -350,6 +385,10 @@ func TestRunWithRetry_CombinedClassifierForClaude(t *testing.T) {
 	}
 	if !errors.Is(err, errNoStructuredOutput) {
 		t.Errorf("expected errNoStructuredOutput to surface as final error, got %v", err)
+	}
+	var transient *TransientError
+	if errors.As(err, &transient) {
+		t.Fatalf("errNoStructuredOutput should not become a TransientError park, got %+v", transient)
 	}
 }
 

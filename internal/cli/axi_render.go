@@ -77,6 +77,8 @@ type stepView struct {
 	Status           string
 	DurationMS       int64
 	FindingsJSON     string
+	Error            string
+	AgentAutoRetries int
 	FixSummaries     []string
 	StartedAt        *int64
 	LastActivityAt   *int64
@@ -127,6 +129,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 			FixRoundCount:    s.FixRoundCount,
 			AutoFixLimit:     s.AutoFixLimit,
 			PendingFixSource: s.PendingFixSource,
+			AgentAutoRetries: s.AgentAutoRetries,
 		}
 		if s.LastActivity != nil {
 			sv.LastActivity = *s.LastActivity
@@ -136,6 +139,9 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		}
 		if s.FindingsJSON != nil {
 			sv.FindingsJSON = *s.FindingsJSON
+		}
+		if s.Error != nil {
+			sv.Error = *s.Error
 		}
 		rv.Steps = append(rv.Steps, sv)
 	}
@@ -174,6 +180,9 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 		if s.FindingsJSON != nil {
 			sv.FindingsJSON = *s.FindingsJSON
 		}
+		if s.Error != nil {
+			sv.Error = *s.Error
+		}
 		rv.Steps = append(rv.Steps, sv)
 	}
 	return rv
@@ -183,7 +192,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 // At most one step awaits at a time, so the first match is the active gate.
 func (rv runView) awaitingStep() (stepView, bool) {
 	for _, s := range rv.Steps {
-		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview) || s.Status == string(types.StepStatusAwaitingTriage) {
+		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusAwaitingRetry) || s.Status == string(types.StepStatusFixReview) || s.Status == string(types.StepStatusAwaitingTriage) {
 			return s, true
 		}
 	}
@@ -436,6 +445,21 @@ func gateFields(gate stepView) []toon.Field {
 	gfields := []toon.Field{
 		{Key: "step", Value: gate.Name},
 		{Key: "status", Value: gate.Status},
+	}
+	if gate.Status == string(types.StepStatusAwaitingRetry) {
+		if gate.Error != "" {
+			gfields = append(gfields, toon.Field{Key: "reason", Value: gate.Error})
+		}
+		gfields = append(gfields, toon.Field{Key: "auto_retries", Value: gate.AgentAutoRetries})
+		help := []string{
+			"Run `no-mistakes axi respond --action retry` to retry this agent step without creating a review fix round",
+			fmt.Sprintf("Run `no-mistakes axi logs --step %s --full` to read the full step log", gate.Name),
+			"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
+		}
+		return []toon.Field{
+			{Key: "gate", Value: toon.NewObject(gfields...)},
+			{Key: "help", Value: help},
+		}
 	}
 	if parsed.Summary != "" {
 		gfields = append(gfields, toon.Field{Key: "summary", Value: parsed.Summary})

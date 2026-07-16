@@ -172,7 +172,7 @@ Run the pipeline and decide on its findings as they come up:
    return; on a ` + "`gate:`" + `, respond; loop until an ` + "`outcome:`" + `. Never idle-wait
    for the run to move forward by itself.
    When that status output includes ` + "`awaiting_agent: parked <duration>`" + ` under the run,
-   the run is parked at an approval, fix-review, or triage gate and waiting
+   the run is parked at an approval, fix-review, transient agent retry, or triage gate and waiting
    for you to send ` + "`axi respond`" + `. The field is observability only: it does not change
    gate resolution, auto-resume the run, or make ` + "`--yes`" + ` the default.
    While a step is actively ` + "`running`" + ` or ` + "`fixing`" + `, ` + "`axi status`" + ` may include
@@ -183,6 +183,9 @@ Run the pipeline and decide on its findings as they come up:
    longer than ` + "`step_quiet_warning`" + `. Treat that as a liveness clue, not as
    permission to cancel, rerun, or edit the worktree yourself.
 2. If the output contains a ` + "`gate:`" + ` object, the pipeline is waiting on you.
+   If the gate status is ` + "`awaiting_agent_retry`" + `, it has no findings to
+   fix; use ` + "`no-mistakes axi respond --action retry`" + ` to retry that same
+   agent step, or escalate if repeated provider failures need human scheduling.
    Read its ` + "`findings`" + ` table. Each finding has an ` + "`id`" + `, ` + "`severity`" + `,
    ` + "`source`" + `, ` + "`file`" + `, ` + "`description`" + `, and an ` + "`action`" + ` that tells you how the
    pipeline classified it:
@@ -204,6 +207,13 @@ Run the pipeline and decide on its findings as they come up:
    only after master rules a residual merge-blocking; that reason is persisted
    on the triggering round. ` + "`--yes`" + ` stops at ` + "`awaiting_triage`" + ` and never
    supplies the override implicitly.
+   If a step reaches ` + "`awaiting_agent_retry`" + `, the agent invocation exhausted
+   bounded retries for a transient provider/runtime failure. Respond with
+   ` + "`no-mistakes axi respond --action retry`" + ` to retry that same step; this is
+   not a finding fix and does not count as a review fix round. Under ` + "`--yes`" + `,
+   no-mistakes auto-retries this parked transient at most once per step, with
+   that auto retry persisted on the run; a second consecutive transient remains
+   parked for an explicit retry decision.
    If a review panel is configured, findings may come from multiple reviewers;
    use the ` + "`source`" + ` column to attribute each one, but respond by finding ID
    the same way.
@@ -215,6 +225,9 @@ Run the pipeline and decide on its findings as they come up:
 
    # have the pipeline fix specific findings, then continue
    no-mistakes axi respond --action fix --findings <id1,id2> --instructions "<optional guidance>"
+
+   # retry a parked transient agent/provider failure without creating a fix round
+   no-mistakes axi respond --action retry
 
    # allow one more review fix round after awaiting_triage, only with master triage
    no-mistakes axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <id1,id2>
@@ -338,7 +351,7 @@ no-mistakes axi abort --run <id>   # cancel a specific run by id (works outside 
 ## Reading the output
 
 - Output is TOON: ` + "`key: value`" + ` pairs, ` + "`name[N]{cols}:`" + ` tables, and ` + "`help[N]:`" + ` hints.
-- A non-terminal run object may include ` + "`awaiting_agent: parked <duration>`" + ` immediately after ` + "`status`" + `; that means the run is parked at an ` + "`awaiting_approval`" + `, ` + "`fix_review`" + `, or ` + "`awaiting_triage`" + ` gate awaiting your ` + "`axi respond`" + `.
+- A non-terminal run object may include ` + "`awaiting_agent: parked <duration>`" + ` immediately after ` + "`status`" + `; that means the run is parked at an ` + "`awaiting_approval`" + `, ` + "`awaiting_agent_retry`" + `, ` + "`fix_review`" + `, or ` + "`awaiting_triage`" + ` gate awaiting your ` + "`axi respond`" + `.
 - A run object with a ` + "`running`" + ` or ` + "`fixing`" + ` step may include an ` + "`active_steps`" + ` table. Use it to see the active duration, latest activity, native agent PID, and current execution or fix round.
 - The ` + "`help`" + ` list at the bottom of most responses tells you the next commands to run.
 - Errors are printed as ` + "`error: ...`" + ` on stdout with a ` + "`help`" + ` list; act on the suggestion.

@@ -255,13 +255,14 @@ Each step progresses through these statuses:
 | `running` | Currently executing |
 | `fixing` | Agent is auto-fixing issues |
 | `awaiting_approval` | Paused, waiting for user action |
+| `awaiting_agent_retry` | Paused after an agent invocation exhausted bounded retries for a transient provider/runtime failure; resume with `axi respond --action retry` to retry the step |
 | `fix_review` | Paused after a fix cycle, showing results for review |
 | `awaiting_triage` | Review fix-round cap reached; residual findings require master triage |
 | `completed` | Finished successfully |
 | `skipped` | Pre-skipped for the run, skipped by the user, or skipped automatically by the pipeline |
 | `failed` | Step failed; the step log includes the returned error message so command stderr and provider errors are visible in the per-step log, not only in the daemon log |
 
-When a non-terminal run has a step in `awaiting_approval`, `fix_review`, or `awaiting_triage`, AXI run objects also expose `awaiting_agent: parked <duration>` as a run-level observability signal.
+When a non-terminal run has a step in `awaiting_approval`, `awaiting_agent_retry`, `fix_review`, or `awaiting_triage`, AXI run objects also expose `awaiting_agent: parked <duration>` as a run-level observability signal.
 The signal clears as soon as the approval wait ends, including `axi respond` and cancellation, and does not change how gates resolve.
 When a step is `running` or `fixing`, AXI run objects expose an `active_steps` table with active duration, latest activity, native subprocess PID when present, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
 If the latest activity is older than `step_quiet_warning`, AXI prefixes it with `quiet` to make possible wedges visible without changing the run state.

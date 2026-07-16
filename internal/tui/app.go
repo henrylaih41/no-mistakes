@@ -53,6 +53,7 @@ type Model struct {
 	yoloMode         bool                    // auto-resolve every step awaiting human action
 	yoloApproved     map[types.StepName]bool // steps already finalized (approved) this run
 	yoloFixed        map[types.StepName]bool // steps yolo has already requested a fix for
+	yoloRetried      map[types.StepName]bool // steps yolo has already auto-resumed from an agent-retry park
 }
 
 // NewModel creates a TUI model for the given run.
@@ -79,12 +80,13 @@ func NewModel(socketPath string, client *ipc.Client, run *ipc.RunInfo) Model {
 		syntheticSteps:      syntheticSteps,
 		yoloApproved:        make(map[types.StepName]bool),
 		yoloFixed:           make(map[types.StepName]bool),
+		yoloRetried:         make(map[types.StepName]bool),
 	}
 	// Populate findings and start times from initial step data (for re-attach scenarios).
 	for _, s := range steps {
 		if s.FindingsJSON != nil && *s.FindingsJSON != "" {
 			m.stepFindings[s.StepName] = *s.FindingsJSON
-			if s.Status == types.StepStatusAwaitingApproval || s.Status == types.StepStatusFixReview || s.Status == types.StepStatusAwaitingTriage {
+			if s.Status == types.StepStatusAwaitingApproval || s.Status == types.StepStatusAwaitingRetry || s.Status == types.StepStatusFixReview || s.Status == types.StepStatusAwaitingTriage {
 				m.resetFindingSelection(s.StepName)
 			}
 		}
@@ -275,7 +277,7 @@ func (m Model) terminalTitle() string {
 				return "✓ Checks passed" + suffix
 			}
 			return icon + " " + stepLabel(s.StepName) + suffix
-		case types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusAwaitingTriage:
+		case types.StepStatusAwaitingApproval, types.StepStatusAwaitingRetry, types.StepStatusFixReview, types.StepStatusAwaitingTriage:
 			return icon + " " + stepLabel(s.StepName) + suffix
 		}
 	}

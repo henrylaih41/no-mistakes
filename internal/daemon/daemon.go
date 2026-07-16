@@ -561,7 +561,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		if err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.Instructions, p.AddedFindings, p.FixOverrideReason); err != nil {
+		if err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.Instructions, p.AddedFindings, p.FixOverrideReason, p.AutoRetry); err != nil {
 			return nil, err
 		}
 		return &ipc.RespondResult{OK: true}, nil
@@ -659,6 +659,9 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 		info.RoundCount = rounds.TotalRounds
 		info.FixRoundCount = rounds.FixRounds
 		info.PendingFixSource = rounds.PendingFixSource
+	}
+	if retries, err := d.CountStepAgentAutoRetries(s.ID); err == nil {
+		info.AgentAutoRetries = retries
 	}
 	return info
 }

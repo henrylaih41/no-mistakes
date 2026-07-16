@@ -345,6 +345,29 @@ func TestProcessReviewerResults_FailOpenAllFail(t *testing.T) {
 	}
 }
 
+func TestProcessReviewerResults_FailOpenAllFailPreservesTransient(t *testing.T) {
+	transient := &agent.TransientError{Agent: "claude", Label: "empty-stderr exit-1", Err: errors.New("claude exited: exit status 1:")}
+	_, err := processReviewerResults(
+		[]agent.FanOutResult{
+			fanResult("codex", nil, errors.New("boom1")),
+			fanResult("claude", nil, transient),
+		},
+		true, // fail-open, but nobody succeeds; one failure is transient
+		func(string) {},
+		func(string) {},
+	)
+	if err == nil {
+		t.Fatal("expected an error when every reviewer fails even under fail-open")
+	}
+	var got *agent.TransientError
+	if !errors.As(err, &got) {
+		t.Fatalf("expected the transient error to be preserved so the executor can park, got %v", err)
+	}
+	if got.Agent != "claude" || got.Label != "empty-stderr exit-1" {
+		t.Errorf("preserved transient not attributed to the failing reviewer: %+v", got)
+	}
+}
+
 func TestRiskRankAndSeverityRank(t *testing.T) {
 	if !(types.RiskRank("low") < types.RiskRank("medium") && types.RiskRank("medium") < types.RiskRank("high")) {
 		t.Error("expected low < medium < high risk ranks")

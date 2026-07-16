@@ -201,6 +201,7 @@ Agents can also call `no-mistakes axi` directly:
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi status
 no-mistakes axi respond --action approve
+no-mistakes axi respond --action retry
 no-mistakes axi logs --step review --full
 no-mistakes axi abort
 no-mistakes axi abort --run <id>
@@ -215,6 +216,11 @@ Each `axi` response carries version-matched `help` lines for its state, and `no-
 The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 
 If review reaches `review.max_fix_rounds`, it parks as `awaiting_triage`; `--yes` stops there. Report the residual findings for master triage. Only after master rules a residual merge-blocking may an agent send `axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <ids>`; the reason is persisted on the triggering round.
+
+If the gate status is `awaiting_agent_retry`, the agent invocation exhausted bounded retries for a transient provider/runtime failure.
+There are no findings to fix: respond with `no-mistakes axi respond --action retry` to retry that same step.
+This retry does not create a review fix round and does not count against `review.max_fix_rounds`.
+Under `--yes`, no-mistakes auto-retries this parked transient at most once per step, with that auto retry persisted on the run; a second consecutive transient remains parked for an explicit retry decision.
 
 ## Binary resolution
 

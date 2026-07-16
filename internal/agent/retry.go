@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"regexp"
 	"strings"
@@ -12,6 +13,32 @@ import (
 // retryClassifier inspects an error and reports whether it should be retried,
 // returning a short human-readable label for telemetry.
 type retryClassifier func(error) (label string, retry bool)
+
+// TransientError reports that an agent invocation exhausted bounded retries for
+// a provider/runtime failure that should park the pipeline for an explicit
+// retry instead of terminal-failing the run.
+type TransientError struct {
+	Agent string
+	Label string
+	Err   error
+}
+
+func (e *TransientError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Err == nil {
+		return fmt.Sprintf("%s transient error: %s", e.Agent, e.Label)
+	}
+	return fmt.Sprintf("%s transient error %q after retries: %v", e.Agent, e.Label, e.Err)
+}
+
+func (e *TransientError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // transientBackoff is the package-level sleep function used between retries.
 // It is overridden in tests to keep them fast while preserving cancellation
@@ -88,7 +115,14 @@ func runWithRetry(
 		lastErr = err
 		lastLabel = label
 	}
-	return nil, lastErr
+	if !parkableTransientLabel(lastLabel) {
+		return nil, lastErr
+	}
+	return nil, &TransientError{Agent: name, Label: lastLabel, Err: lastErr}
+}
+
+func parkableTransientLabel(label string) bool {
+	return label != "" && label != "missing structured output"
 }
 
 func emitAgentAttempt(opts RunOpts, name string, result *Result, err error, startedAt, completedAt time.Time) {
@@ -120,7 +154,18 @@ func claudeRetryClassifier(err error) (string, bool) {
 	if errors.Is(err, errNoStructuredOutput) {
 		return "missing structured output", true
 	}
+	if isClaudeEmptyStderrExitOne(err) {
+		return "empty-stderr exit-1", true
+	}
 	return classifyTransient(err)
+}
+
+func isClaudeEmptyStderrExitOne(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.TrimSpace(err.Error())
+	return msg == "claude exited: exit status 1:"
 }
 
 var transientStatusRE = regexp.MustCompile(`\b(429|503|529)\b`)

@@ -71,7 +71,7 @@ Step status icons:
 |---|---|
 | `○` | Pending |
 | (spinner) | Running / Fixing |
-| `⏸` | Awaiting approval / Fix review / Awaiting triage |
+| `⏸` | Awaiting approval / Awaiting agent retry / Fix review / Awaiting triage |
 | `✓` | Completed |
 | `–` | Skipped |
 | `✗` | Failed |
@@ -157,6 +157,7 @@ When yolo mode is on, the footer changes from `y yolo` to `y end yolo`.
 |---|---|
 | `a` | Approve - continue to next step |
 | `f` | Fix - send selected findings to agent for fixing |
+| `u` | Retry - re-run a step parked at `awaiting_agent_retry` after a transient agent/provider failure |
 | `s` | Skip - skip this step and continue |
 | `x` | Abort - press twice to confirm (first press shows warning) |
 | `o` | Open PR URL in browser (when available) |
@@ -199,12 +200,15 @@ Review awaiting action:
 
 The `f fix (3/5)` label shows how many findings are selected out of the total.
 
+When a step is parked at `awaiting_agent_retry` after a transient agent/provider failure, the action bar reduces to `u retry  x abort`: there are no findings to fix, so press `u` to re-run that agent step.
+
 Press `e` to add or edit extra guidance for the current finding. Press `+` to add your own finding to the list. User-authored findings start selected by default and can be removed with `D`.
 Reviewer-sourced findings can be selected and annotated like any other pipeline finding, but they are not user-authored and cannot be deleted with `D`.
 
 Press `y` to toggle yolo mode when you want paused approval gates to resolve automatically.
 Yolo fixes gates with `auto-fix` and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
 It approves gates with no findings or only `action: no-op` findings as-is, and fixes each step at most once so unresolved findings do not loop forever.
+Yolo auto-resumes a step parked at `awaiting_agent_retry` at most once per step; a second consecutive transient park waits for you to press `u`.
 Yolo does not resolve a review step parked at `awaiting_triage`: when `review.max_fix_rounds` is reached the gate waits for a triage decision instead of auto-resolving.
 
 ## Outcome banner

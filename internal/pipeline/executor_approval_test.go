@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,6 +122,130 @@ func TestExecutor_AwaitingAgentMarkerSetOnGateClearedOnRespond(t *testing.T) {
 	}
 	if resumed.AwaitingAgentSince != nil {
 		t.Errorf("AwaitingAgentSince = %d after respond, want nil", *resumed.AwaitingAgentSince)
+	}
+}
+
+func TestExecutor_AgentTransientParksAndRetryResumesSameStep(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	calls := 0
+	step := &adaptiveCallStep{
+		name: types.StepTest,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			calls++
+			if calls == 1 {
+				return nil, &agent.TransientError{
+					Agent: "claude",
+					Label: "empty-stderr exit-1",
+					Err:   errors.New("claude exited: exit status 1:"),
+				}
+			}
+			return &StepOutcome{ExitCode: 0}, nil
+		},
+	}
+	lint := newPassStep(types.StepLint)
+	exec := NewExecutor(database, p, nil, nil, []Step{step, lint}, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, workDir)
+	}()
+
+	waitForStepStatus(t, database, run.ID, types.StepTest, types.StepStatusAwaitingRetry)
+	parkedRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get parked run: %v", err)
+	}
+	if parkedRun.Status != types.RunRunning {
+		t.Fatalf("run status = %s, want %s", parkedRun.Status, types.RunRunning)
+	}
+	if parkedRun.AwaitingAgentSince == nil {
+		t.Fatal("AwaitingAgentSince = nil while agent retry is parked")
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	if steps[0].Error == nil || !strings.Contains(*steps[0].Error, "agent provider/transient failure: claude empty-stderr exit-1") {
+		t.Fatalf("parked step error = %v, want transient reason", steps[0].Error)
+	}
+	if steps[1].Status != types.StepStatusPending {
+		t.Fatalf("later step status = %s, want pending before retry", steps[1].Status)
+	}
+
+	if err := exec.Respond(types.StepTest, types.ActionRetry, nil); err != nil {
+		t.Fatalf("retry response: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("executor error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+	if calls != 2 {
+		t.Fatalf("step calls = %d, want 2", calls)
+	}
+	if lint.callCount() != 1 {
+		t.Fatalf("later step calls = %d, want 1", lint.callCount())
+	}
+}
+
+func TestExecutor_AgentRetryDoesNotCollideWithReviewFixRoundCap(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	calls := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			calls++
+			if calls == 1 {
+				if _, err := sctx.DB.InsertStepRound(sctx.StepResultID, 1, "auto_fix", nil, nil, 1); err != nil {
+					t.Fatalf("seed consumed review fix round: %v", err)
+				}
+				return nil, &agent.TransientError{
+					Agent: "claude",
+					Label: "empty-stderr exit-1",
+					Err:   errors.New("claude exited: exit status 1:"),
+				}
+			}
+			return &StepOutcome{ExitCode: 0}, nil
+		},
+	}
+	cfg := &config.Config{Review: config.Review{MaxFixRounds: 1}}
+	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, workDir)
+	}()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingRetry)
+	if err := exec.Respond(types.StepReview, types.ActionRetry, nil); err != nil {
+		t.Fatalf("retry response should not require fix override at cap: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("executor error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	count, err := database.CountStepFixRounds(steps[0].ID)
+	if err != nil {
+		t.Fatalf("count fix rounds: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("fix round count = %d, want original seeded count 1", count)
 	}
 }
 
