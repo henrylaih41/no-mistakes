@@ -680,6 +680,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				default:
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
 				}
+				// Persist the first review-ready moment for this head so a
+				// read-only external observer can detect it without parsing
+				// monitor logs (UpdateRunHeadSHA clears it on head advance).
+				stampReviewReadyIfPassed(sctx, lastMonitorLog)
 			}
 		}
 
@@ -716,4 +720,19 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) st
 		sctx.Log(message)
 	}
 	return message
+}
+
+// stampReviewReadyIfPassed records the run's first review-ready moment for the
+// current head when the CI monitor's latest state is "checks passed" — green CI
+// or the canonical zero-CI state. It reuses cimonitor's readiness decision (the
+// same one the agent client uses) rather than re-deriving it, and is safe to
+// call every poll because MarkRunReviewReady only stamps while the marker is
+// NULL. UpdateRunHeadSHA clears the marker on a head advance, so it rearms.
+func stampReviewReadyIfPassed(sctx *pipeline.StepContext, lastMonitorLog string) {
+	if !cimonitor.ChecksPassed([]string{lastMonitorLog}) {
+		return
+	}
+	if err := sctx.DB.MarkRunReviewReady(sctx.Run.ID); err != nil {
+		sctx.Log(fmt.Sprintf("failed to record review-ready marker: %v", err))
+	}
 }

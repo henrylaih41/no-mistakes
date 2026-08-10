@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS runs (
     design_context_json  TEXT,
     review_loop_disabled INTEGER NOT NULL DEFAULT 0,
     route                TEXT,
+    review_ready_since   INTEGER,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -154,6 +155,7 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN design_context_json TEXT`,
 	`ALTER TABLE runs ADD COLUMN route TEXT`,
 	`ALTER TABLE runs ADD COLUMN review_loop_disabled INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE runs ADD COLUMN review_ready_since INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN last_activity_at INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,

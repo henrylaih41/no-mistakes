@@ -41,11 +41,19 @@ type Run struct {
 	// the original push selected instead of silently retargeting the default.
 	Route              *string
 	ReviewLoopDisabled bool
-	CreatedAt          int64
-	UpdatedAt          int64
+	// ReviewReadySince is the unix-seconds timestamp at which the CI monitor
+	// first observed this run's head reach "checks passed, ready to merge" —
+	// green CI or the canonical zero-CI state. It is nil until that point, is
+	// stamped once (never overwritten), and is cleared back to nil whenever the
+	// head advances (UpdateRunHeadSHA) so it rearms for the new head. It exists
+	// so a read-only external observer can detect review-ready without parsing
+	// monitor logs; it is observability only and never affects gate resolution.
+	ReviewReadySince *int64
+	CreatedAt        int64
+	UpdatedAt        int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), design_context_json, intent, intent_source, intent_session_id, intent_score, route, review_loop_disabled, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), design_context_json, intent, intent_source, intent_session_id, intent_score, route, review_loop_disabled, review_ready_since, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -55,7 +63,7 @@ func scanRun(row interface {
 		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.DesignContextJSON,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
-		&r.Route, &r.ReviewLoopDisabled, &r.CreatedAt, &r.UpdatedAt,
+		&r.Route, &r.ReviewLoopDisabled, &r.ReviewReadySince, &r.CreatedAt, &r.UpdatedAt,
 	)
 }
 
@@ -213,11 +221,27 @@ func (d *DB) UpdateRunPRURL(id, prURL string) error {
 	return nil
 }
 
-// UpdateRunHeadSHA updates the run head SHA and timestamp.
+// UpdateRunHeadSHA updates the run head SHA and timestamp. Advancing the head
+// clears review_ready_since so the readiness marker rearms for the new head:
+// any prior "checks passed" verdict belonged to the old head and CI must re-run.
 func (d *DB) UpdateRunHeadSHA(id, headSHA string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, now(), id)
+	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, review_ready_since = NULL, updated_at = ? WHERE id = ?`, headSHA, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run head sha: %w", err)
+	}
+	return nil
+}
+
+// MarkRunReviewReady stamps review_ready_since with the current time the FIRST
+// time it is called for a run+head (the `IS NULL` guard makes it idempotent, so
+// the CI monitor can call it every poll without overwriting the original ready
+// moment). UpdateRunHeadSHA clears the marker, so a later call after a head
+// advance re-stamps for the new head.
+func (d *DB) MarkRunReviewReady(id string) error {
+	ts := now()
+	_, err := d.sql.Exec(`UPDATE runs SET review_ready_since = ?, updated_at = ? WHERE id = ? AND review_ready_since IS NULL`, ts, ts, id)
+	if err != nil {
+		return fmt.Errorf("mark run review ready: %w", err)
 	}
 	return nil
 }
