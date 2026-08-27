@@ -119,8 +119,8 @@ If a parked gate's findings JSON cannot be parsed, AXI renders `findings_unreada
 When a step parks at `awaiting_agent_retry` after an exhausted transient agent/provider failure, `--yes` auto-retries that step at most once, records the retry on the run, and leaves a second consecutive transient parked for an explicit `--action retry`.
 Without `--yes`, `ask-master` routes to the documented gate owner for implementation judgment; if none exists it falls back to the user. `ask-user` routes only the concise unresolved choice, options, consequences, and recommendation to the user.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking findings plus `ask-master` and `ask-user` review findings park for a decision unless configuration explicitly opts back into review auto-fix.
-When `review.max_fix_rounds` is reached, review gates render `status: awaiting_triage`.
-Residual findings stay visible; a plain `axi respond --action fix` is refused, and another fix round requires explicit master triage with `--fix-override --override-reason`.
+Review gates render `status: awaiting_triage` after a second invalid [review verdict evidence](/no-mistakes/reference/pipeline-steps/#review) result, when `review.max_fix_rounds` is reached, or when both causes apply.
+The diagnostic `review-verdict-evidence` finding cannot be selected for a source-fix round. At evidence-only triage, preserved real reviewer findings remain selectable through a normal `axi respond --action fix`; when the fix-round cap applies, a plain fix is refused and another fix round requires explicit master triage with `--fix-override --override-reason`.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step is still monitoring an open PR and checks are green, `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge.
@@ -151,7 +151,7 @@ no-mistakes axi respond --action skip
 | `--findings`     | `string` | (none)        | Comma-separated finding IDs for `--action fix`                       |
 | `--instructions` | `string` | (none)        | Guidance applied to selected findings                                |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
-| `--fix-override` | `bool`   | `false`       | Permit one review fix round after `awaiting_triage`                   |
+| `--fix-override` | `bool`   | `false`       | Permit one review fix round when `max_fix_rounds` caused `awaiting_triage` |
 | `--override-reason` | `string` | (none)     | Required master triage reason for `--fix-override`; persisted         |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve readable subsequent gates until a decision point or outcome |
 

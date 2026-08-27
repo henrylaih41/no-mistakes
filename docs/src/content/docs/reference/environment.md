@@ -192,8 +192,8 @@ The `axi logs` command event records the sanitized step, whether `--full` was pr
 Everything sent remotely is low-cardinality: command names, statuses, durations, counts, flag booleans, agent and step names, and - on the single terminal `run finished` event - the bounded performance rollup `agent_invocations`, `resumed_invocations`, and `fallback_invocations` (small counts only).
 Run IDs, repository paths, branch names, session identities, prompts, model outputs, diffs, and per-invocation performance records are never sent.
 
-Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per recorded pipeline-agent invocation, plus each run's accumulated parked-at-gate time.
-Configured review-panel member invocations are included as separate `purpose=review` records, including duration, workload, reported token usage, model round-trips, and tool activity when their adapters surface those fields.
+Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per recorded agent invocation, plus each run's accumulated parked-at-gate time.
+Configured review-panel member invocations, including a verdict-evidence cold retry, are separate `purpose=review` records and contribute to derived local statistics and the bounded terminal run counts. Their rows include duration, workload, reported token usage, model round-trips, and tool activity when the adapter surfaces those fields.
 Each row records run and step identity, purpose (such as review/review-fix/housekeeping), the reported model and its provider, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
 

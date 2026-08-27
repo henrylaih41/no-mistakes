@@ -989,8 +989,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Freeze execution timer before entering approval wait.
 		executionMS += time.Since(phaseStart).Milliseconds()
 
-		// Determine approval status: awaiting_triage after review.max_fix_rounds
-		// is consumed, fix_review after a fix cycle, awaiting_approval otherwise.
+		// Determine approval status: awaiting_triage after review evidence fails
+		// closed or max_fix_rounds is consumed, fix_review after a fix cycle,
+		// awaiting_approval otherwise.
 		approvalStatus := types.StepStatusAwaitingApproval
 		var diffText string
 		if sctx.Fixing {

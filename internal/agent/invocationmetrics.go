@@ -9,8 +9,8 @@ import (
 // This file is the single authoritative definition of the local per-invocation
 // performance metrics and their boundaries. Every count, category, and timing
 // split recorded to agent_invocations is defined here so the semantics live in
-// exactly one place; the codex adapter fills them from its event stream, the
-// pipeline records them, and `no-mistakes stats` renders them, all against
+// exactly one place; instrumented adapters fill them from their event streams,
+// the pipeline records them, and `no-mistakes stats` renders them, all against
 // these definitions. Nothing here reads or stores prompts, outputs, diffs, or
 // raw command arguments - only bounded counts, categories, and durations.
 
@@ -77,21 +77,20 @@ func (c ToolCategoryCounts) Total() int {
 // reported nothing (recorded as NULL, never a fabricated zero). Fields with
 // independent reporting flags remain unknown unless their flag is set.
 type InvocationMetrics struct {
-	// ModelRoundtrips counts the model-authored items in the turn (assistant
-	// messages plus tool calls). It is a live-stream proxy for productive model
-	// round-trips: because codex batches an exec into a single turn and does not
-	// surface internal poll round-trips as items, every counted item is
-	// productive work, not "are-we-there-yet" polling.
+	// ModelRoundtrips is an adapter-specific live-stream proxy for productive
+	// model work. Claude and Grok count distinct assistant messages; Codex counts
+	// completed agent-message and tool-call items because its exec stream does
+	// not expose internal model requests. It excludes wait/poll activity.
 	ModelRoundtrips int
 	// ToolCalls counts whole tool invocations (one command_execution item is one
 	// tool call regardless of how many sub-commands it chains).
 	ToolCalls int
 	// ToolCategories is the per-sub-command histogram (see ToolCategoryCounts).
 	ToolCategories ToolCategoryCounts
-	// SubprocessWaitMS is the wall-clock spent inside tool subprocesses,
-	// measured by the reader as the sum of each tool item's started->completed
-	// interval. Combined with the invocation duration it separates subprocess
-	// wait from model/reasoning time (see ModelTimeMS).
+	// SubprocessWaitMS is the wall-clock spent inside tool subprocesses when
+	// SubprocessWaitReported is true, measured by the reader as the sum of each
+	// tool item's started->completed interval. Combined with invocation duration
+	// it separates subprocess wait from model/reasoning time (see ModelTimeMS).
 	SubprocessWaitMS       int64
 	SubprocessWaitReported bool
 }

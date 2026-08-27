@@ -209,9 +209,10 @@ type Result struct {
 	// fallback wrappers persist a session against the provider that minted it.
 	Provider string
 	// Metrics is the bounded per-invocation activity evidence the adapter
-	// extracted from its event stream (round-trips, tool calls + categories,
-	// subprocess wait time). Nil means the adapter reported nothing, which is
-	// recorded as unknown (NULL) rather than a fabricated zero.
+	// extracted from its event stream (round-trips and tool calls + categories;
+	// subprocess wait time when separately reported). Nil means the adapter
+	// reported nothing, which is recorded as unknown (NULL) rather than a
+	// fabricated zero.
 	Metrics *InvocationMetrics
 	// CacheCreationReported reports whether Usage.CacheCreationTokens is a
 	// meaningful value. Adapters whose provider does not surface cache-creation

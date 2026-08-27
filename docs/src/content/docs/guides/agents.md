@@ -46,7 +46,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
-| Grok Build | `grok` | Subprocess per invocation, plain or schema-constrained output |
+| Grok Build | `grok` | Subprocess per invocation, streaming review events or one-shot output |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
 ## Runner requirements
@@ -162,7 +162,8 @@ Merged review findings keep a `source` showing which reviewer reported them, and
 In a reviewer spec, `agent: auto` expands to the already resolved pipeline `agent`; name a reviewer family explicitly when you want a different model family.
 `review.max_parallel` limits concurrent reviewers; `0` means all reviewers run at once.
 `review.fail_open` defaults to `false`, so any reviewer error fails the review step instead of silently reducing coverage.
-Successful reviewer responses must also satisfy the [review verdict evidence contract](/no-mistakes/reference/pipeline-steps/#2-review); an invalid verdict gets one cold retry and cannot be dropped through `review.fail_open`.
+Successful reviewer responses must also satisfy the [review verdict evidence contract](/no-mistakes/reference/pipeline-steps/#review); an invalid verdict gets one cold retry and cannot be dropped through `review.fail_open`.
+Claude, Codex, and Grok review mode currently surface the required activity evidence. Review verdicts from the other adapter families fail closed at this contract, although those adapters remain available for other agent-backed duties.
 
 Repo-level `review` is code-executing config because it selects extra agent processes.
 Like repo `commands` and `agent`, it is read from the trusted default-branch `.no-mistakes.yaml` unless `allow_repo_commands: true` is already set there.
