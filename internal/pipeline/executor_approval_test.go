@@ -2,7 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +14,219 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestExecutor_CancelledApprovalGateFailsAtomically(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := newApprovalStep(types.StepReview, `{"findings":[{"severity":"warning","description":"needs a human","action":"ask-user"}],"summary":"1 issue"}`)
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(ctx, run, repo, t.TempDir()) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("executor error = %v, want context cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor did not leave cancelled approval gate")
+	}
+
+	failedRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedRun.Status != types.RunFailed || failedRun.AwaitingAgentSince != nil {
+		t.Fatalf("run = status %s awaiting %v, want failed and unparked", failedRun.Status, failedRun.AwaitingAgentSince)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
+		t.Fatalf("steps = %+v, want one failed step", steps)
+	}
+}
+
+func TestExecutor_GatePublishFailureDoesNotWaitInvisible(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{NeedsApproval: true, Findings: `{"issues":["bug"]}`}, nil
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+
+	raw, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := fmt.Sprintf(`
+		CREATE TRIGGER abort_executor_gate_status
+		BEFORE UPDATE OF status ON step_results
+		WHEN NEW.run_id = '%s' AND NEW.status = '%s'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced executor gate failure');
+		END`, run.ID, types.StepStatusAwaitingApproval)
+	if _, err := raw.Exec(trigger); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(ctx, run, repo, t.TempDir()) }()
+	select {
+	case err := <-done:
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "forced executor gate failure") {
+			t.Fatalf("Execute error = %v, want forced executor gate failure", err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("executor did not stop after gate publication failure cleanup")
+		}
+		t.Fatal("executor waited for approval after gate publication failed")
+	}
+
+	storedRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.AwaitingAgentSince != nil || storedRun.Status != types.RunFailed {
+		t.Fatalf("run = status %s awaiting %v, want failed and unparked", storedRun.Status, storedRun.AwaitingAgentSince)
+	}
+	storedSteps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(storedSteps) != 1 || storedSteps[0].Status != types.StepStatusFailed || storedSteps[0].Error == nil || !strings.Contains(*storedSteps[0].Error, "forced executor gate failure") {
+		t.Fatalf("steps = %+v, want one failed step carrying publication error", storedSteps)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+		t.Fatal("Respond succeeded after gate publication failed")
+	}
+}
+
+func TestExecutor_TransientGatePublishFailureFailsStep(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return nil, &agent.TransientError{Agent: "test", Label: "unavailable", Err: errors.New("provider unavailable")}
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+
+	raw, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := fmt.Sprintf(`
+		CREATE TRIGGER abort_executor_retry_gate_status
+		BEFORE UPDATE OF status ON step_results
+		WHEN NEW.run_id = '%s' AND NEW.status = '%s'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced executor retry gate failure');
+		END`, run.ID, types.StepStatusAwaitingRetry)
+	if _, err := raw.Exec(trigger); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = exec.Execute(context.Background(), run, repo, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "forced executor retry gate failure") {
+		t.Fatalf("Execute error = %v, want forced executor retry gate failure", err)
+	}
+	storedRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.AwaitingAgentSince != nil || storedRun.Status != types.RunFailed {
+		t.Fatalf("run = status %s awaiting %v, want failed and unparked", storedRun.Status, storedRun.AwaitingAgentSince)
+	}
+	storedSteps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(storedSteps) != 1 || storedSteps[0].Status != types.StepStatusFailed || storedSteps[0].Error == nil || !strings.Contains(*storedSteps[0].Error, "forced executor retry gate failure") {
+		t.Fatalf("steps = %+v, want one failed step carrying publication error", storedSteps)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionRetry, nil); err == nil {
+		t.Fatal("Respond succeeded after retry gate publication failed")
+	}
+}
+
+func TestExecutor_GateExitFailureDoesNotLeaveParkedFailedRun(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := newApprovalStep(types.StepReview, `{"issues":["bug"]}`)
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, t.TempDir()) }()
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+
+	raw, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := fmt.Sprintf(`
+		CREATE TRIGGER abort_executor_gate_exit
+		BEFORE UPDATE OF awaiting_agent_since ON runs
+		WHEN OLD.id = '%s'
+		 AND NEW.awaiting_agent_since IS NULL
+		 AND NEW.status = OLD.status
+		BEGIN
+			SELECT RAISE(ABORT, 'forced gate exit failure');
+		END`, run.ID)
+	if _, err := raw.Exec(trigger); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "forced gate exit failure") {
+			t.Fatalf("Execute error = %v, want forced gate exit failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor did not fail after gate exit publication failed")
+	}
+
+	storedRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.Status != types.RunFailed || storedRun.AwaitingAgentSince != nil || storedRun.ParkedMS <= 0 {
+		t.Fatalf("run = status %s awaiting %v parked %d, want failed, unparked, and positive parked time", storedRun.Status, storedRun.AwaitingAgentSince, storedRun.ParkedMS)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed || steps[0].Error == nil || !strings.Contains(*steps[0].Error, "forced gate exit failure") {
+		t.Fatalf("steps = %+v, want one failed step carrying exit error", steps)
+	}
+}
 
 func TestExecutor_ApprovalFix(t *testing.T) {
 	database, p, run, repo := setupTest(t)
