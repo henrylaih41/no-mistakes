@@ -327,8 +327,9 @@ The Copilot CLI has no output-schema flag, so when structured output is requeste
 
 ## Grok Build
 
-Spawns a `grok` subprocess for each invocation with `--permission-mode bypassPermissions -p <prompt> --output-format streaming-messages-json` and the run worktree as its cwd.
-When structured output is requested, no-mistakes also adds Grok's native `--json-schema` flag and validates `structured_output` from the terminal result event. The streaming parser records reported token usage plus bounded model-round and tool-activity counts, so review verdicts can be checked for minimum execution evidence.
+Spawns a `grok` subprocess for each invocation with `--permission-mode bypassPermissions -p <prompt>` and the run worktree as its cwd.
+Review invocations add `--output-format streaming-messages-json` and, when structured output is requested, Grok's native `--json-schema` flag. The streaming parser validates `structured_output` from the terminal result event and records reported token usage plus bounded model-round and tool-activity counts, so review verdicts can be checked for minimum execution evidence.
+Every non-review purpose retains the legacy one-shot contract: unconstrained calls use `--output-format plain`, while structured calls use `--json-schema` and accept either Grok's response envelope or a bare structured object. These modes do not expose token usage to the adapter. Direct structured JSON output from older Grok versions remains supported.
 `agent_args_override.grok` and reviewer-local `args` can select options such as `-m` and `--reasoning-effort`.
 The managed prompt, output, schema, permission, and cwd flags are reserved so those overrides cannot redirect or weaken the pipeline invocation.
 

@@ -48,6 +48,29 @@ func TestParseGrokEventsSurfacesUsageAndReviewActivity(t *testing.T) {
 	}
 }
 
+func TestParseGrokEventsClassifiesCommandsAndPreservesUnknownInput(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status && go test ./internal/agent"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":["git","status"]}},{"type":"text","text":"kept"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	var chunks []string
+	result, _, err := parseGrokEvents(context.Background(), strings.NewReader(events), func(chunk string) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("parseGrokEvents() error = %v", err)
+	}
+	metrics := result.Metrics
+	if metrics == nil || metrics.ModelRoundtrips != 2 || metrics.ToolCalls != 2 || metrics.ToolCategories.Git != 1 || metrics.ToolCategories.TestLint != 1 || metrics.ToolCategories.Other != 1 {
+		t.Fatalf("activity metrics = %+v, want command categories plus one structured-name fallback", metrics)
+	}
+	if len(chunks) != 1 || chunks[0] != "kept" {
+		t.Fatalf("assistant frame was dropped: chunks=%v", chunks)
+	}
+}
+
 func TestParseGrokEventsStructuredOutputEnvelopeIsNotActivity(t *testing.T) {
 	events := strings.Join([]string{
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"reasoning"}]}}`,

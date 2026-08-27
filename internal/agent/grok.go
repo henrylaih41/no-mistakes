@@ -107,9 +107,10 @@ type grokMessage struct {
 }
 
 type grokContent struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
-	Name string `json:"name,omitempty"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 type grokUsage struct {
@@ -163,7 +164,13 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 			for _, content := range message.Content {
 				if content.Type == "tool_use" && !strings.EqualFold(content.Name, "StructuredOutput") {
 					result.Metrics.ToolCalls++
-					result.Metrics.ToolCategories.Add(classifyStructuredTool(content.Name))
+					categories := ClassifyToolCommand(structuredToolCommand(content.Input))
+					if len(categories) == 0 {
+						categories = []ToolCategory{classifyStructuredTool(content.Name)}
+					}
+					for _, category := range categories {
+						result.Metrics.ToolCategories.Add(category)
+					}
 				}
 				if content.Type == "text" && content.Text != "" && onChunk != nil {
 					onChunk(content.Text)

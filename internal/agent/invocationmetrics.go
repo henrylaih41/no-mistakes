@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"path"
 	"strings"
 )
@@ -154,6 +155,20 @@ func ClassifyToolCommand(command string) []ToolCategory {
 		categories = append(categories, classifySubcommand(sub))
 	}
 	return categories
+}
+
+func structuredToolCommand(input json.RawMessage) string {
+	var payload struct {
+		Command json.RawMessage `json:"command"`
+	}
+	if len(input) == 0 || json.Unmarshal(input, &payload) != nil || len(payload.Command) == 0 {
+		return ""
+	}
+	var command string
+	if json.Unmarshal(payload.Command, &command) != nil {
+		return ""
+	}
+	return command
 }
 
 func classifyStructuredTool(name string) ToolCategory {
