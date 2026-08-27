@@ -343,7 +343,7 @@ Risk assessment (after listing all findings):
 			return nil, err
 		}
 		if len(invalid) > 0 {
-			return reviewVerdictTriageOutcome(invalid, merged, fixSummary), nil
+			return reviewVerdictTriageOutcome(invalid, stripDeferredReviewFindings(sctx, merged), fixSummary), nil
 		}
 		findings = merged
 	}
@@ -352,10 +352,7 @@ Risk assessment (after listing all findings):
 	// owned delivery (push/PR/CI for this run) has not happened yet. Prompt
 	// guidance alone is not enough - models still emit these under
 	// authoritative intent criteria like "Open PR A unmerged".
-	if stripped, n := stripDeferredPipelineOwnedDeliveryFindings(findings); n > 0 {
-		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
-		findings = stripped
-	}
+	findings = stripDeferredReviewFindings(sctx, findings)
 
 	needsApproval := hasBlockingFindings(findings.Items)
 	findingsJSON, _ := json.Marshal(findings)
@@ -380,7 +377,23 @@ func parseReviewFindings(result *agent.Result, log func(string)) Findings {
 			findings = Findings{Summary: result.Text}
 		}
 	}
-	return findings
+	for i := range findings.Items {
+		if findings.Items[i].ID == types.FindingIDReviewVerdictEvidence {
+			findings.Items[i].ID = ""
+		}
+		if findings.Items[i].Source == types.FindingSourceReviewGate {
+			findings.Items[i].Source = ""
+		}
+	}
+	return types.NormalizeFindings(findings, "review")
+}
+
+func stripDeferredReviewFindings(sctx *pipeline.StepContext, findings Findings) Findings {
+	stripped, n := stripDeferredPipelineOwnedDeliveryFindings(findings)
+	if n > 0 {
+		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
+	}
+	return stripped
 }
 
 func sanitizedPreviousFindingsForPrompt(raw string) string {

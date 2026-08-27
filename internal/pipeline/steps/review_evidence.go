@@ -59,7 +59,7 @@ func validateReviewVerdictEvidenceAtFloor(result *agent.Result, elapsed, floor t
 func reviewVerdictLooksDeferred(result *agent.Result) bool {
 	text := result.Text
 	if parsed, err := types.ParseFindingsJSON(string(result.Output)); err == nil {
-		text += " " + parsed.Summary + " " + parsed.RiskRationale
+		text = parsed.Summary + " " + parsed.RiskRationale
 	}
 	text = strings.ToLower(strings.TrimSpace(text))
 	for _, marker := range []string{

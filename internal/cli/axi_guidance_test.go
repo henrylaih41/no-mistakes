@@ -32,6 +32,14 @@ var canonicalPreserveGateFixPhrases = []string{
 	"already-resolved findings do not re-surface",
 }
 
+var canonicalReviewTriagePhrases = []string{
+	"review verdict evidence",
+	"diagnostic",
+	"max_fix_rounds",
+	"both causes",
+	"--fix-override",
+}
+
 // TestStaleMonitorGuidance_SyncedAcrossSurfaces guards the repo invariant that
 // agent-driving guidance stays in sync across its three surfaces: the skill
 // body, the published agents guide, and the live axi help string. The earlier
@@ -101,6 +109,35 @@ func TestPreserveGateFixGuidance_SyncedAcrossSurfaces(t *testing.T) {
 		for _, phrase := range canonicalPreserveGateFixPhrases {
 			if !strings.Contains(content, phrase) {
 				t.Errorf("%s is missing the canonical preserve-gate-fix guidance phrase %q", name, phrase)
+			}
+		}
+	}
+}
+
+func TestReviewTriageGuidance_SyncedAcrossSurfaces(t *testing.T) {
+	pureEvidence := stepView{
+		Name:   string(types.StepReview),
+		Status: string(types.StepStatusAwaitingTriage),
+		FindingsJSON: findingsJSON(t, []types.Finding{{
+			ID: types.FindingIDReviewVerdictEvidence, Source: types.FindingSourceReviewGate, Action: types.ActionAskMaster,
+		}}, "invalid evidence"),
+	}
+	combined := pureEvidence
+	combined.Error = types.ReviewTriageReasonEvidence + "; " + types.ReviewTriageReasonFixRoundCap
+	combined.FindingsJSON = findingsJSON(t, []types.Finding{
+		{ID: types.FindingIDReviewVerdictEvidence, Source: types.FindingSourceReviewGate, Action: types.ActionAskMaster},
+		{ID: "review-codex-1-1", Source: "codex", Action: types.ActionAutoFix},
+	}, "invalid evidence at cap")
+	surfaces := map[string]string{
+		"skill body":    skill.Markdown(),
+		"agents guide":  readAgentsGuide(t),
+		"axi gate help": axiDoc(append(gateFields(pureEvidence), gateFields(combined)...)...),
+	}
+	for name, content := range surfaces {
+		content = strings.ToLower(content)
+		for _, phrase := range canonicalReviewTriagePhrases {
+			if !strings.Contains(content, phrase) {
+				t.Errorf("%s is missing review-triage guidance phrase %q", name, phrase)
 			}
 		}
 	}

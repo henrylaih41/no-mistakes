@@ -181,6 +181,12 @@ func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.A
 		return fmt.Errorf("--action retry is only valid while a step is awaiting_agent_retry")
 	}
 	if action == types.ActionFix {
+		for _, id := range findingIDs {
+			if id == types.FindingIDReviewVerdictEvidence {
+				e.mu.Unlock()
+				return fmt.Errorf("finding %q is diagnostic and cannot be selected for source-fix work; select a real reviewer finding or approve/skip after triage", id)
+			}
+		}
 		if e.waitingAtFixRoundCap {
 			if fixOverrideReason == "" {
 				max := e.waitingMaxFixRounds
@@ -1009,7 +1015,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.waitingStep = stepName
 		e.waitingStepResultID = sr.ID
 		e.waitingAgentRetry = false
-		e.waitingAtFixRoundCap = reviewCapReached && !outcome.NeedsTriage
+		e.waitingAtFixRoundCap = reviewCapReached
 		e.waitingFixRoundCount = reviewFixRoundCount
 		e.waitingMaxFixRounds = reviewMaxFixRounds
 		e.mu.Unlock()
@@ -1022,12 +1028,17 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Publish the run marker and step gate in one transaction. If either
 		// write fails, clear the in-memory waiter and fail loudly instead of
 		// blocking at a gate that status readers cannot observe.
-		if _, dbErr := e.db.EnterApprovalGate(ctx, run.ID, sr.ID, approvalStatus, executionMS, nil); dbErr != nil {
+		triageReason := reviewApprovalGateReason(outcome.NeedsTriage, reviewCapReached)
+		if _, dbErr := e.db.EnterApprovalGate(ctx, run.ID, sr.ID, approvalStatus, executionMS, triageReason); dbErr != nil {
 			e.clearApprovalWaitState()
 			publishErr := fmt.Errorf("publish approval gate for step %s: %w", stepName, dbErr)
 			return false, e.failGatePublication(stepName, sr.ID, executionMS, publishErr)
 		}
-		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, diffText, "", &executionMS)
+		gateError := ""
+		if triageReason != nil {
+			gateError = *triageReason
+		}
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, diffText, gateError, &executionMS)
 
 		response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, true)
 		parkedMS := time.Since(parkStart).Milliseconds()
@@ -1285,6 +1296,21 @@ func (e *Executor) reviewFixRoundCapReached(stepName types.StepName, stepResultI
 		return false, 0, max, err
 	}
 	return count >= max, count, max, nil
+}
+
+func reviewApprovalGateReason(evidenceTriage, fixRoundCap bool) *string {
+	reasons := make([]string, 0, 2)
+	if evidenceTriage {
+		reasons = append(reasons, types.ReviewTriageReasonEvidence)
+	}
+	if fixRoundCap {
+		reasons = append(reasons, types.ReviewTriageReasonFixRoundCap)
+	}
+	if len(reasons) == 0 {
+		return nil
+	}
+	reason := strings.Join(reasons, "; ")
+	return &reason
 }
 
 // waitForApprovalOrReconcile blocks until an approval response arrives, the parked

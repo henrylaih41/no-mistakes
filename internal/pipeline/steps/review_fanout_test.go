@@ -262,3 +262,84 @@ func TestReviewStep_FanOut_FailOpenCannotDropInvalidVerdict(t *testing.T) {
 		t.Fatalf("triage findings = %+v, want preserved codex report", findings.Items)
 	}
 }
+
+func TestReviewStep_FanOut_ProcessErrorWinsBeforeEvidenceTriage(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	valid := &mockAgent{name: "codex", runFn: reviewReturning(Findings{Summary: "valid"})}
+	invalid := &mockAgent{
+		name:                   "claude",
+		preserveReviewEvidence: true,
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean"}`), Metrics: &agent.InvocationMetrics{ModelRoundtrips: 1}}, nil
+		},
+	}
+	failed := &mockAgent{name: "grok", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return nil, errors.New("reviewer crashed")
+	}}
+	sctx := newTestContext(t, &mockAgent{name: "fixer"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Reviewers = []agent.Agent{valid, invalid, failed}
+
+	_, err := newTestReviewStep().Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "grok") {
+		t.Fatalf("Execute() error = %v, want fail-closed process error", err)
+	}
+	if len(invalid.calls) != 2 {
+		t.Fatalf("invalid reviewer calls = %d, want initial plus cold retry", len(invalid.calls))
+	}
+}
+
+func TestReviewStep_FanOut_FailOpenReportsProcessErrorBeforeEvidenceTriage(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	valid := &mockAgent{name: "codex", runFn: reviewReturning(Findings{
+		Items: []Finding{{Severity: "warning", Description: "valid source defect", Action: types.ActionAutoFix}},
+	})}
+	invalid := &mockAgent{
+		name:                   "claude",
+		preserveReviewEvidence: true,
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean"}`), Metrics: &agent.InvocationMetrics{ModelRoundtrips: 1}}, nil
+		},
+	}
+	failed := &mockAgent{name: "grok", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return nil, errors.New("reviewer crashed")
+	}}
+	sctx := newTestContext(t, &mockAgent{name: "fixer"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Reviewers = []agent.Agent{valid, invalid, failed}
+	sctx.Config.Review.FailOpen = true
+	var logs, audit []string
+	sctx.Log = func(line string) { logs = append(logs, line) }
+	sctx.LogFile = func(line string) { audit = append(audit, line) }
+
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !outcome.NeedsTriage {
+		t.Fatal("remaining invalid verdict must park for triage")
+	}
+	if !sliceContainsText(logs, "grok", "DROPPED") || !sliceContainsText(audit, "grok", "ERROR") {
+		t.Fatalf("process error was not surfaced; logs=%v audit=%v", logs, audit)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := findingBySource(findings.Items, "codex"); !ok {
+		t.Fatalf("valid reviewer finding was not preserved: %+v", findings.Items)
+	}
+}
+
+func sliceContainsText(lines []string, parts ...string) bool {
+	for _, line := range lines {
+		matched := true
+		for _, part := range parts {
+			matched = matched && strings.Contains(line, part)
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}

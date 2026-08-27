@@ -297,6 +297,9 @@ func TestParseClaudeEvents_CountsDistinctMessageIDsAsModelRoundtrips(t *testing.
 	if got := parsed.metrics.ToolCalls; got != 0 {
 		t.Fatalf("tool calls = %d, want StructuredOutput excluded", got)
 	}
+	if usage.InputTokens != 20 || usage.OutputTokens != 10 {
+		t.Fatalf("usage = %+v, want duplicate msg-1 frame counted once", usage)
+	}
 }
 
 func TestParseClaudeEvents_NoSeparatorForFirstMessage(t *testing.T) {

@@ -913,3 +913,25 @@ func TestWriteStepStatusDetailDistinguishesEvidenceTriage(t *testing.T) {
 		t.Fatalf("evidence triage detail = %q", got)
 	}
 }
+
+func TestWriteStepStatusDetailSurfacesEvidenceTriageAtFixRoundCap(t *testing.T) {
+	findings, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{{
+		ID:     types.FindingIDReviewVerdictEvidence,
+		Source: types.FindingSourceReviewGate,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason := types.ReviewTriageReasonEvidence + "; " + types.ReviewTriageReasonFixRoundCap
+	var b strings.Builder
+	writeStepStatusDetail(&b, &db.StepResult{
+		StepName:     types.StepReview,
+		Status:       types.StepStatusAwaitingTriage,
+		FindingsJSON: &findings,
+		Error:        &reason,
+	})
+	got := b.String()
+	if !strings.Contains(got, "evidence failed") || !strings.Contains(got, "fix-round cap") {
+		t.Fatalf("combined triage detail = %q", got)
+	}
+}

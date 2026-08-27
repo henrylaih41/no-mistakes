@@ -57,9 +57,6 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 			res.Result = result
 			res.Err = retryErr
 			res.Duration = time.Since(started)
-			if retryErr != nil {
-				return Findings{}, nil, fmt.Errorf("review panel: reviewer %q cold retry after invalid verdict failed: %w", name, retryErr)
-			}
 		}
 	}
 
@@ -74,19 +71,7 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 			invalidSlots[idx] = true
 		}
 	}
-	if len(invalid) > 0 {
-		reports := make([]reviewerReport, 0, len(results)-len(invalidSlots))
-		for idx, res := range results {
-			if invalidSlots[idx] || res.Err != nil {
-				continue
-			}
-			reports = append(reports, reviewerReportFromResult(idx, res, sctx.Log, sctx.LogFile))
-		}
-		logReviewerSummaries(sctx.Log, reports)
-		return combineReviewerFindings(reports), invalid, nil
-	}
-
-	reports, err := processReviewerResults(results, sctx.Config.Review.FailOpen, sctx.Log, sctx.LogFile)
+	reports, err := processReviewerResultsExcluding(results, sctx.Config.Review.FailOpen, invalidSlots, sctx.Log, sctx.LogFile)
 	if err != nil {
 		return Findings{}, nil, err
 	}
@@ -95,7 +80,7 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 	// goroutine now that every reviewer has finished.
 	logReviewerSummaries(sctx.Log, reports)
 
-	return combineReviewerFindings(reports), nil, nil
+	return combineReviewerFindings(reports), invalid, nil
 }
 
 // processReviewerResults turns FanOut results into attributed reviewer reports,
@@ -111,10 +96,15 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 // Fail policy: when failOpen is false (the default) the first reviewer error
 // fails the step with an error naming that reviewer family. When failOpen is
 // true a failed reviewer is dropped with a loud, user-visible warning and the
-// step continues only if at least one reviewer succeeded. log is the
+// step continues only if at least one reviewer succeeded or an excluded
+// evidence-invalid reviewer still requires triage. log is the
 // user-visible callback; logFile is the file-only audit callback. Both run on
 // the caller's goroutine.
 func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, logFile func(string)) ([]reviewerReport, error) {
+	return processReviewerResultsExcluding(results, failOpen, nil, log, logFile)
+}
+
+func processReviewerResultsExcluding(results []agent.FanOutResult, failOpen bool, excluded map[int]bool, log, logFile func(string)) ([]reviewerReport, error) {
 	reports := make([]reviewerReport, 0, len(results))
 	var dropped []string
 	var firstTransient *agent.TransientError
@@ -137,9 +127,15 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 			}
 			continue
 		}
+		if excluded[idx] {
+			continue
+		}
 		reports = append(reports, reviewerReportFromResult(idx, res, log, logFile))
 	}
 	if len(reports) == 0 {
+		if len(excluded) > 0 {
+			return reports, nil
+		}
 		if firstTransient != nil {
 			return nil, fmt.Errorf("review panel: all reviewers failed (%s): %w", strings.Join(dropped, ", "), firstTransient)
 		}

@@ -84,8 +84,10 @@ func TestValidateReviewVerdictEvidenceRejectsObservedPlaceholderVerdict(t *testi
 }
 
 func TestValidateReviewVerdictEvidenceDoesNotScanFindingDescriptionsForDeferralMarkers(t *testing.T) {
+	output := []byte(`{"findings":[{"severity":"warning","description":"The review in progress state is not persisted","action":"ask-master"}],"summary":"one defect","risk_level":"medium","risk_rationale":"state can be lost"}`)
 	result := &agent.Result{
-		Output:  []byte(`{"findings":[{"severity":"warning","description":"The review in progress state is not persisted","action":"ask-master"}],"summary":"one defect","risk_level":"medium","risk_rationale":"state can be lost"}`),
+		Output:  output,
+		Text:    string(output),
 		Metrics: &agent.InvocationMetrics{ToolCalls: 1},
 	}
 	if err := validateReviewVerdictEvidence(result, minimumReviewVerdictDuration(nil), nil); err != nil {

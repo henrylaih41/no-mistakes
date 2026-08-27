@@ -1180,7 +1180,11 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult) {
 	case types.StepStatusFixReview:
 		b.WriteString("Waiting to review the latest fix.\n\n")
 	case types.StepStatusAwaitingTriage:
-		if stepHasReviewVerdictEvidenceFinding(sr) {
+		evidenceTriage := stepHasReviewVerdictEvidenceFinding(sr)
+		fixRoundCap := sr.Error != nil && strings.Contains(*sr.Error, types.ReviewTriageReasonFixRoundCap)
+		if evidenceTriage && fixRoundCap {
+			b.WriteString("Review verdict evidence failed after one cold retry and the review fix-round cap was reached; waiting for master triage.\n\n")
+		} else if evidenceTriage {
 			b.WriteString("Review verdict evidence failed after one cold retry; waiting for master triage.\n\n")
 		} else {
 			b.WriteString("Review fix-round cap reached; waiting for master triage.\n\n")

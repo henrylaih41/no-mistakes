@@ -28,6 +28,8 @@ const (
 const (
 	FindingSourceReviewGate        = "review-gate"
 	FindingIDReviewVerdictEvidence = "review-verdict-evidence"
+	ReviewTriageReasonEvidence     = "review verdict evidence failed after one cold retry"
+	ReviewTriageReasonFixRoundCap  = "review max_fix_rounds cap reached"
 )
 
 const (

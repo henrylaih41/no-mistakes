@@ -382,6 +382,7 @@ func TestWriteGateShapeAwaitingEvidenceTriage(t *testing.T) {
 	for _, want := range []string{
 		"status: awaiting_triage",
 		"Review verdict evidence failed after one cold retry",
+		"diagnostic and cannot be selected",
 		"no-mistakes axi respond --action approve",
 		"no-mistakes axi respond --action fix --findings <ids>",
 		"no-mistakes axi respond --action skip",
@@ -392,6 +393,35 @@ func TestWriteGateShapeAwaitingEvidenceTriage(t *testing.T) {
 	}
 	if strings.Contains(out, "--fix-override") || strings.Contains(out, "--override-reason") {
 		t.Fatalf("evidence triage must not render fix-round-cap commands:\n%s", out)
+	}
+}
+
+func TestWriteGateShapeAwaitingEvidenceTriageAtFixRoundCap(t *testing.T) {
+	gate := stepView{
+		Name:   "review",
+		Status: "awaiting_triage",
+		Error:  types.ReviewTriageReasonEvidence + "; " + types.ReviewTriageReasonFixRoundCap,
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: types.FindingIDReviewVerdictEvidence, Severity: "error", Source: types.FindingSourceReviewGate, Action: types.ActionAskMaster, Description: "review evidence invalid"},
+			{ID: "review-codex-1-1", Severity: "warning", Source: "codex", Action: types.ActionAutoFix, Description: "valid reviewer finding"},
+		}, "review verdict evidence invalid after cold retry"),
+	}
+	out := axiDoc(gateFields(gate)...)
+
+	for _, want := range []string{
+		"Review verdict evidence failed after one cold retry",
+		"max_fix_rounds",
+		"Both causes",
+		"diagnostic and cannot be selected",
+		"--fix-override",
+		"--override-reason",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("combined triage gate missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "--action fix --findings <ids>") {
+		t.Fatalf("combined triage must not advertise an un-attributed normal fix:\n%s", out)
 	}
 }
 

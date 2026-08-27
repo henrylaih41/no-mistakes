@@ -71,10 +71,11 @@ func newAxiRunCmd() *cobra.Command {
 			"prints it. With --yes it auto-resolves every gate (fixing actionable\n" +
 			"auto-fix, ask-master, and ask-user findings with no escalation - then\n" +
 			"accepting the result) until a decision point or outcome. --yes still\n" +
-			"stops at an awaiting_triage gate when review reaches max_fix_rounds: it\n" +
-			"never supplies the override implicitly. Report the residual findings for\n" +
-			"master triage, then respond with --action fix --fix-override\n" +
-			"--override-reason only after a merge-blocking ruling. If a step parks at\n" +
+			"stops at every awaiting_triage gate. Review may park there after invalid\n" +
+			"verdict evidence, max_fix_rounds, or both causes. The evidence item is\n" +
+			"diagnostic; select only real reviewer findings. If max_fix_rounds applies,\n" +
+			"use --action fix --fix-override --override-reason only after a\n" +
+			"merge-blocking ruling. If a step parks at\n" +
 			"awaiting_agent_retry after an exhausted transient agent/provider failure,\n" +
 			"--yes auto-retries that step at most once, with the retry recorded on the\n" +
 			"run; a second consecutive transient remains parked for an explicit\n" +
@@ -686,8 +687,10 @@ func newAxiRespondCmd() *cobra.Command {
 			"Use --action retry only when a step is awaiting_agent_retry after an\n" +
 			"exhausted transient agent/provider failure; retry does not take findings\n" +
 			"and does not create a review fix round.\n" +
-			"When review is awaiting_triage after max_fix_rounds, use --action fix\n" +
-			"with --fix-override and --override-reason only after master triage.\n\n" +
+			"Review verdict evidence may also cause awaiting_triage; its diagnostic\n" +
+			"finding cannot be selected. When max_fix_rounds is a cause, including\n" +
+			"when both causes apply, use --action fix with --fix-override and\n" +
+			"--override-reason only after master triage.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
@@ -716,7 +719,7 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
-	cmd.Flags().BoolVar(&fixOverride, "fix-override", false, "allow one more review fix round after awaiting_triage cap (requires --override-reason)")
+	cmd.Flags().BoolVar(&fixOverride, "fix-override", false, "allow one more review fix round when max_fix_rounds caused awaiting_triage (requires --override-reason)")
 	cmd.Flags().StringVar(&overrideReason, "override-reason", "", "master triage reason for --fix-override")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every subsequent gate until a decision point or outcome")
 	return cmd

@@ -260,7 +260,7 @@ Each step progresses through these statuses:
 | `awaiting_approval` | Paused, waiting for the finding's owning authority |
 | `awaiting_agent_retry` | Paused after an agent invocation exhausted bounded retries for a transient provider/runtime failure; resume with `axi respond --action retry` to retry the step |
 | `fix_review` | Paused after a fix cycle, showing results for review |
-| `awaiting_triage` | Review fix-round cap reached; residual findings require master triage |
+| `awaiting_triage` | Review verdict evidence failed twice, the review fix-round cap was reached, or both; master triage is required |
 | `completed` | Finished successfully |
 | `skipped` | Pre-skipped for the run, skipped by the user, or skipped automatically by the pipeline |
 | `failed` | Step failed; the step log includes the returned error message so command stderr and provider errors are visible in the per-step log, not only in the daemon log |

@@ -167,11 +167,14 @@ Run the pipeline and decide on its findings as they come up:
    for a decision rather than being silently
    self-fixed. (Other steps such as test and lint may auto-fix within the
    pipeline and re-run before they ever gate.)
-   If review reaches `review.max_fix_rounds`, it parks as `awaiting_triage`:
-   report the residual findings to master triage instead of sending another
-   normal fix. Use `--fix-override --override-reason "<master triage reason>"`
-   only after master rules a residual merge-blocking; that reason is persisted
-   on the triggering round. `--yes` stops at `awaiting_triage` and never
+   Review parks as `awaiting_triage` after a second invalid review verdict
+   evidence result, after reaching `review.max_fix_rounds`, or when both causes
+   apply. The `review-verdict-evidence` item is diagnostic and cannot be selected
+   for source-fix work. At evidence-only triage, a normal fix may select preserved
+   real reviewer findings. Whenever the fix-round cap is one of the causes, use
+   `--fix-override --override-reason "<master triage reason>"` only after
+   master rules a residual merge-blocking; that reason is persisted on the
+   triggering round. `--yes` stops at every `awaiting_triage` gate and never
    supplies the override implicitly.
    If a step reaches `awaiting_agent_retry`, the agent invocation exhausted
    bounded retries for a transient provider/runtime failure. Respond with
@@ -195,7 +198,7 @@ Run the pipeline and decide on its findings as they come up:
    # retry a parked transient agent/provider failure without creating a fix round
    no-mistakes axi respond --action retry
 
-   # allow one more review fix round after awaiting_triage, only with master triage
+   # allow one more review fix round when max_fix_rounds caused awaiting_triage
    no-mistakes axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <id1,id2>
 
    # skip this step
@@ -219,8 +222,9 @@ Run the pipeline and decide on its findings as they come up:
       as a JSON finding object. Use it for a problem you noticed that is not in
       the gate's own `findings` table.
     - `--fix-override --override-reason '<reason>'` (with `--action fix`)
-      allows exactly one more review fix round after `awaiting_triage`. The
-      reason must be the master triage ruling and is persisted for attribution.
+      allows exactly one more review fix round when `review.max_fix_rounds` caused
+      `awaiting_triage`, including when review verdict evidence is the other
+      cause. The reason must be the master triage ruling and is persisted for attribution.
     - `--step <name>` responds to a specific step instead of the one currently
       awaiting approval. You rarely need this; omit it to answer the active gate.
 3. Repeat step 2 until the output has an `outcome:` instead of a `gate:`. The

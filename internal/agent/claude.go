@@ -342,20 +342,24 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			if msg.Model != "" {
 				lastModel = msg.Model
 			}
+			newResponse := msg.ID == ""
 			if msg.ID == "" {
 				metrics.ModelRoundtrips++
 			} else if _, seen := seenMessageIDs[msg.ID]; !seen {
 				seenMessageIDs[msg.ID] = struct{}{}
 				metrics.ModelRoundtrips++
+				newResponse = true
 			}
-			usage.Add(TokenUsage{
-				InputTokens:           msg.Usage.InputTokens,
-				OutputTokens:          msg.Usage.OutputTokens,
-				CacheReadTokens:       msg.Usage.CacheReadInputTokens,
-				CacheCreationTokens:   msg.Usage.CacheCreationInputTokens,
-				Reported:              true,
-				CacheCreationReported: true,
-			})
+			if newResponse {
+				usage.Add(TokenUsage{
+					InputTokens:           msg.Usage.InputTokens,
+					OutputTokens:          msg.Usage.OutputTokens,
+					CacheReadTokens:       msg.Usage.CacheReadInputTokens,
+					CacheCreationTokens:   msg.Usage.CacheCreationInputTokens,
+					Reported:              true,
+					CacheCreationReported: true,
+				})
+			}
 			for _, c := range msg.Content {
 				if c.Type == "tool_use" && !strings.EqualFold(c.Name, "StructuredOutput") {
 					metrics.ToolCalls++

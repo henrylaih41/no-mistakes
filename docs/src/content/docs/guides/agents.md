@@ -217,7 +217,7 @@ The full driving protocol - how to read the home view and `gate:` objects, when 
 Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
 The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 
-If review reaches `review.max_fix_rounds`, it parks as `awaiting_triage`; `--yes` stops there. Report the residual findings for master triage. Only after master rules a residual merge-blocking may an agent send `axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <ids>`; the reason is persisted on the triggering round.
+Review parks as `awaiting_triage` after a second invalid review verdict evidence result, after reaching `review.max_fix_rounds`, or when both causes apply; `--yes` stops there. The `review-verdict-evidence` item is diagnostic and cannot be selected for source-fix work. At evidence-only triage, a normal fix may select preserved real reviewer findings. Whenever the fix-round cap is one of the causes, only after master rules a residual merge-blocking may an agent send `axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <ids>`; the reason is persisted on the triggering round.
 
 If the gate status is `awaiting_agent_retry`, the agent invocation exhausted bounded retries for a transient provider/runtime failure.
 There are no findings to fix: respond with `no-mistakes axi respond --action retry` to retry that same step.
