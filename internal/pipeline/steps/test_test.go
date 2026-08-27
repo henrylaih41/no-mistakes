@@ -605,6 +605,7 @@ func TestTestStep_InitialAgent_NoTargetedEvidenceRequiresHonestFinding(t *testin
 		"perform manual verification with evidence",
 		"report a warning finding that sufficient targeted evidence is not possible",
 		"If sufficient evidence is not possible, report a warning finding",
+		`Set action to "ask-master" when evidence is missing but the approved requirement is clear`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("expected no-targeted-evidence guidance %q in prompt:\n%s", want, prompt)

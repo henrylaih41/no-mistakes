@@ -378,6 +378,24 @@ func TestGateResolution(t *testing.T) {
 		wantIDs      []string
 	}{
 		{
+			name: "unreadable findings are never auto-resolved",
+			gate: stepView{
+				Name:         "review",
+				Status:       string(types.StepStatusAwaitingApproval),
+				FindingsJSON: `{"findings":[{"severity":"error","description":"truncated`,
+			},
+			wantAction: types.ApprovalAction(""),
+		},
+		{
+			name: "unreadable fix review is never auto-approved",
+			gate: stepView{
+				Name:         "review",
+				Status:       string(types.StepStatusFixReview),
+				FindingsJSON: `{"findings":[{"severity":"error","description":"truncated`,
+			},
+			wantAction: types.ApprovalAction(""),
+		},
+		{
 			name: "actionable findings are fixed with every finding selected",
 			gate: stepView{
 				Name:         "review",

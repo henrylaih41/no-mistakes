@@ -333,7 +333,7 @@ func TestExecutor_AutoFixSkipsHumanReviewFindings(t *testing.T) {
 	waitExecutorDone(t, done)
 }
 
-func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *testing.T) {
+func TestExecutor_AskMasterFindingsRequireApprovalWithoutNeedsApprovalFlag(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
 
@@ -343,7 +343,7 @@ func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *
 			return &StepOutcome{
 				NeedsApproval: false,
 				AutoFixable:   true,
-				Findings:      `{"findings":[{"severity":"info","description":"design choice","action":"ask-user"}],"summary":"1 issue"}`,
+				Findings:      `{"findings":[{"severity":"info","description":"implementation choice","action":"ask-master"}],"summary":"1 issue"}`,
 			}, nil
 		},
 	}
@@ -352,6 +352,38 @@ func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+
+	exec.Respond(types.StepReview, types.ActionApprove, nil)
+	waitExecutorDone(t, done)
+}
+
+// Unreadable findings must never enter an auto-fix round. Even when the step
+// advertises AutoFixable with attempts available, the executor parks after one
+// call so automation cannot act on content it could not classify.
+func TestExecutor_MalformedFindingsParkInsteadOfAutoFix(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			callCount++
+			return &StepOutcome{
+				NeedsApproval: false,
+				AutoFixable:   true,
+				Findings:      `{"findings":[{"severity":"error","description":"truncated`,
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 3}}, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 step call (no auto-fix round for malformed findings), got %d", callCount)
+	}
 
 	exec.Respond(types.StepReview, types.ActionApprove, nil)
 	waitExecutorDone(t, done)

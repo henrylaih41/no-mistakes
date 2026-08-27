@@ -86,8 +86,8 @@ func TestRebaseStep_DetectsUnpushedLocalDefaultBranchCommits(t *testing.T) {
 	if len(findings.Items) != 1 {
 		t.Fatalf("expected one finding, got %d", len(findings.Items))
 	}
-	if findings.Items[0].Action != types.ActionAskUser {
-		t.Fatalf("finding action = %q, want %q", findings.Items[0].Action, types.ActionAskUser)
+	if findings.Items[0].Action != types.ActionAskMaster {
+		t.Fatalf("finding action = %q, want %q", findings.Items[0].Action, types.ActionAskMaster)
 	}
 }
 

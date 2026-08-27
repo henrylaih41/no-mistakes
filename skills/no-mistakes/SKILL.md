@@ -168,17 +168,20 @@ Run the pipeline and decide on its findings as they come up:
    Read its `findings` table. Each finding has an `id`, `severity`,
    `file`, `description`, and an `action` that tells you how the
    pipeline classified it:
-   - `auto-fix` - mechanical and low-risk; you can authorize the fix on
-     your own judgment by responding with `--action fix`.
    - `no-op` - informational only; nothing to do.
-   - `ask-user` - the finding challenges the user's deliberate intent or
-     touches product behavior. This is a call only the user can make - see
-     [Escalate `ask-user` findings](#escalate-ask-user-findings) below.
+   - `auto-fix` - one clear, bounded correction follows from the current
+     intent, design, contract, invariant, or test; authorize it with
+     `--action fix`.
+   - `ask-master` - the approved outcome is known, but choosing the
+     implementation requires non-local judgment. The calling gate owner decides
+     under the documented authority; see [Resolve manual findings](#resolve-manual-findings).
+   - `ask-user` - the finding exposes a genuine unresolved product or
+     guarantee choice that only the user can make. See
+     [Resolve manual findings](#resolve-manual-findings).
 
    **Review auto-fix is disabled by default** (`auto_fix.review: 0`; a repo
-   or global `auto_fix.review > 0` override re-enables it), so blocking and
-   ask-user review findings park for your decision rather than being silently
-   self-fixed. (Other steps such as test and lint may auto-fix within the
+   or global `auto_fix.review > 0` override re-enables it), so blocking findings plus `ask-master` and `ask-user` review findings park for a decision
+   rather than being silently self-fixed. (Other steps such as test and lint may auto-fix within the
    pipeline and re-run before they ever gate.)
 
    Choose one response:
@@ -273,15 +276,18 @@ format - what was validated and what was found. If the output includes a
 acknowledge those misses and explicitly list each fix so the user can easily
 review them.
 
-## Escalate `ask-user` findings
+## Resolve manual findings
 
 A gate whose findings are all `auto-fix` or `no-op` is safe to drive on your
 own judgment: respond with `--action fix` or `--action approve` as
-appropriate. But a finding marked
-`ask-user` is a decision that belongs to the user, not you - the pipeline
-flagged it because it challenges their deliberate intent or changes product
-behavior. Do not approve, fix, or skip it on your own. Instead, stop and bring
-it to the user before you respond:
+appropriate. A finding marked `ask-master` belongs to the calling gate
+owner: inspect the evidence and choose approve, fix, or skip under the authority
+already delegated for the task. Escalate it to the user only when there is no
+Master role available or the decision reveals a genuine product choice.
+
+A finding marked `ask-user` belongs to the user because it exposes a
+genuine unresolved product or guarantee choice. Do not approve, fix, or skip it
+on your own. Instead, stop and bring it to the user before you respond:
 
 - Relay each `ask-user` finding to them as the pipeline wrote it - its
   `id`, `file`, and full `description` verbatim. Do not paraphrase,
@@ -291,15 +297,17 @@ it to the user before you respond:
   `--instructions`), `--action approve`, or `--action skip`.
 
 The one exception is `--yes` (below): it is the user's standing consent to
-drive every gate unattended, so under `--yes` you resolve `ask-user`
-findings automatically instead of stopping to ask.
+drive every readable gate unattended, so under `--yes` you resolve
+`ask-master` and `ask-user` findings automatically instead of stopping.
 
 If you have clear consent to drive the run automatically, pass `--yes` to `axi run`
-or `axi respond`. It treats every actionable finding - `auto-fix` and
-`ask-user` alike - as consent to fix it, selects every current finding for one
-fix round, accepts the resulting fix review, and approves gates with only
-`no-op` findings. Only use it when the user has asked you to drive the whole
-run without checking back.
+or `axi respond`. It treats every actionable finding - `auto-fix`,
+`ask-master`, and `ask-user` alike - as consent to fix it, selects every
+current finding for one fix round, accepts the resulting fix review, and approves
+gates with only `no-op` findings. If the findings JSON is unreadable, AXI
+stops and surfaces that state; it never auto-approves it, including at fix review.
+Only use `--yes` when the user has asked you to drive the whole run without
+checking back.
 
 ## Inspecting state
 
@@ -328,10 +336,11 @@ A `gate:` waiting on you looks roughly like this - a `gate:` line naming the ste
 
 ```
 gate: review
-note: Review auto-fix is disabled by default (auto_fix.review: 0; a repo or global auto_fix.review > 0 override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed.
-findings[2]{id,severity,file,line,action,description}:
+note: Review auto-fix is disabled by default (auto_fix.review: 0; a repo or global auto_fix.review > 0 override re-enables it), so blocking findings plus ask-master and ask-user review findings park for a decision rather than being silently self-fixed.
+findings[3]{id,severity,file,line,action,description}:
   r1,warning,internal/pipeline/executor.go,,auto-fix,Error from os.Remove is ignored
-  r2,error,cmd/no-mistakes/main.go,,ask-user,New --force flag bypasses the confirm prompt
+  r2,error,internal/pipeline/steps/review.go,,ask-master,Restoring the approved invariant requires choosing between two pipeline boundaries
+  r3,error,cmd/no-mistakes/main.go,,ask-user,Should --force bypass the confirmation prompt?
 help[6]:
   Run `no-mistakes axi respond --action approve` to accept this step and continue
   Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)
@@ -341,10 +350,9 @@ help[6]:
   Commit post-pipeline follow-up work on top of the existing branch so every pipeline fix commit remains present. Never abort-and-restart, reset, or replace the branch in a way that drops prior gate-fix commits.
 ```
 
-Read the `action` column per row: decide `r1` (auto-fix) on your own
-judgment - `respond --action fix --findings r1` hands it to the pipeline to
-fix - but stop and escalate `r2` (ask-user) to the user before responding. A
-final state
+Read the `action` column per row: authorize `r1` (auto-fix), decide
+`r2` (ask-master) as the gate owner, and stop to escalate `r3`
+(ask-user) to the user before responding. A final state
 instead shows `outcome: <checks-passed|passed|failed|cancelled>` with no
 `findings` table. Field names and exact columns can vary by step and version,
 so read the actual `findings` header rather than assuming this layout.

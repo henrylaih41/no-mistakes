@@ -219,13 +219,16 @@ func retainMatchingFindingsJSON(existingRaw, keepRaw string) string {
 	return filteredRaw
 }
 
+// autoFixableFindingsJSON returns the auto-fix subset of a findings payload,
+// or "" when nothing is safely auto-fixable. Unreadable payloads fail closed:
+// they must park at the manual-findings boundary, never reach a fix agent.
 func autoFixableFindingsJSON(raw string) string {
 	if raw == "" {
 		return ""
 	}
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil {
-		return raw
+		return ""
 	}
 	fixable := types.AutoFixableFindings(findings)
 	if len(fixable.Items) == 0 {
@@ -233,20 +236,20 @@ func autoFixableFindingsJSON(raw string) string {
 	}
 	fixableRaw, err := types.MarshalFindingsJSON(fixable)
 	if err != nil {
-		return raw
+		return ""
 	}
 	return fixableRaw
 }
 
-func hasAskUserFindingsJSON(raw string) bool {
+func hasManualFindingsJSON(raw string) bool {
 	if raw == "" {
 		return false
 	}
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil {
-		return false
+		return true
 	}
-	return types.HasAskUserFindings(findings)
+	return types.HasManualFindings(findings)
 }
 
 // combineSelectedFindingIDs returns the ordered list of finding IDs that

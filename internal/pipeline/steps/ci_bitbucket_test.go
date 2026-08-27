@@ -182,8 +182,8 @@ func TestCIStep_BitbucketStoppedCheckParksForADecision(t *testing.T) {
 	if len(findings.Items) != 1 || !strings.Contains(findings.Items[0].Description, "build") {
 		t.Fatalf("findings = %+v, want the stopped check named", findings.Items)
 	}
-	if findings.Items[0].Action != types.ActionAskUser {
-		t.Fatalf("finding action = %q, want ask-user", findings.Items[0].Action)
+	if findings.Items[0].Action != types.ActionAskMaster {
+		t.Fatalf("finding action = %q, want ask-master", findings.Items[0].Action)
 	}
 	if len(ag.calls) != 0 {
 		t.Fatalf("expected no fix-agent round for a stopped pipeline, got %d", len(ag.calls))

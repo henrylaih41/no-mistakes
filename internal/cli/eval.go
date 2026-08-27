@@ -152,7 +152,7 @@ func newEvalMissIngestCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&findings, "finding", nil, "confirmed miss as JSON finding object with id and description, optional file, line, severity (error|warning|info, default error) and action (auto-fix|ask-user|no-op) (repeatable)")
+	cmd.Flags().StringArrayVar(&findings, "finding", nil, "confirmed miss as JSON finding object with id and description, optional file, line, severity (error|warning|info, default error) and action (no-op|auto-fix|ask-master|ask-user) (repeatable)")
 	return cmd
 }
 

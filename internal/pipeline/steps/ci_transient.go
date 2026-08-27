@@ -683,7 +683,7 @@ func markPreRunInfraFailures(sctx *pipeline.StepContext, host scm.Host, checks [
 // A cancellation is never a verdict on the code, so there is nothing for the fix
 // agent to repair: routing it into the auto_fix.ci loop would spend an agent
 // round - and let that agent edit code the provider never tested - chasing an
-// outcome only the provider can clear. The findings are ask-user for the same
+// outcome only the provider can clear. The findings are ask-master for the same
 // reason, so a fix loop cannot pick them up later either.
 //
 // checks preserves the provider-attributed cause through the shared cancel
@@ -702,7 +702,7 @@ func ciUnresolvedCancelledOutcome(names []string, checks []scm.Check, reruns fun
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "warning",
 			Description: unresolvedTransientDescription(check.Name, reruns(check.Name), check.PreRunFailure),
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		})
 	}
 	findingsJSON, _ := json.Marshal(findings)
@@ -765,7 +765,7 @@ func ciRerunHeadMismatchOutcome(expected, observed string) *pipeline.StepOutcome
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: fmt.Sprintf("CI checks could not be re-run: expected head %s, observed %s on the push target", expected, observed),
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)

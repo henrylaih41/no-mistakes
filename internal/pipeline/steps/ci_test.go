@@ -556,8 +556,8 @@ func TestCIStep_PersistentCheckReadFailureParksAtAskUser(t *testing.T) {
 	if len(findings.Items) != 1 {
 		t.Fatalf("findings = %+v, want exactly one ask-user finding", findings.Items)
 	}
-	if findings.Items[0].Action != types.ActionAskUser {
-		t.Fatalf("finding action = %q, want ask-user", findings.Items[0].Action)
+	if findings.Items[0].Action != types.ActionAskMaster {
+		t.Fatalf("finding action = %q, want ask-master", findings.Items[0].Action)
 	}
 	if !strings.Contains(findings.Items[0].Description, "pr checks --json") || !strings.Contains(findings.Items[0].Description, "2.50") {
 		t.Fatalf("finding %q must explain the gh version/flag cause", findings.Items[0].Description)
@@ -635,8 +635,8 @@ func TestCICheckReadFailureOutcome_ProviderNeutral(t *testing.T) {
 	if len(findings.Items) != 1 {
 		t.Fatalf("findings = %+v, want exactly one finding", findings.Items)
 	}
-	if findings.Items[0].Action != types.ActionAskUser {
-		t.Fatalf("finding action = %q, want ask-user", findings.Items[0].Action)
+	if findings.Items[0].Action != types.ActionAskMaster {
+		t.Fatalf("finding action = %q, want ask-master", findings.Items[0].Action)
 	}
 	desc := findings.Items[0].Description
 	if !strings.Contains(desc, "provider CLI or credentials") {
@@ -1909,8 +1909,8 @@ func TestCIStep_UnresolvedCancelledCheckNeverEntersTheAutoFixLoop(t *testing.T) 
 		t.Fatalf("findings = %+v, want the cancelled check named", findings.Items)
 	}
 	// ask-user keeps a later fix loop from picking the finding up either.
-	if findings.Items[0].Action != types.ActionAskUser {
-		t.Fatalf("finding action = %q, want %q", findings.Items[0].Action, types.ActionAskUser)
+	if findings.Items[0].Action != types.ActionAskMaster {
+		t.Fatalf("finding action = %q, want %q", findings.Items[0].Action, types.ActionAskMaster)
 	}
 	if got := strings.Count(ghLog(t, logFile), "run rerun"); got != 1 {
 		t.Fatalf("rerun requests = %d, want exactly one, gh log:\n%s", got, ghLog(t, logFile))
@@ -2365,8 +2365,8 @@ func TestCIStep_CancelledCheckAmongPassingChecksEscalatesInsteadOfPollingForever
 	if !strings.Contains(findings.Items[0].Description, "Behavior portable serial") {
 		t.Fatalf("finding %q must name the cancelled check", findings.Items[0].Description)
 	}
-	if findings.Items[0].Action != types.ActionAskUser {
-		t.Fatalf("finding action = %q, want ask-user: a cancellation is not a code defect", findings.Items[0].Action)
+	if findings.Items[0].Action != types.ActionAskMaster {
+		t.Fatalf("finding action = %q, want ask-master: a cancellation is not a code defect", findings.Items[0].Action)
 	}
 	for _, l := range logs {
 		if l == ciChecksPassedMsg || l == ciNoChecksPassedMsg {

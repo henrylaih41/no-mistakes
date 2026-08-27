@@ -22,6 +22,18 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestFindingSchemasIncludeFourAuthorityActions(t *testing.T) {
+	for name, schema := range map[string]json.RawMessage{
+		"findings": findingsSchema,
+		"test":     testFindingsSchema,
+		"review":   reviewFindingsSchema,
+	} {
+		if !strings.Contains(string(schema), `"ask-master"`) {
+			t.Errorf("%s schema missing ask-master authority: %s", name, schema)
+		}
+	}
+}
+
 func TestCopyDirContents_PreservesGitRepo(t *testing.T) {
 	t.Parallel()
 	ensureGitRepoTemplate(t)

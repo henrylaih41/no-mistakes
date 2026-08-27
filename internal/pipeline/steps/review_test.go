@@ -202,8 +202,8 @@ func TestReviewStep_FixMode(t *testing.T) {
 	if strings.Contains(ag.calls[1].Prompt, "<<<<<<< HEAD") {
 		t.Error("expected review prompt to exclude merge markers")
 	}
-	if !strings.Contains(ag.calls[1].Prompt, "challenges the author's deliberate intent") {
-		t.Error("expected review prompt action to cover intent-challenging scenarios")
+	if !strings.Contains(ag.calls[1].Prompt, `"ask-master"`) {
+		t.Error("expected review prompt to include delegated implementation authority")
 	}
 	if !strings.Contains(ag.calls[1].Prompt, `"ask-user"`) {
 		t.Error("expected review prompt to include ask-user action for ambiguous findings")
@@ -789,7 +789,7 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 			}
 			prompt := ag.calls[0].Prompt
 
-			hasConformance := strings.Contains(prompt, "Intent conformance (required)")
+			hasConformance := strings.Contains(prompt, "Intent conformance is required")
 			if hasConformance != tc.wantConformance {
 				t.Errorf("conformance obligation present = %v, want %v\nprompt:\n%s", hasConformance, tc.wantConformance, prompt)
 			}
@@ -798,8 +798,8 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 				t.Errorf("authoritative framing present = %v, want %v\nprompt:\n%s", hasAuthority, tc.wantAuthority, prompt)
 			}
 			if tc.wantConformance {
-				if !strings.Contains(prompt, `you MUST emit an "ask-user" finding`) {
-					t.Errorf("conformance clause missing the ask-user obligation:\n%s", prompt)
+				if !strings.Contains(prompt, "auto-fix when restoring conformance is clear and bounded") || !strings.Contains(prompt, "ask-master when restoring conformance requires non-local") {
+					t.Errorf("conformance clause missing authority routing:\n%s", prompt)
 				}
 				if !strings.Contains(prompt, "Conformance does not replace correctness review") {
 					t.Errorf("conformance clause missing the correctness-is-not-conformance note:\n%s", prompt)
@@ -835,7 +835,7 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 			// Rereview: the change now contradicts the authoritative criteria,
 			// so the reviewer emits an ask-user finding even though retry-only
 			// is otherwise risk-clean.
-			if !strings.Contains(opts.Prompt, "Intent conformance (required)") {
+			if !strings.Contains(opts.Prompt, "Intent conformance is required") {
 				t.Errorf("rereview prompt missing conformance obligation:\n%s", opts.Prompt)
 			}
 			findings := Findings{

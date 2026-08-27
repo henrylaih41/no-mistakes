@@ -239,8 +239,8 @@ func TestAutoFixableFindings_NoOpExcluded(t *testing.T) {
 	}
 }
 
-// An empty/missing action must NOT be auto-fixed. It fails closed to ask-user
-// (park) so an unclassified finding routes to a human instead of being
+// An empty/missing action must NOT be auto-fixed. It fails closed to ask-master
+// (park) so an unclassified finding routes to delegated authority instead of being
 // silently auto-applied.
 func TestAutoFixableFindings_EmptyActionIsNotAutoFixable(t *testing.T) {
 	f := Findings{
@@ -259,8 +259,8 @@ func TestAutoFixableFindings_EmptyActionIsNotAutoFixable(t *testing.T) {
 }
 
 // A finding with no action field (a non-schema path that omits it) must fail
-// closed: never auto-fixed, always caught as ask-user so it parks for a human.
-func TestEmptyActionFindingFailsClosedToAskUser(t *testing.T) {
+// closed: never auto-fixed, always caught as ask-master so it parks.
+func TestEmptyActionFindingFailsClosedToAskMaster(t *testing.T) {
 	raw := `{"findings":[{"severity":"error","description":"unclassified finding with no action"}]}`
 	f, err := ParseFindingsJSON(raw)
 	if err != nil {
@@ -275,8 +275,11 @@ func TestEmptyActionFindingFailsClosedToAskUser(t *testing.T) {
 	if len(AutoFixableFindings(f).Items) != 0 {
 		t.Error("empty-action finding must not be auto-fixable")
 	}
-	if !HasAskUserFindings(f) {
-		t.Error("empty-action finding must be caught as ask-user (park)")
+	if HasAskUserFindings(f) {
+		t.Error("empty-action finding must not be escalated directly to the user")
+	}
+	if !HasManualFindings(f) {
+		t.Error("empty-action finding must be caught as ask-master (park)")
 	}
 }
 
@@ -290,8 +293,9 @@ func TestHasAskUserFindings(t *testing.T) {
 		{"only auto-fix", []Finding{{Action: ActionAutoFix}}, false},
 		{"only no-op", []Finding{{Action: ActionNoOp}}, false},
 		{"mixed", []Finding{{Action: ActionAutoFix}, {Action: ActionAskUser}}, true},
-		{"empty action defaults to ask-user", []Finding{{Action: ""}}, true},
-		{"mixed with empty action", []Finding{{Action: ActionAutoFix}, {Action: ""}}, true},
+		{"ask-master is not ask-user", []Finding{{Action: ActionAskMaster}}, false},
+		{"empty action defaults to ask-master", []Finding{{Action: ""}}, false},
+		{"mixed with empty action", []Finding{{Action: ActionAutoFix}, {Action: ""}}, false},
 		{"empty", nil, false},
 	}
 	for _, tt := range tests {
@@ -312,7 +316,9 @@ func TestHasActionableFindings(t *testing.T) {
 	}{
 		{"has ask-user", []Finding{{Action: ActionAskUser}}, true},
 		{"has auto-fix", []Finding{{Action: ActionAutoFix}}, true},
-		{"empty action defaults to ask-user (still actionable)", []Finding{{Action: ""}}, true},
+		{"has ask-master", []Finding{{Action: ActionAskMaster}}, true},
+		{"empty action defaults to ask-master (still actionable)", []Finding{{Action: ""}}, true},
+		{"unknown action defaults to ask-master (still actionable)", []Finding{{Action: "future-owner"}}, true},
 		{"only no-op", []Finding{{Action: ActionNoOp}}, false},
 		{"all no-op", []Finding{{Action: ActionNoOp}, {Action: ActionNoOp}}, false},
 		{"mixed no-op and ask-user", []Finding{{Action: ActionNoOp}, {Action: ActionAskUser}}, true},
@@ -504,7 +510,7 @@ func TestMergeUserOverrides_NoChanges(t *testing.T) {
 }
 
 func TestFinding_Action_Values(t *testing.T) {
-	for _, action := range []string{ActionNoOp, ActionAutoFix, ActionAskUser} {
+	for _, action := range []string{ActionNoOp, ActionAutoFix, ActionAskMaster, ActionAskUser} {
 		f := Finding{Severity: "error", Description: "test", Action: action}
 		raw, err := json.Marshal(f)
 		if err != nil {
@@ -513,6 +519,25 @@ func TestFinding_Action_Values(t *testing.T) {
 		s := string(raw)
 		if !strings.Contains(s, fmt.Sprintf(`"action":"%s"`, action)) {
 			t.Errorf("expected action %q in output, got %s", action, s)
+		}
+	}
+}
+
+func TestFindingAuthorityFailsClosedToMaster(t *testing.T) {
+	for _, action := range []string{"", "future-owner"} {
+		finding := Finding{Action: action}
+		if got := finding.ActionOrDefault(); got != ActionAskMaster {
+			t.Errorf("ActionOrDefault(%q) = %q, want %q", action, got, ActionAskMaster)
+		}
+		if !IsManualAction(action) {
+			t.Errorf("IsManualAction(%q) = false, want true", action)
+		}
+		findings := Findings{Items: []Finding{finding}}
+		if !HasManualFindings(findings) {
+			t.Errorf("HasManualFindings(%q) = false, want true", action)
+		}
+		if HasAskUserFindings(findings) {
+			t.Errorf("HasAskUserFindings(%q) = true, want false", action)
 		}
 	}
 }

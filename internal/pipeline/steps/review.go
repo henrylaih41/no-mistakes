@@ -176,10 +176,10 @@ Previous review findings to address:
 
 	// The review turn (initial and every post-fix rereview) carries the intent
 	// conformance obligation: when the intent is authoritative acceptance
-	// criteria (explicit --intent), a change that contradicts it must park via
-	// an ask-user finding. The clause is empty for inferred intent, leaving the
-	// prompt unchanged. This is what makes a fixer round that removed a
-	// required behavior park instead of silently completing.
+	// criteria (explicit --intent), a change that contradicts it must become a
+	// finding whose action reflects the authority needed to restore or change
+	// the criterion. The clause is empty for inferred intent, leaving the prompt
+	// unchanged.
 	//
 	// Review is always pre-push (StepReview.Order < StepPush/PR/CI). The phase
 	// clause and the post-parse strip below keep pipeline-owned delivery
@@ -238,10 +238,12 @@ Rules:
 - Only comment on things that genuinely matter.
 - Do NOT report styling, formatting, linting, compilation, or type-checking issues.
 - If the change is clean, return an empty findings array.
-- For each finding, set the action field to one of:
-  - "ask-user": the finding is about functional requirements or product behavior, or otherwise challenges the author's deliberate intent. Even if it seems obviously wrong, we should ask the user for review. Examples: "this feature seems unnecessary", "this hardcoded value should be configurable", "this deletion looks wrong". When in doubt, default to "ask-user".
-  - "auto-fix": the finding is a non-functional, non user-visible issue (correctness, error handling, security, performance, mechanical code quality) that can be safely fixed without any discussion about the author's intent.
-  - "no-op": the finding is informational and does not require any action (e.g. noting a pattern, acknowledging a tradeoff).
+- For each finding, choose exactly one action. The action states who has the authority and context to resolve the finding; it is independent of severity:
+  - "no-op": informational only; no change is requested.
+  - "auto-fix": there is exactly one correct, bounded correction, established by currently authoritative evidence - the explicit intent, ratified design or design context, an existing contract or invariant, or tests that still stand. A fixer can implement and validate it without making any new product or guarantee decision. A user-visible fix can still be auto-fix when it restores already-established behavior; in that case the description MUST name the evidence that establishes it. Evidence this diff itself removed or changed does not count.
+  - "ask-master": the defect is real and stays within approved product behavior and guarantees, but resolving it safely needs non-local implementation judgment - several valid implementations, a bounded design choice, reconciliation across modules or lifecycles, or stronger contextual review. State what must be decided and the invariant the fix must preserve.
+  - "ask-user": a genuine unresolved decision owned by the user. Use only when the intent, design, contracts, invariants, and tests do not determine one outcome; at least two materially different outcomes are plausible; and the choice changes product behavior, scope, or a previously agreed guarantee. The description MUST state the exact decision, the options, the consequence of each, and a recommendation. Also use it for destructive or irreversible actions, outward-facing commitments, deploy go/no-go, project direction or priorities, or unusual spend.
+- Do not choose ask-user merely because a finding is severe, user-visible, mentions intent, or has a large diff. When uncertain HOW to fix approved behavior, choose ask-master. When uncertain WHAT the product should do, and the plausible outcomes differ in behavior or a guarantee, choose ask-user.
 - For each finding, set review_scope to exactly one of:
   - "source": every source-verifiable finding, including any finding that mixes a source defect with a delivery claim.
   - "pipeline-owned-delivery": only a finding whose sole claim is that this run's remote branch, push, PR, or CI output is not present yet.

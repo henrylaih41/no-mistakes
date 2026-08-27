@@ -186,12 +186,14 @@ func ciFailureOutcome(failing []string, mergeConflict bool, summary string) *pip
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "warning",
 			Description: fmt.Sprintf("CI check failing: %s", name),
+			Action:      types.ActionAskMaster,
 		})
 	}
 	if mergeConflict {
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "warning",
 			Description: "PR has merge conflicts with the base branch",
+			Action:      types.ActionAskMaster,
 		})
 	}
 	findingsJSON, _ := json.Marshal(findings)
@@ -202,7 +204,7 @@ func ciFailureOutcome(failing []string, mergeConflict bool, summary string) *pip
 }
 
 // consecutiveCheckErrorLimit bounds consecutive GetChecks failures before the
-// CI step parks at an ask-user gate. At the default 30s poll this is ~3 minutes
+// CI step parks at an ask-master gate. At the default 30s poll this is ~3 minutes
 // of a provider read that keeps failing, making a broken gh (e.g. < v2.50, which
 // rejects `gh pr checks --json`) an actionable stop instead of an invisible
 // spin to ci_timeout.
@@ -214,7 +216,7 @@ func ciCheckReadFailureOutcome(err error) *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: fmt.Sprintf("CI checks could not be read from the provider: %v. Verify that the provider CLI or credentials are installed, authenticated, and support the required check-reading command. For GitHub errors involving 'pr checks --json', gh >= 2.50 is required.", err),
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)
@@ -230,7 +232,7 @@ func ciMergeabilityOutcome(summary, description string) *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: description,
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)
@@ -246,7 +248,7 @@ func ciMonitoringTimeoutOutcome() *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: "PR was still open when CI monitoring timed out",
-			Action:      types.ActionAskUser,
+			Action:      types.ActionAskMaster,
 		}},
 	}
 	findingsJSON, _ := json.Marshal(findings)

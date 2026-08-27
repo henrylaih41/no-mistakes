@@ -206,8 +206,8 @@ func TestCIUnresolvedCancelledOutcomePreservesPreRunFailureCause(t *testing.T) {
 	if strings.Contains(description, "provider cancelled") {
 		t.Fatalf("description = %q, must not claim the provider cancelled a failed setup", description)
 	}
-	if findings.Items[0].Action != types.ActionAskUser {
-		t.Fatalf("action = %q, want ask-user parking", findings.Items[0].Action)
+	if findings.Items[0].Action != types.ActionAskMaster {
+		t.Fatalf("action = %q, want ask-master parking", findings.Items[0].Action)
 	}
 }
 

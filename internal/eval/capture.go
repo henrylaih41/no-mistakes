@@ -496,7 +496,7 @@ func decisionForRound(round *db.StepRound, step *db.StepResult) Decision {
 	}
 	if round.FindingsJSON != nil {
 		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
-		if err == nil && types.HasAskUserFindings(findings) && step.Status == types.StepStatusCompleted {
+		if err == nil && types.HasManualFindings(findings) && step.Status == types.StepStatusCompleted {
 			decision.Action = decisionApprove
 		}
 	}

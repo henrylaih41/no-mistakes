@@ -105,7 +105,7 @@ no-mistakes axi run --intent "the user's goal" --yes
 | Flag          | Type     | Default | Description                                                      |
 | ------------- | -------- | ------- | ---------------------------------------------------------------- |
 | `--intent`    | `string` | (none)  | What the user set out to accomplish; required to start a new run |
-| `-y`, `--yes` | `bool`   | `false` | Auto-resolve every gate until a decision point or outcome        |
+| `-y`, `--yes` | `bool`   | `false` | Auto-resolve readable gates until a decision point or outcome    |
 | `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
 
 `--intent` is not a description of the diff.
@@ -120,10 +120,11 @@ That refusal returns the complete structured state and its `continue_active_run`
 Reattaching to an in-flight run can proceed while the daemon is already running even if the global config file has become invalid, but starting a fresh run still requires valid global config.
 Starting a fresh run also requires a runnable effective pipeline agent.
 If the configured native agent or ACP runner is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
-With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
+With `--yes`, `axi run` treats `action: auto-fix`, `action: ask-master`, and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
-Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
-Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
+If a parked gate's findings JSON cannot be parsed, AXI renders `findings_unreadable` with a command for the full step log and `--yes` stops without fixing or approving that gate. The same fail-closed rule applies to `fix_review` and to a gate that `--yes` already tried to fix.
+Without `--yes`, `ask-master` routes to the documented gate owner for implementation judgment; if none exists it falls back to the user. `ask-user` routes only the concise unresolved choice, options, consequences, and recommendation to the user.
+Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking findings plus `ask-master` and `ask-user` review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
@@ -152,9 +153,9 @@ no-mistakes axi respond --action skip
 | `--findings`     | `string` | (none)        | Comma-separated finding IDs for `--action fix`                       |
 | `--instructions` | `string` | (none)        | Guidance applied to selected findings                                |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
-| `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve every subsequent gate until a decision point or outcome |
+| `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve readable subsequent gates until a decision point or outcome |
 
-After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix` and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when the CI monitor reports readiness but the PR still needs a human merge.
+After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix`, `ask-master`, and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when the CI monitor reports readiness but the PR still needs a human merge.
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome.
 If it returns another `gate:`, answer that gate; do not idle-wait for the run to move forward by itself.
 When the daemon is already running, `axi respond` can continue an active run even if the global config file has become invalid, because it is not starting a fresh run.

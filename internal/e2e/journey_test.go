@@ -1448,8 +1448,8 @@ func assertDocumentMissingFindingsRun(t *testing.T, h *Harness) {
 		t.Fatalf("expected one fallback documentation finding, got %+v", findings.Items)
 	}
 	item := findings.Items[0]
-	if item.Action != types.ActionAskUser {
-		t.Fatalf("expected fallback documentation finding to ask user, got action %q", item.Action)
+	if item.Action != types.ActionAskMaster {
+		t.Fatalf("expected fallback documentation finding to ask master, got action %q", item.Action)
 	}
 	if item.Description != "docs status unavailable" {
 		t.Fatalf("fallback documentation finding description = %q, want docs status unavailable", item.Description)
@@ -1484,8 +1484,8 @@ func assertDocumentMalformedFindingRun(t *testing.T, h *Harness) {
 		t.Fatalf("expected one fallback documentation finding, got %+v", findings.Items)
 	}
 	item := findings.Items[0]
-	if item.Action != types.ActionAskUser {
-		t.Fatalf("expected fallback documentation finding to ask user, got action %q", item.Action)
+	if item.Action != types.ActionAskMaster {
+		t.Fatalf("expected fallback documentation finding to ask master, got action %q", item.Action)
 	}
 	if item.Description != "README needs updating" {
 		t.Fatalf("fallback documentation finding description = %q, want README needs updating", item.Description)
@@ -1552,8 +1552,8 @@ func assertDocumentMissingSummaryRun(t *testing.T, h *Harness) {
 		t.Fatalf("expected one fallback documentation finding, got %+v", findings.Items)
 	}
 	item := findings.Items[0]
-	if item.Action != types.ActionAskUser {
-		t.Fatalf("expected missing-summary fallback documentation finding to ask user, got action %q", item.Action)
+	if item.Action != types.ActionAskMaster {
+		t.Fatalf("expected missing-summary fallback documentation finding to ask master, got action %q", item.Action)
 	}
 	if item.Description != "agent returned no structured output" {
 		t.Fatalf("missing-summary fallback description = %q, want agent returned no structured output", item.Description)

@@ -404,7 +404,7 @@ A poll that still reads the exact completion the rerun was requested for has obs
 A provider that accepts a rerun and never publishes it cannot stall the run past that.
 Once the provider publishes a conclusive replacement, no-mistakes durably stops treating that rerun as outstanding while preserving the spent budget; if the exact watched head is then green, the monitor reports `checks-passed` normally.
 
-A provider-attributed check that no rerun is going to replace pauses the step for user approval when it is the only remaining issue, so the pull request never looks green.
+A provider-attributed check that no rerun is going to replace pauses the step for gate-owner judgment when it is the only remaining issue, so the pull request never looks green.
 That includes a check that came back cancelled after its rerun and a detected GitHub setup failure that persisted after its budget.
 At the default budget of `0`, once the budget is spent, or on a provider with no rerun API, cancellation itself reaches this gate because the provider has published its conclusion and will not publish another one on its own.
 The check does not enter the `auto_fix.ci` loop and never consumes an auto-fix attempt: it is not a verdict on the code, so there is nothing for the fix agent to repair and no reason to let it edit code the provider never tested.

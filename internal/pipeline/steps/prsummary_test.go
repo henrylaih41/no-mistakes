@@ -16,6 +16,27 @@ import (
 
 const testPipelineHeadSHA = "0123456789abcdef0123456789abcdef01234567"
 
+func TestAwaitingApprovalDetailRoutesByFindingAuthority(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"ask-user", `{"findings":[{"action":"ask-user"}]}`, "Waiting for user approval."},
+		{"ask-master", `{"findings":[{"action":"ask-master"}]}`, "Waiting for master/gate-owner decision."},
+		{"unknown fails closed", `{"findings":[{"action":"future-owner"}]}`, "Waiting for master/gate-owner decision."},
+		{"unreadable fails closed", `{`, "Waiting for master/gate-owner decision."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sr := &db.StepResult{FindingsJSON: &tt.raw}
+			if got := awaitingApprovalDetail(sr); got != tt.want {
+				t.Fatalf("awaitingApprovalDetail() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildPipelineSummary_AllClean(t *testing.T) {
 	t.Parallel()
 	steps := []*db.StepResult{
