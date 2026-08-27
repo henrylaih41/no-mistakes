@@ -322,15 +322,15 @@ func installFakeCLIReviewAgent(t *testing.T, root, findingsJSON string) {
 	t.Helper()
 	fakeDir := t.TempDir()
 	fake := filepath.Join(fakeDir, "claude")
-	reply := `{"type":"assistant","message":{"usage":{"input_tokens":12,"output_tokens":3},"content":[{"type":"text","text":"review"}]}}
+	reply := `{"type":"assistant","message":{"usage":{"input_tokens":12,"output_tokens":3},"content":[{"type":"tool_use","name":"Read","input":{"path":"main.go"}},{"type":"text","text":"review"}]}}
 {"type":"result","subtype":"success","is_error":false,"structured_output":` + findingsJSON + `,"usage":{"input_tokens":12,"output_tokens":3}}
 `
 	var script string
 	if runtime.GOOS == "windows" {
 		fake += ".cmd"
-		script = "@echo off\r\nmore >nul\r\necho " + strings.ReplaceAll(strings.TrimSpace(reply), "\n", "\r\necho ") + "\r\n"
+		script = "@echo off\r\nmore >nul\r\nping -n 3 127.0.0.1 >nul\r\necho " + strings.ReplaceAll(strings.TrimSpace(reply), "\n", "\r\necho ") + "\r\n"
 	} else {
-		script = "#!/bin/sh\n[ \"$NM_HOME\" = \"" + root + "\" ] && touch \"" + root + "/shared-home-used\"\ncat >/dev/null\ncat <<'EOF'\n" + reply + "EOF\n"
+		script = "#!/bin/sh\n[ \"$NM_HOME\" = \"" + root + "\" ] && touch \"" + root + "/shared-home-used\"\ncat >/dev/null\nsleep 0.75\ncat <<'EOF'\n" + reply + "EOF\n"
 	}
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)

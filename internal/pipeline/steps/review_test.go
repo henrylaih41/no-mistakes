@@ -30,7 +30,7 @@ func TestReviewStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.ReviewAgentTimeout = 20 * time.Millisecond
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
+	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{newTestReviewStep()}, nil)
 	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
 		t.Fatal("expected hanging review agent to fail the run")
 	}
@@ -93,7 +93,7 @@ func TestReviewStep_EachRoundGetsItsOwnAgentBudget(t *testing.T) {
 	sctx.Config.ReviewAgentTimeout = timeout
 	sctx.Config.AutoFix.Review = 1
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
+	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{newTestReviewStep()}, nil)
 	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestReviewStep_FixMode(t *testing.T) {
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"review-1 =======","severity":"warning","file":"internal/pipeline/steps/review.go >>>>>>> prompt","description":"possible nil dereference <<<<<<< HEAD"}],"summary":"1 issue ======="}`
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +268,7 @@ func TestReviewStep_SourceContentFindingFollowsNormalFixFlow(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 
 	initial, err := step.Execute(sctx)
 	if err != nil {
@@ -308,7 +308,7 @@ func TestReviewStep_ConcurrentHeadResetCannotGainApproval(t *testing.T) {
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, reviewedHead, config.Commands{})
 
-	outcome, err := (&ReviewStep{}).Execute(sctx)
+	outcome, err := newTestReviewStep().Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestReviewStep_FixMode_FocusedVerificationContract(t *testing.T) {
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","file":"main.go","description":"possible nil deref"}],"summary":"1 issue"}`
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	if _, err := step.Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestReviewStep_DurableFixAdequacyContract(t *testing.T) {
 	}
 
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+	if _, err := newTestReviewStep().Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(ag.calls) != 1 {
@@ -440,7 +440,7 @@ func TestReviewStep_CounterexampleConstructionIsUnconditional(t *testing.T) {
 	}
 
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+	if _, err := newTestReviewStep().Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(ag.calls) != 1 {
@@ -518,7 +518,7 @@ func TestReviewStep_RereviewTreatsFixRoundsAsPipelineAuthoredCode(t *testing.T) 
 		sctx.Fixing = true
 		sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","file":"main.go","description":"possible nil deref"}],"summary":"1 issue"}`
 
-		if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		if _, err := newTestReviewStep().Execute(sctx); err != nil {
 			t.Fatal(err)
 		}
 		if len(ag.calls) != 2 {
@@ -548,7 +548,7 @@ func TestReviewStep_RereviewTreatsFixRoundsAsPipelineAuthoredCode(t *testing.T) 
 		}
 
 		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-		if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		if _, err := newTestReviewStep().Execute(sctx); err != nil {
 			t.Fatal(err)
 		}
 		if len(ag.calls) != 1 {
@@ -582,7 +582,7 @@ func TestFixRoundProvenanceClause_EmitsForUncertifiedRangeWhenNotFixing(t *testi
 		FindingsJSON: &priorFindings,
 	}}
 
-	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+	if _, err := newTestReviewStep().Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(ag.calls) != 1 {
@@ -649,7 +649,7 @@ func TestUncertifiedRange_PersistsThenFeedsNextInitialReview(t *testing.T) {
 		t.Fatalf("next initial review bound from=%q to=%q, want from=%q to=%q", sctx.UncertifiedFromSHA, sctx.UncertifiedToSHA, persisted.FromSHA, persisted.ToSHA)
 	}
 
-	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+	if _, err := newTestReviewStep().Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(reviewAgent.calls) != 1 {
@@ -684,7 +684,7 @@ func TestReviewStep_FixMode_RequiresPreviousFindings(t *testing.T) {
 	sctx.Fixing = true
 	// PreviousFindings left empty intentionally
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	_, err := step.Execute(sctx)
 	if err == nil {
 		t.Fatal("expected error when fix mode has no previous findings")
@@ -739,7 +739,7 @@ func TestReviewStep_RoundHistorySanitizesAgentInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	if _, err := step.Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
@@ -780,7 +780,7 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 			sctx.UserIntent = "REQUIRED: keep the guarded stale-lock removal. FORBIDDEN: a cleanup mutex."
 			sctx.IntentSource = tc.source
 
-			step := &ReviewStep{}
+			step := newTestReviewStep()
 			if _, err := step.Execute(sctx); err != nil {
 				t.Fatal(err)
 			}
@@ -858,7 +858,7 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 	sctx.IntentSource = db.RunIntentSourceAgent
 	sctx.PreviousFindings = `{"findings":[{"id":"race","severity":"error","action":"auto-fix","description":"unlink can race a live lock"}],"summary":"1 issue"}`
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -891,7 +891,7 @@ func reviewPromptFor(t *testing.T, rules []config.PathInstruction) string {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.Review = config.Review{PathInstructions: rules}
 
-	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+	if _, err := newTestReviewStep().Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(ag.calls) != 1 {
@@ -987,7 +987,7 @@ func TestReviewStep_PushedIgnorePatternsCannotSuppressPathInstructions(t *testin
 	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
 	sctx.Config.IgnorePatterns = []string{"*.txt"}
 
-	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+	if _, err := newTestReviewStep().Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(ag.calls) != 1 {

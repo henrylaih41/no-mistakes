@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"path"
 	"strings"
 )
@@ -8,8 +9,8 @@ import (
 // This file is the single authoritative definition of the local per-invocation
 // performance metrics and their boundaries. Every count, category, and timing
 // split recorded to agent_invocations is defined here so the semantics live in
-// exactly one place; the codex adapter fills them from its event stream, the
-// pipeline records them, and `no-mistakes stats` renders them, all against
+// exactly one place; instrumented adapters fill them from their event streams,
+// the pipeline records them, and `no-mistakes stats` renders them, all against
 // these definitions. Nothing here reads or stores prompts, outputs, diffs, or
 // raw command arguments - only bounded counts, categories, and durations.
 
@@ -87,11 +88,11 @@ type InvocationMetrics struct {
 	ToolCalls int
 	// ToolCategories is the per-sub-command histogram (see ToolCategoryCounts).
 	ToolCategories ToolCategoryCounts
-	// SubprocessWaitMS is the wall-clock spent inside tool subprocesses,
-	// measured by the reader as the sum of each tool item's started->completed
-	// interval. Combined with the invocation duration it separates subprocess
-	// wait from model/reasoning time (see ModelTimeMS).
-	SubprocessWaitMS int64
+	// SubprocessWaitMS is meaningful only when SubprocessWaitReported is true.
+	// Codex reports it from tool-item timing; adapters without this event pair
+	// leave it unknown instead of fabricating zero wait.
+	SubprocessWaitMS       int64
+	SubprocessWaitReported bool
 }
 
 // ModelTimeMS is the authoritative split of invocation wall-clock into
@@ -153,6 +154,31 @@ func ClassifyToolCommand(command string) []ToolCategory {
 		categories = append(categories, classifySubcommand(sub))
 	}
 	return categories
+}
+
+func structuredToolCommand(input json.RawMessage) string {
+	var payload struct {
+		Command json.RawMessage `json:"command"`
+	}
+	if len(input) == 0 || json.Unmarshal(input, &payload) != nil || len(payload.Command) == 0 {
+		return ""
+	}
+	var command string
+	if json.Unmarshal(payload.Command, &command) != nil {
+		return ""
+	}
+	return command
+}
+
+func classifyStructuredTool(name string) ToolCategory {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "read", "glob", "grep", "ls", "listfiles", "search", "view_file", "sed_file", "grep_search", "list_dir":
+		return ToolRead
+	case "edit", "write", "multiedit", "notebookedit", "replace_file_content", "multi_replace_file_content", "write_to_file", "notebook_edit":
+		return ToolEdit
+	default:
+		return ToolOther
+	}
 }
 
 // shellNames are the shells codex/agents wrap tool commands in.

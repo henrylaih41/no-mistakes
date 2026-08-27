@@ -83,6 +83,48 @@ func TestExecutor_ReviewMaxFixRoundsParksAtTriageAndRejectsPlainFix(t *testing.T
 	}
 }
 
+func TestExecutor_ReviewEvidenceFailureParksAtTriage(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				NeedsApproval: true,
+				NeedsTriage:   true,
+				Findings:      `{"findings":[{"id":"review-verdict-evidence","severity":"error","description":"invalid review evidence","action":"ask-master","source":"review-gate"}]}`,
+			}, nil
+		},
+	}
+	exec := NewExecutor(database, p, &config.Config{Review: config.Review{MaxFixRounds: 2}}, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingTriage)
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].Error == nil || !strings.Contains(*steps[0].Error, types.ReviewTriageReasonEvidence) {
+		t.Fatalf("triage reason = %v, want evidence failure", steps[0].Error)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{types.FindingIDReviewVerdictEvidence}); err == nil || !strings.Contains(err.Error(), "diagnostic") {
+		t.Fatalf("diagnostic evidence selection error = %v", err)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve evidence triage: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+}
+
 func TestExecutor_ReviewMaxFixRoundsOverrideRequiresReasonAndPersistsIt(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

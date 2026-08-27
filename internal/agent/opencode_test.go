@@ -71,6 +71,9 @@ func TestOpencodeAgent_FullFlow(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected result")
 	}
+	if result.Metrics == nil || result.Metrics.ModelRoundtrips != 1 || result.Metrics.ToolCalls != 0 {
+		t.Fatalf("activity metrics = %+v, want one text-only assistant response", result.Metrics)
+	}
 
 	// Verify structured output from response
 	var output map[string]any

@@ -124,6 +124,21 @@ func TestAntigravityParser(t *testing.T) {
 	}
 }
 
+func TestAntigravityParser_ReportsProviderTurnCountAsActivity(t *testing.T) {
+	stream := `{"event":"result","result":{"status":"SUCCESS","num_turns":3}}` + "\n"
+	p := &antigravityParser{}
+	if err := p.parse(context.Background(), bytes.NewBufferString(stream)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if p.metrics == nil {
+		t.Fatal("metrics = nil, want provider-reported activity")
+	}
+	if p.metrics.ModelRoundtrips != 3 {
+		t.Fatalf("ModelRoundtrips = %d, want provider-reported num_turns 3", p.metrics.ModelRoundtrips)
+	}
+}
+
 func TestAntigravityParser_ToolCallArrayDeltas(t *testing.T) {
 	stream := `
 {"event": "step_update", "step_update": {"tool_calls": [{"delta": "partial-"}, {"input_json_delta": "json-"}, {"arguments_delta": "args-"}, {"function": {"arguments": "{\"fn\":true}"}}]}}

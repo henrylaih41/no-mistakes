@@ -101,6 +101,9 @@ func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (
 // StepOutcome is the result of executing a pipeline step.
 type StepOutcome struct {
 	NeedsApproval bool // whether the step pauses for user action
+	// NeedsTriage parks this outcome at awaiting_triage independently of the
+	// review fix-round cap. It is reserved for results the gate cannot trust.
+	NeedsTriage   bool
 	AutoFixable   bool
 	Findings      string // JSON findings for TUI display (optional)
 	ExitCode      int    // process exit code (0 = success)

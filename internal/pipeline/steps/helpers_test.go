@@ -25,22 +25,34 @@ import (
 var testGitExecutable, _ = exec.LookPath("git")
 
 type mockAgent struct {
-	name  string
-	runFn func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
-	calls []agent.RunOpts
+	name                   string
+	runFn                  func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
+	calls                  []agent.RunOpts
+	preserveReviewEvidence bool
 }
 
 func (m *mockAgent) Name() string { return m.name }
 
 func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	m.calls = append(m.calls, opts)
+	var result *agent.Result
+	var err error
 	if m.runFn != nil {
-		return m.runFn(ctx, opts)
+		result, err = m.runFn(ctx, opts)
+	} else {
+		result = &agent.Result{}
 	}
-	return &agent.Result{}, nil
+	if err == nil && result != nil && opts.Purpose == "review" && !m.preserveReviewEvidence && result.Metrics == nil {
+		result.Metrics = &agent.InvocationMetrics{ModelRoundtrips: 2}
+	}
+	return result, err
 }
 
 func (m *mockAgent) Close() error { return nil }
+
+func newTestReviewStep() *ReviewStep {
+	return &ReviewStep{verdictMinimum: func(*agent.InvocationWorkload) time.Duration { return 0 }}
+}
 
 func gitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()

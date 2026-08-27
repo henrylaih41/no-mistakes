@@ -161,6 +161,7 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 		Usage:                 usage,
 		UsageReported:         usage.Reported,
 		CacheCreationReported: usage.CacheCreationReported,
+		Metrics:               &result.metrics,
 	}, nil
 }
 
@@ -283,6 +284,7 @@ type claudeResult struct {
 	rawEvent         json.RawMessage
 	sessionID        string // durable session identity from the event stream
 	model            string // model reported by assistant events
+	metrics          InvocationMetrics
 }
 
 type claudeUsage struct {
@@ -293,14 +295,17 @@ type claudeUsage struct {
 }
 
 type claudeMessage struct {
+	ID      string          `json:"id"`
 	Model   string          `json:"model"`
 	Usage   claudeUsage     `json:"usage"`
 	Content []claudeContent `json:"content"`
 }
 
 type claudeContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
@@ -311,6 +316,8 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	var textBuf string
 	var lastSessionID string
 	var lastModel string
+	var metrics InvocationMetrics
+	seenMessageIDs := make(map[string]struct{})
 
 	for scanner.Scan() {
 		select {
@@ -341,15 +348,36 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			if msg.Model != "" {
 				lastModel = msg.Model
 			}
-			usage.Add(TokenUsage{
-				InputTokens:           msg.Usage.InputTokens,
-				OutputTokens:          msg.Usage.OutputTokens,
-				CacheReadTokens:       msg.Usage.CacheReadInputTokens,
-				CacheCreationTokens:   msg.Usage.CacheCreationInputTokens,
-				Reported:              true,
-				CacheCreationReported: true,
-			})
+			newResponse := true
+			if msg.ID != "" {
+				if _, seen := seenMessageIDs[msg.ID]; seen {
+					newResponse = false
+				} else {
+					seenMessageIDs[msg.ID] = struct{}{}
+				}
+			}
+			if newResponse {
+				metrics.ModelRoundtrips++
+				usage.Add(TokenUsage{
+					InputTokens:           msg.Usage.InputTokens,
+					OutputTokens:          msg.Usage.OutputTokens,
+					CacheReadTokens:       msg.Usage.CacheReadInputTokens,
+					CacheCreationTokens:   msg.Usage.CacheCreationInputTokens,
+					Reported:              true,
+					CacheCreationReported: true,
+				})
+			}
 			for _, c := range msg.Content {
+				if newResponse && c.Type == "tool_use" && !strings.EqualFold(c.Name, "StructuredOutput") {
+					metrics.ToolCalls++
+					categories := ClassifyToolCommand(structuredToolCommand(c.Input))
+					if len(categories) == 0 {
+						categories = []ToolCategory{classifyStructuredTool(c.Name)}
+					}
+					for _, category := range categories {
+						metrics.ToolCategories.Add(category)
+					}
+				}
 				if c.Type == "text" && c.Text != "" {
 					textBuf += c.Text
 					if onChunk != nil {
@@ -370,6 +398,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 					rawEvent:         raw,
 					sessionID:        lastSessionID,
 					model:            lastModel,
+					metrics:          metrics,
 				}
 			}
 		}

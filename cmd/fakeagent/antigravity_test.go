@@ -105,6 +105,18 @@ func TestPatchAgyFixtureDropsStructuredOutputForPlainActions(t *testing.T) {
 	}
 }
 
+func TestAddAgyReviewEvidenceReportsMultipleTurns(t *testing.T) {
+	raw := []byte(`{"event":"result","result":{"status":"SUCCESS","response":"done","num_turns":1}}` + "\n")
+
+	patched, err := addAgyReviewEvidence(raw)
+	if err != nil {
+		t.Fatalf("addAgyReviewEvidence() error = %v", err)
+	}
+	if !strings.Contains(string(patched), `"num_turns":2`) {
+		t.Fatalf("review evidence should report a second provider turn:\n%s", patched)
+	}
+}
+
 func TestRunAgyReplaysRecordedFixture(t *testing.T) {
 	dir := t.TempDir()
 	fixture := filepath.Join(dir, "antigravity")

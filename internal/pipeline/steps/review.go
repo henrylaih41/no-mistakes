@@ -17,9 +17,57 @@ import (
 )
 
 // ReviewStep reviews the diff for bugs, security issues, and doc gaps.
-type ReviewStep struct{}
+type ReviewStep struct {
+	// verdictMinimum is a test seam. Production uses the bounded workload
+	// floor; unit tests for unrelated review behavior set it to zero.
+	verdictMinimum func(*agent.InvocationWorkload) time.Duration
+}
 
 func (s *ReviewStep) Name() types.StepName { return types.StepReview }
+
+func (s *ReviewStep) minimumVerdictDuration(workload *agent.InvocationWorkload) time.Duration {
+	if s.verdictMinimum != nil {
+		return s.verdictMinimum(workload)
+	}
+	return minimumReviewVerdictDuration(workload)
+}
+
+func (s *ReviewStep) runVerifiedReview(ctx context.Context, sctx *pipeline.StepContext, opts agent.RunOpts) (*agent.Result, *reviewVerdictFailure, error) {
+	started := time.Now()
+	result, err := sctx.RunAgentContext(ctx, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	initialEvidenceErr := validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	if initialEvidenceErr == nil {
+		return result, nil, nil
+	}
+
+	reviewer := "reviewer"
+	if sctx.Agent != nil && sctx.Agent.Name() != "" {
+		reviewer = sctx.Agent.Name()
+	}
+	sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", reviewer, initialEvidenceErr))
+	started = time.Now()
+	result, err = sctx.RunAgentContext(ctx, opts)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, err
+		}
+		return nil, &reviewVerdictFailure{
+			reviewer: reviewer,
+			reason:   fmt.Errorf("initial verdict: %v; cold retry failed: %w", initialEvidenceErr, err),
+		}, nil
+	}
+	retryEvidenceErr := validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	if retryEvidenceErr != nil {
+		return nil, &reviewVerdictFailure{
+			reviewer: reviewer,
+			reason:   fmt.Errorf("initial verdict: %v; cold retry: %w", initialEvidenceErr, retryEvidenceErr),
+		}, nil
+	}
+	return result, nil, nil
+}
 
 func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
@@ -206,7 +254,7 @@ Previous review findings to address:
 	pathInstructions := reviewPathInstructionsSection(pathInstructionMatches)
 
 	prompt := fmt.Sprintf(
-		`Review the code changes and return structured findings with a risk assessment.
+		agent.ReviewPromptOpening+`
 
 Context:
 - branch: %s
@@ -277,7 +325,7 @@ Risk assessment (after listing all findings):
 	// cross-round context a rereview legitimately needs travels in the
 	// explicit sanitized round-history section above; only the fixer keeps a
 	// durable session (executeFixMode), because it certifies nothing.
-	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
+	opts := agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		Env:        sctx.Env,
@@ -285,19 +333,16 @@ Risk assessment (after listing all findings):
 		OnChunk:    sctx.LogChunk,
 		Purpose:    "review",
 		Workload:   workload,
-	})
+	}
+	result, invalid, err := s.runVerifiedReview(ctx, sctx, opts)
 	if err != nil {
 		return nil, reviewAgentError(ctx, timeout, "agent review", err)
 	}
-
-	// Parse structured findings
-	var findings Findings
-	if result.Output != nil {
-		if err := json.Unmarshal(result.Output, &findings); err != nil {
-			sctx.Log("could not parse structured output, using text response")
-			findings = Findings{Summary: result.Text}
-		}
+	if invalid != nil {
+		return reviewVerdictTriageOutcome(*invalid, fixSummary), nil
 	}
+
+	findings := parseReviewFindings(result, sctx.Log)
 
 	// Phase ownership boundary: drop findings that only claim later pipeline-
 	// owned delivery (push/PR/CI for this run) has not happened yet. Prompt
@@ -317,6 +362,27 @@ Risk assessment (after listing all findings):
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
 	})
+}
+
+func parseReviewFindings(result *agent.Result, log func(string)) Findings {
+	var findings Findings
+	if result != nil && result.Output != nil {
+		if err := json.Unmarshal(result.Output, &findings); err != nil {
+			log("could not parse structured output, using text response")
+			findings = Findings{Summary: result.Text}
+		}
+	}
+	// The evidence ID/source pair is gate authority. A reviewer may report the
+	// same words as an ordinary finding, but cannot mint a gate diagnostic.
+	for i := range findings.Items {
+		if findings.Items[i].ID == types.FindingIDReviewVerdictEvidence {
+			findings.Items[i].ID = ""
+		}
+		if findings.Items[i].Source == types.FindingSourceReviewGate {
+			findings.Items[i].Source = ""
+		}
+	}
+	return types.NormalizeFindings(findings, "review")
 }
 
 // fixRoundProvenanceClause reframes a rereview's fix-round changes as

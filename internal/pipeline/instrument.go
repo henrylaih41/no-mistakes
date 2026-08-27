@@ -175,8 +175,10 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 		inv.ToolReadCalls = &read
 		inv.ToolGitCalls = &git
 		inv.ToolOtherCalls = &other
-		subprocessWait := m.SubprocessWaitMS
-		inv.SubprocessWaitMS = &subprocessWait
+		if m.SubprocessWaitReported {
+			subprocessWait := m.SubprocessWaitMS
+			inv.SubprocessWaitMS = &subprocessWait
+		}
 	}
 
 	if count, ok := countOutputFindings(result.Output); ok {

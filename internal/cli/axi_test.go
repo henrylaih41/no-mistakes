@@ -360,6 +360,33 @@ func TestWriteGateShapeAwaitingTriage(t *testing.T) {
 	}
 }
 
+func TestWriteGateShapeAwaitingEvidenceTriage(t *testing.T) {
+	gate := stepView{
+		Name:   "review",
+		Status: string(types.StepStatusAwaitingTriage),
+		Error:  types.ReviewTriageReasonEvidence,
+		FindingsJSON: findingsJSON(t, []types.Finding{{
+			ID: types.FindingIDReviewVerdictEvidence, Severity: "error", Source: types.FindingSourceReviewGate,
+			Action: types.ActionAskMaster, Description: "review evidence invalid",
+		}}, "review verdict evidence invalid after cold retry"),
+	}
+	out := axiDoc(gateFields(gate)...)
+	for _, want := range []string{
+		"status: awaiting_triage",
+		"Review verdict evidence failed after one cold retry",
+		"diagnostic and cannot be selected",
+		"no-mistakes axi respond --action approve",
+		"no-mistakes axi respond --action skip",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("evidence triage gate missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "--action fix") || strings.Contains(out, "--fix-override") {
+		t.Fatalf("evidence-only triage must not advertise a source-fix action:\n%s", out)
+	}
+}
+
 func TestWriteGateShapeAwaitingAgentRetry(t *testing.T) {
 	gate := stepView{Name: "test", Status: string(types.StepStatusAwaitingRetry), Error: "503 after retries", AgentAutoRetries: 1}
 	out := axiDoc(gateFields(gate)...)

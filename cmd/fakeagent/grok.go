@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func runGrok(args []string, scenario *Scenario) int {
+	started := time.Now()
 	prompt, err := extractGrokPrompt(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakeagent: grok prompt: %v\n", err)
@@ -19,12 +21,17 @@ func runGrok(args []string, scenario *Scenario) int {
 	if err := applyAction(action); err != nil {
 		return 1
 	}
+	waitForFakeReviewEvidence(started, prompt)
 
 	sessionID := argAfter(args, "--resume")
 	if sessionID == "" {
 		sessionID = "fake-grok-session"
 	}
 	enc := json.NewEncoder(os.Stdout)
+	content := []any{map[string]any{"type": "text", "text": action.textOrDefault()}}
+	if isReviewPrompt(prompt) {
+		content = append([]any{map[string]any{"type": "tool_use", "name": "Read"}}, content...)
+	}
 	_ = enc.Encode(map[string]any{
 		"type":       "system",
 		"subtype":    "init",
@@ -35,10 +42,8 @@ func runGrok(args []string, scenario *Scenario) int {
 		"type":       "assistant",
 		"session_id": sessionID,
 		"message": map[string]any{
-			"model": "grok-default",
-			"content": []any{
-				map[string]any{"type": "text", "text": action.textOrDefault()},
-			},
+			"model":   "grok-default",
+			"content": content,
 		},
 	})
 	_ = enc.Encode(map[string]any{

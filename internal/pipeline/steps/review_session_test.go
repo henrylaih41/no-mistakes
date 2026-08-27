@@ -40,6 +40,9 @@ func (m *sessionMockAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 	m.calls = append(m.calls, opts)
 
 	result := m.respond(opts)
+	if result != nil && opts.Purpose == "review" && result.Metrics == nil {
+		result.Metrics = &agent.InvocationMetrics{ModelRoundtrips: 2}
+	}
 	if opts.Session != nil {
 		if opts.Session.ID != "" {
 			result.SessionID = opts.Session.ID
@@ -142,7 +145,7 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 		}
 	}
 
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{newTestReviewStep()})
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -229,7 +232,7 @@ func TestReviewLoop_RereviewNeverResumesTheSessionThatPrescribedItsFixes(t *test
 		}
 	}
 
-	exec, _, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	exec, _, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{newTestReviewStep()})
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -265,7 +268,7 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 		}
 	}
 
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{newTestReviewStep()})
 	done := make(chan error, 1)
 	go func() {
 		done <- exec.Execute(context.Background(), run, repo, workDir)
@@ -316,7 +319,7 @@ func TestReviewLoop_OtherStepsStaySessionIsolated(t *testing.T) {
 		}
 	}
 
-	steps := []pipeline.Step{&ReviewStep{}, &DocumentStep{}, &LintStep{}}
+	steps := []pipeline.Step{newTestReviewStep(), &DocumentStep{}, &LintStep{}}
 	exec, _, run, repo, workDir := reviewSessionHarness(t, mock, steps)
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)

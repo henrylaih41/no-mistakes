@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"gopkg.in/yaml.v3"
 )
 
@@ -138,6 +139,23 @@ func applyActionInDir(wd string, action Action) error {
 		return err
 	}
 	return stageFilesInDir(wd, action.Stage)
+}
+
+// waitForFakeReviewEvidence keeps the repository's small fake source reviews
+// above their workload-scaled production floor. Adapter fixtures also emit
+// explicit activity evidence.
+func waitForFakeReviewEvidence(started time.Time, prompt string) {
+	if !isReviewPrompt(prompt) {
+		return
+	}
+	const minimum = 750 * time.Millisecond
+	if remaining := minimum - time.Since(started); remaining > 0 {
+		time.Sleep(remaining)
+	}
+}
+
+func isReviewPrompt(prompt string) bool {
+	return strings.Contains(prompt, agent.ReviewPromptOpening)
 }
 
 func applyEditsInDir(wd string, edits []Edit) error {

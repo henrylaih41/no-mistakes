@@ -7,9 +7,11 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 func runCodex(args []string, promptReader io.Reader, scenario *Scenario) int {
+	started := time.Now()
 	prompt, err := extractCodexPrompt(args, promptReader)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakeagent: codex prompt: %v\n", err)
@@ -21,6 +23,7 @@ func runCodex(args []string, promptReader io.Reader, scenario *Scenario) int {
 	if err := applyAction(action); err != nil {
 		return 1
 	}
+	waitForFakeReviewEvidence(started, prompt)
 
 	// Real codex constrains output to --output-schema, so the fake
 	// mirrors that by trimming the scenario's catch-all structured map
@@ -53,6 +56,9 @@ func runCodex(args []string, promptReader io.Reader, scenario *Scenario) int {
 			fmt.Fprintf(os.Stderr, "fakeagent: codex patch: %v\n", err)
 			return 1
 		}
+		if isReviewPrompt(prompt) {
+			patched = addCodexReviewEvidence(patched)
+		}
 		os.Stdout.Write(patched)
 		return 0
 	}
@@ -65,6 +71,16 @@ func runCodex(args []string, promptReader io.Reader, scenario *Scenario) int {
 	}
 
 	enc := json.NewEncoder(os.Stdout)
+	if isReviewPrompt(prompt) {
+		_ = enc.Encode(map[string]any{
+			"type": "item.started",
+			"item": map[string]any{"id": "fake-review-read", "type": "command_execution", "command": "git diff --stat"},
+		})
+		_ = enc.Encode(map[string]any{
+			"type": "item.completed",
+			"item": map[string]any{"id": "fake-review-read", "type": "command_execution", "command": "git diff --stat"},
+		})
+	}
 	_ = enc.Encode(map[string]any{
 		"type": "item.completed",
 		"item": map[string]any{
@@ -81,6 +97,12 @@ func runCodex(args []string, promptReader io.Reader, scenario *Scenario) int {
 		},
 	})
 	return 0
+}
+
+func addCodexReviewEvidence(raw []byte) []byte {
+	evidence := []byte("{\"type\":\"item.started\",\"item\":{\"id\":\"fake-review-read\",\"type\":\"command_execution\",\"command\":\"git diff --stat\"}}\n" +
+		"{\"type\":\"item.completed\",\"item\":{\"id\":\"fake-review-read\",\"type\":\"command_execution\",\"command\":\"git diff --stat\"}}\n")
+	return append(evidence, raw...)
 }
 
 // patchCodexFixture rewrites the agent_message item's text body to

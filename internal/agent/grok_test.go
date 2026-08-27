@@ -194,6 +194,22 @@ func TestParseGrokEventsStructuredSuccess(t *testing.T) {
 	}
 }
 
+func TestParseGrokEventsReportsReviewActivityMetrics(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"},{"type":"text","text":"inspecting"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	if err != nil {
+		t.Fatalf("parseGrokEvents() error = %v", err)
+	}
+	if result.Metrics == nil || result.Metrics.ModelRoundtrips != 1 || result.Metrics.ToolCalls != 1 || result.Metrics.ToolCategories.Read != 1 {
+		t.Fatalf("activity metrics = %+v, want one genuine round and one repository Read", result.Metrics)
+	}
+}
+
 func TestParseGrokEventsTreatsAllZeroUsageAsUnknown(t *testing.T) {
 	events := `{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"reasoning_tokens":0}}` + "\n"
 	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)

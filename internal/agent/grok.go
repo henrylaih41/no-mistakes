@@ -236,8 +236,10 @@ type grokMessage struct {
 }
 
 type grokContent struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 type grokUsage struct {
@@ -251,7 +253,7 @@ type grokUsage struct {
 func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*Result, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), grokScannerMaxTokenSize)
-	result := &Result{}
+	result := &Result{Metrics: &InvocationMetrics{}}
 	sawResult := false
 
 	for scanner.Scan() {
@@ -279,10 +281,23 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 			if err := json.Unmarshal(event.Message, &message); err != nil {
 				return nil, fmt.Errorf("decode assistant message: %w", err)
 			}
+			if len(message.Content) > 0 && !isGrokStructuredOutputEnvelope(message) {
+				result.Metrics.ModelRoundtrips++
+			}
 			if message.Model != "" && message.Model != "unknown" {
 				result.Model = message.Model
 			}
 			for _, content := range message.Content {
+				if content.Type == "tool_use" && !strings.EqualFold(content.Name, "StructuredOutput") {
+					result.Metrics.ToolCalls++
+					categories := ClassifyToolCommand(structuredToolCommand(content.Input))
+					if len(categories) == 0 {
+						categories = []ToolCategory{classifyStructuredTool(content.Name)}
+					}
+					for _, category := range categories {
+						result.Metrics.ToolCategories.Add(category)
+					}
+				}
 				if content.Type == "text" && content.Text != "" && onChunk != nil {
 					onChunk(content.Text)
 				}
@@ -318,6 +333,12 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 		return nil, fmt.Errorf("grok returned no result event")
 	}
 	return result, nil
+}
+
+func isGrokStructuredOutputEnvelope(message grokMessage) bool {
+	return len(message.Content) == 1 &&
+		message.Content[0].Type == "tool_use" &&
+		strings.EqualFold(message.Content[0].Name, "StructuredOutput")
 }
 
 func normalizedGrokUsage(raw *grokUsage) TokenUsage {

@@ -51,6 +51,33 @@ func TestAccumulateUsage(t *testing.T) {
 	}
 }
 
+func TestParseOpencodeSSE_ReportsDistinctProductiveActivity(t *testing.T) {
+	input := `data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"asst-1","role":"assistant"}}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"tool-1","messageID":"asst-1","type":"tool","tool":"view_file","callID":"call-1"}}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"tool-1","messageID":"asst-1","type":"tool","tool":"view_file","callID":"call-1"}}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"output-1","messageID":"asst-1","type":"tool","tool":"StructuredOutput","callID":"call-output"}}}}
+
+data: {"payload":{"type":"session.idle"}}
+
+`
+	state := &opencodeStreamState{
+		sessionID:  "s1",
+		textParts:  make(map[string]*opencodeTextPart),
+		usageByMsg: make(map[string]TokenUsage),
+	}
+	if err := parseOpencodeSSE(strings.NewReader(input), state); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	metrics := state.invocationMetrics()
+	if metrics.ModelRoundtrips != 2 || metrics.ToolCalls != 1 || metrics.ToolCategories.Read != 1 {
+		t.Fatalf("activity metrics = %+v, want one assistant response plus one distinct repository read", metrics)
+	}
+}
+
 func TestParseOpencodeSSE_PartDelta(t *testing.T) {
 	input := `data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"s1","field":"text","partID":"p1","delta":"hello "}}}
 

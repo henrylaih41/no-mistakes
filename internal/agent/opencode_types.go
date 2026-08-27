@@ -30,6 +30,8 @@ type opencodeEventPart struct {
 	ID        string            `json:"id,omitempty"`
 	MessageID string            `json:"messageID,omitempty"`
 	Type      string            `json:"type,omitempty"`
+	Tool      string            `json:"tool,omitempty"`
+	CallID    string            `json:"callID,omitempty"`
 	Text      string            `json:"text,omitempty"`
 	Tokens    *opencodeTokens   `json:"tokens,omitempty"`
 	Metadata  *opencodeMetadata `json:"metadata,omitempty"`
@@ -212,7 +214,10 @@ func (e *opencodeMessageError) retryable() bool {
 }
 
 type opencodeMessagePart struct {
+	ID       string            `json:"id,omitempty"`
 	Type     string            `json:"type,omitempty"`
+	Tool     string            `json:"tool,omitempty"`
+	CallID   string            `json:"callID,omitempty"`
 	Text     string            `json:"text,omitempty"`
 	Metadata *opencodeMetadata `json:"metadata,omitempty"`
 }
@@ -237,7 +242,9 @@ type opencodeStreamState struct {
 	lastFinalText   string
 	userMsgIDs      map[string]bool
 	assistantMsgIDs map[string]bool
+	toolPartIDs     map[string]bool
 	filteredPartIDs map[string]bool
+	metrics         InvocationMetrics
 	hasEmittedText  bool
 
 	// pendingStepSeparator marks a completed model step so the next emitted

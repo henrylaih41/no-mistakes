@@ -214,6 +214,9 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 	responseText := ""
 	responseFinalText := ""
 	if mr.resp != nil && mr.resp.Info != nil {
+		if mr.resp.Info.Role == "assistant" {
+			state.recordAssistantMessage(mr.resp.Info.ID)
+		}
 		streamedText := state.lastText
 		streamedFinalText := state.lastFinalText
 		emitResponseChunk := func(chunk string) {
@@ -229,6 +232,9 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 			state.usage = accumulateUsage(state.usageByMsg)
 		}
 		for _, part := range mr.resp.Parts {
+			if isOpencodeToolPart(part.Type) {
+				state.recordProductiveTool(part.ID, part.CallID, part.Tool)
+			}
 			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
 				continue
 			}
@@ -262,6 +268,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 			}
 		}
 	}
+	metrics := state.invocationMetrics()
 
 	// Prefer structured output from response
 	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Structured != nil {
@@ -271,6 +278,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 			Usage:                 state.usage,
 			UsageReported:         state.usage.Reported,
 			CacheCreationReported: state.usage.CacheCreationReported,
+			Metrics:               &metrics,
 		}, nil
 	}
 
@@ -308,6 +316,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 		// wrote. It takes the same gate as the rest.
 		return nil, opencodeTurnFailure(evidence, err)
 	}
+	result.Metrics = &metrics
 	return result, nil
 }
 

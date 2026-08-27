@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 func runClaude(args []string, promptReader io.Reader, scenario *Scenario) int {
+	started := time.Now()
 	prompt, err := extractClaudePrompt(args, promptReader)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakeagent: claude prompt: %v\n", err)
@@ -20,6 +22,7 @@ func runClaude(args []string, promptReader io.Reader, scenario *Scenario) int {
 	if err := applyAction(action); err != nil {
 		return 1
 	}
+	waitForFakeReviewEvidence(started, prompt)
 
 	// Fixture mode: replay the real claude wire envelope captured by
 	// recordfixture, but splice in scenario-driven content for the
@@ -43,11 +46,18 @@ func runClaude(args []string, promptReader io.Reader, scenario *Scenario) int {
 			fmt.Fprintf(os.Stderr, "fakeagent: claude patch: %v\n", err)
 			return 1
 		}
+		if isReviewPrompt(prompt) {
+			patched = addClaudeReviewEvidence(patched)
+		}
 		os.Stdout.Write(patched)
 		return 0
 	}
 
 	enc := json.NewEncoder(os.Stdout)
+	content := []any{map[string]any{"type": "text", "text": action.textOrDefault()}}
+	if isReviewPrompt(prompt) {
+		content = append([]any{map[string]any{"type": "tool_use", "name": "Read"}}, content...)
+	}
 
 	// Match the real claude CLI's JSONL stream-json format. Real claude
 	// emits init + assistant + result events; no-mistakes' parser ignores
@@ -61,9 +71,7 @@ func runClaude(args []string, promptReader io.Reader, scenario *Scenario) int {
 				"input_tokens":  100,
 				"output_tokens": 50,
 			},
-			"content": []any{
-				map[string]any{"type": "text", "text": action.textOrDefault()},
-			},
+			"content": content,
 		},
 	})
 	_ = enc.Encode(map[string]any{
@@ -77,6 +85,11 @@ func runClaude(args []string, promptReader io.Reader, scenario *Scenario) int {
 		},
 	})
 	return 0
+}
+
+func addClaudeReviewEvidence(raw []byte) []byte {
+	evidence := []byte("{\"type\":\"assistant\",\"message\":{\"id\":\"fake-review-read\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0},\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\"}]}}\n")
+	return append(evidence, raw...)
 }
 
 // patchClaudeFixture rewrites the result event's structured_output to

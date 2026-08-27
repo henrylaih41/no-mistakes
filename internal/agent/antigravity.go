@@ -145,10 +145,13 @@ func (a *antigravityAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, 
 
 	text := pp.finalText()
 	res, err := finalizeTextResult("antigravity", text, opts.JSONSchema, pp.usage)
-	if res != nil && pp.sessionID != "" {
-		res.SessionID = pp.sessionID
-		res.Provider = "antigravity"
-		res.Resumed = requestedSession != "" && requestedSession == pp.sessionID
+	if res != nil {
+		res.Metrics = pp.metrics
+		if pp.sessionID != "" {
+			res.SessionID = pp.sessionID
+			res.Provider = "antigravity"
+			res.Resumed = requestedSession != "" && requestedSession == pp.sessionID
+		}
 	}
 	emitAgentExited(opts, "antigravity", pid, err)
 	return res, err
@@ -162,6 +165,7 @@ type antigravityParser struct {
 	structured   string
 	response     string
 	usage        TokenUsage
+	metrics      *InvocationMetrics
 	errorMessage string
 }
 
@@ -220,7 +224,7 @@ type agyResultData struct {
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 	Error            string          `json:"error,omitempty"`
 	DurationSecs     float64         `json:"duration_seconds"`
-	NumTurns         int             `json:"num_turns"`
+	NumTurns         *int            `json:"num_turns"`
 	Usage            *agyUsageData   `json:"usage,omitempty"`
 }
 
@@ -349,6 +353,13 @@ func (p *antigravityParser) parse(ctx context.Context, r io.Reader) error {
 				} else {
 					p.errorMessage = "unknown error"
 				}
+			}
+			if res.NumTurns != nil {
+				turns := *res.NumTurns
+				if turns < 0 {
+					turns = 0
+				}
+				p.metrics = &InvocationMetrics{ModelRoundtrips: turns}
 			}
 			// The terminal answer is authoritative wherever agy puts it:
 			// result.response outranks stream deltas even when some were

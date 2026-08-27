@@ -103,6 +103,7 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 				}
 				if isOpencodeToolPart(p.Type) {
 					state.toolInvoked = true
+					state.recordProductiveTool(p.ID, p.CallID, p.Tool)
 				}
 				if p.Type == "step-finish" {
 					state.pendingStepSeparator = true
@@ -123,10 +124,7 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 					state.dropMessageParts(props.Info.ID)
 				}
 				if props.Info.Role == "assistant" {
-					if state.assistantMsgIDs == nil {
-						state.assistantMsgIDs = make(map[string]bool)
-					}
-					state.assistantMsgIDs[props.Info.ID] = true
+					state.recordAssistantMessage(props.Info.ID)
 					state.emitBufferedMessageParts(props.Info.ID)
 				}
 				if props.Info.Role == "assistant" && props.Info.Tokens != nil {
@@ -154,6 +152,50 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 		// will provide the final result
 	}
 	return nil
+}
+
+func (s *opencodeStreamState) recordAssistantMessage(messageID string) {
+	if s == nil || messageID == "" {
+		return
+	}
+	if s.assistantMsgIDs == nil {
+		s.assistantMsgIDs = make(map[string]bool)
+	}
+	if s.assistantMsgIDs[messageID] {
+		return
+	}
+	s.assistantMsgIDs[messageID] = true
+	s.metrics.ModelRoundtrips++
+}
+
+func (s *opencodeStreamState) recordProductiveTool(partID, callID, tool string) {
+	if s == nil || strings.EqualFold(strings.TrimSpace(tool), "StructuredOutput") {
+		return
+	}
+	key := partID
+	if key == "" {
+		key = callID
+	}
+	if key == "" {
+		return
+	}
+	if s.toolPartIDs == nil {
+		s.toolPartIDs = make(map[string]bool)
+	}
+	if s.toolPartIDs[key] {
+		return
+	}
+	s.toolPartIDs[key] = true
+	s.metrics.ModelRoundtrips++
+	s.metrics.ToolCalls++
+	s.metrics.ToolCategories.Add(classifyStructuredTool(tool))
+}
+
+func (s *opencodeStreamState) invocationMetrics() InvocationMetrics {
+	if s == nil {
+		return InvocationMetrics{}
+	}
+	return s.metrics
 }
 
 func (s *opencodeStreamState) emitSeparatorIfNeeded() {

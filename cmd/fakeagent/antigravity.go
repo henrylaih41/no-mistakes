@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func runAgy(args []string, scenario *Scenario) int {
+	started := time.Now()
 	prompt, err := extractAgyPrompt(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakeagent: agy prompt: %v\n", err)
@@ -20,6 +22,7 @@ func runAgy(args []string, scenario *Scenario) int {
 	if err := applyAction(action); err != nil {
 		return 1
 	}
+	waitForFakeReviewEvidence(started, prompt)
 
 	// Fixture mode: replay the real agy wire envelope captured from a
 	// live headless run, splicing scenario-driven content into the fields
@@ -38,6 +41,13 @@ func runAgy(args []string, scenario *Scenario) int {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fakeagent: agy patch: %v\n", err)
 			return 1
+		}
+		if isReviewPrompt(prompt) {
+			patched, err = addAgyReviewEvidence(patched)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "fakeagent: agy review evidence: %v\n", err)
+				return 1
+			}
 		}
 		os.Stdout.Write(patched)
 		return 0
@@ -66,13 +76,17 @@ func runAgy(args []string, scenario *Scenario) int {
 			},
 		},
 	})
+	numTurns := 1
+	if isReviewPrompt(prompt) {
+		numTurns = 2
+	}
 	result := map[string]any{
 		"event": "result",
 		"result": map[string]any{
 			"conversation_id": "fake-agy-session",
 			"status":          "SUCCESS",
 			"response":        action.textOrDefault(),
-			"num_turns":       1,
+			"num_turns":       numTurns,
 			"usage": map[string]any{
 				"input_tokens":      100,
 				"output_tokens":     50,
@@ -87,6 +101,40 @@ func runAgy(args []string, scenario *Scenario) int {
 	}
 	_ = enc.Encode(result)
 	return 0
+}
+
+// addAgyReviewEvidence preserves the recorded stream while making the fake
+// review's provider-owned turn count reflect a repository inspection turn
+// followed by the final verdict turn.
+func addAgyReviewEvidence(raw []byte) ([]byte, error) {
+	var out bytes.Buffer
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if len(line) == 0 {
+			out.WriteByte('\n')
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			out.Write(line)
+			out.WriteByte('\n')
+			continue
+		}
+		if event["event"] == "result" {
+			result, _ := event["result"].(map[string]any)
+			if result != nil {
+				result["num_turns"] = 2
+				event["result"] = result
+				patched, err := json.Marshal(event)
+				if err != nil {
+					return nil, fmt.Errorf("marshal review result: %w", err)
+				}
+				line = patched
+			}
+		}
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	return out.Bytes(), nil
 }
 
 // patchAgyFixture rewrites the agent_response text delta and the terminal
