@@ -44,7 +44,7 @@ func TestReviewStep_FixMode(t *testing.T) {
 		Content: "accepted design contract",
 	}}}
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestReviewStep_FixMode_FocusedVerificationContract(t *testing.T) {
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","file":"main.go","description":"possible nil deref"}],"summary":"1 issue"}`
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	if _, err := step.Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestReviewStep_FixMode_RequiresPreviousFindings(t *testing.T) {
 	sctx.Fixing = true
 	// PreviousFindings left empty intentionally
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	_, err := step.Execute(sctx)
 	if err == nil {
 		t.Fatal("expected error when fix mode has no previous findings")
@@ -263,7 +263,7 @@ func TestReviewStep_RoundHistorySanitizesAgentInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	if _, err := step.Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 			sctx.UserIntent = "REQUIRED: keep the guarded stale-lock removal. FORBIDDEN: a cleanup mutex."
 			sctx.IntentSource = tc.source
 
-			step := &ReviewStep{}
+			step := newTestReviewStep()
 			if _, err := step.Execute(sctx); err != nil {
 				t.Fatal(err)
 			}
@@ -386,7 +386,7 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 	sctx.IntentSource = db.RunIntentSourceAgent
 	sctx.PreviousFindings = `{"findings":[{"id":"race","severity":"error","action":"auto-fix","description":"unlink can race a live lock"}],"summary":"1 issue"}`
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)

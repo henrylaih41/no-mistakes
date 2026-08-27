@@ -755,7 +755,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	} else {
 		wrapped := make([]agent.Agent, 0, len(reviewers))
 		for _, reviewer := range reviewers {
-			wrapped = append(wrapped, &lifecycleAgent{inner: reviewer, onLifecycle: onAgentLifecycle})
+			wrappedReviewer := agent.Agent(&lifecycleAgent{inner: reviewer, onLifecycle: onAgentLifecycle})
+			wrappedReviewer = &perfRecordingAgent{
+				inner:    wrappedReviewer,
+				db:       e.db,
+				runID:    run.ID,
+				stepName: stepName,
+				round:    func() int { return roundNum + 1 },
+			}
+			wrapped = append(wrapped, wrappedReviewer)
 		}
 		reviewers = wrapped
 	}
@@ -987,7 +995,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				diffText = d
 			}
 		}
-		if reviewCapReached {
+		if reviewCapReached || outcome.NeedsTriage {
 			approvalStatus = types.StepStatusAwaitingTriage
 		} else if sctx.Fixing {
 			approvalStatus = types.StepStatusFixReview

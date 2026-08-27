@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -33,13 +34,51 @@ type reviewerReport struct {
 // per-reviewer worktree. A reviewer that writes files is a misconfiguration,
 // not a scenario this code defends against - so shared-worktree concurrency is
 // not a data-safety issue here and should not be flagged as one.
-func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts agent.RunOpts) (Findings, error) {
+func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts agent.RunOpts, verdictFloor time.Duration) (Findings, []reviewVerdictFailure, error) {
 	opts.OnChunk = nil
 	results := agent.FanOut(sctx.Ctx, reviewers, opts, sctx.Config.Review.MaxParallel)
 
+	// A validity failure is categorically different from an ordinary reviewer
+	// process error: review.fail_open must never drop it. Retry only invalid
+	// slots once, cold, then return durable triage failures for any reviewer
+	// that still cannot prove a real review turn occurred.
+	for idx := range results {
+		res := &results[idx]
+		if res.Err != nil {
+			continue
+		}
+		if err := validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor); err != nil {
+			name := res.Agent.Name()
+			sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", name, err))
+			coldOpts := opts
+			coldOpts.Session = nil
+			started := time.Now()
+			result, retryErr := res.Agent.Run(sctx.Ctx, coldOpts)
+			res.Result = result
+			res.Err = retryErr
+			res.Duration = time.Since(started)
+			if retryErr != nil {
+				return Findings{}, nil, fmt.Errorf("review panel: reviewer %q cold retry after invalid verdict failed: %w", name, retryErr)
+			}
+		}
+	}
+
+	var invalid []reviewVerdictFailure
+	for _, res := range results {
+		if res.Err != nil {
+			continue
+		}
+		if err := validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor); err != nil {
+			invalid = append(invalid, reviewVerdictFailure{reviewer: res.Agent.Name(), reason: err})
+		}
+	}
+	if len(invalid) > 0 {
+		return Findings{}, invalid, nil
+	}
+
 	reports, err := processReviewerResults(results, sctx.Config.Review.FailOpen, sctx.Log, sctx.LogFile)
 	if err != nil {
-		return Findings{}, err
+		return Findings{}, nil, err
 	}
 
 	// Per-reviewer user-visible summary, emitted serially from the main
@@ -52,7 +91,7 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 		sctx.Log(fmt.Sprintf("[reviewer %s] %d finding(s), risk=%s", r.Name, len(r.Findings.Items), risk))
 	}
 
-	return combineReviewerFindings(reports), nil
+	return combineReviewerFindings(reports), nil, nil
 }
 
 // processReviewerResults turns FanOut results into attributed reviewer reports,

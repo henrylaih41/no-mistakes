@@ -141,6 +141,20 @@ func applyActionInDir(wd string, action Action) error {
 	return stageFilesInDir(wd, action.Stage)
 }
 
+// waitForFakeReviewEvidence keeps successful fake review invocations above the
+// production review wall-time cap. The fake also emits explicit tool activity;
+// together those make e2e reviews representative without weakening the real
+// gate contract or adding a production-only bypass.
+func waitForFakeReviewEvidence(started time.Time, prompt string) {
+	if !strings.Contains(prompt, "Review the code changes and return structured findings") {
+		return
+	}
+	const minimum = 2100 * time.Millisecond
+	if remaining := minimum - time.Since(started); remaining > 0 {
+		time.Sleep(remaining)
+	}
+}
+
 func applyEditsInDir(wd string, edits []Edit) error {
 	wd, err := filepath.Abs(wd)
 	if err != nil {

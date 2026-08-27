@@ -193,7 +193,7 @@ Everything sent remotely is low-cardinality: command names, statuses, durations,
 Run IDs, repository paths, branch names, session identities, prompts, model outputs, diffs, and per-invocation performance records are never sent.
 
 Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per recorded pipeline-agent invocation, plus each run's accumulated parked-at-gate time.
-Configured review-panel member invocations are not currently included in these records or their derived local and remote performance counts; available lifecycle activity from those reviewers remains visible in the review step log and AXI activity instead.
+Configured review-panel member invocations are included as separate `purpose=review` records, including duration, workload, reported token usage, model round-trips, and tool activity when their adapters surface those fields.
 Each row records run and step identity, purpose (such as review/review-fix/housekeeping), the reported model and its provider, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
 

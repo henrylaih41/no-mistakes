@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 )
 
 func runClaude(args []string, scenario *Scenario) int {
+	started := time.Now()
 	prompt := extractClaudePrompt(args)
 	logInvocation("claude", prompt, args)
 
@@ -15,6 +18,7 @@ func runClaude(args []string, scenario *Scenario) int {
 	if err := applyAction(action); err != nil {
 		return 1
 	}
+	waitForFakeReviewEvidence(started, prompt)
 
 	// Fixture mode: replay the real claude wire envelope captured by
 	// recordfixture, but splice in scenario-driven content for the
@@ -43,6 +47,12 @@ func runClaude(args []string, scenario *Scenario) int {
 	}
 
 	enc := json.NewEncoder(os.Stdout)
+	content := []any{
+		map[string]any{"type": "text", "text": action.textOrDefault()},
+	}
+	if strings.Contains(prompt, "Review the code changes and return structured findings") {
+		content = append([]any{map[string]any{"type": "tool_use", "name": "Read"}}, content...)
+	}
 
 	// Match the real claude CLI's JSONL stream-json format. Real claude
 	// emits init + assistant + result events; no-mistakes' parser ignores
@@ -56,9 +66,7 @@ func runClaude(args []string, scenario *Scenario) int {
 				"input_tokens":  100,
 				"output_tokens": 50,
 			},
-			"content": []any{
-				map[string]any{"type": "text", "text": action.textOrDefault()},
-			},
+			"content": content,
 		},
 	})
 	_ = enc.Encode(map[string]any{

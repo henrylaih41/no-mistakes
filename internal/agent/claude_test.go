@@ -245,6 +245,36 @@ func TestParseClaudeEvents_MultipleEvents(t *testing.T) {
 	}
 }
 
+func TestParseClaudeEvents_ReportsReviewActivityMetrics(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","name":"Read"}]}}`,
+		`{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","name":"StructuredOutput"}]}}`,
+		`{"type":"result","subtype":"success","structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatalf("parseClaudeEvents() error = %v", err)
+	}
+	result, err := finalizeClaudeResult(parsed, json.RawMessage(`{"type":"object"}`), usage)
+	if err != nil {
+		t.Fatalf("finalizeClaudeResult() error = %v", err)
+	}
+	if result.Metrics == nil {
+		t.Fatal("Claude activity metrics are unknown")
+	}
+	if result.Metrics.ModelRoundtrips != 2 {
+		t.Fatalf("model roundtrips = %d, want 2", result.Metrics.ModelRoundtrips)
+	}
+	if result.Metrics.ToolCalls != 1 {
+		t.Fatalf("tool calls = %d, want only the repository Read tool (StructuredOutput is not review activity)", result.Metrics.ToolCalls)
+	}
+	if result.Metrics.ToolCategories.Read != 1 {
+		t.Fatalf("read tool calls = %d, want 1", result.Metrics.ToolCategories.Read)
+	}
+}
+
 func TestParseClaudeEvents_NoSeparatorForFirstMessage(t *testing.T) {
 	events := `{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"only message"}]}}
 `

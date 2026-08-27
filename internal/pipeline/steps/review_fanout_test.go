@@ -57,7 +57,7 @@ func TestReviewStep_FanOut_InitialReviewMergesBothReviewers(t *testing.T) {
 	sctx := newTestContext(t, fixAgent, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Reviewers = []agent.Agent{codex, claude}
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestReviewStep_FanOut_RunsInFixMode(t *testing.T) {
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","description":"earlier","action":"auto-fix"}],"summary":"1 issue"}`
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestReviewStep_FanOut_FailClosedFailsStep(t *testing.T) {
 	sctx.Reviewers = []agent.Agent{codex, claude}
 	// Config.Review.FailOpen defaults to false (fail-closed).
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	_, err := step.Execute(sctx)
 	if err == nil {
 		t.Fatal("expected the step to fail closed when a reviewer errors")
@@ -196,7 +196,7 @@ func TestReviewStep_FanOut_FailOpenContinues(t *testing.T) {
 	sctx.Reviewers = []agent.Agent{codex, claude}
 	sctx.Config.Review.FailOpen = true
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatalf("fail-open should survive a single reviewer error: %v", err)
@@ -210,5 +210,43 @@ func TestReviewStep_FanOut_FailOpenContinues(t *testing.T) {
 	}
 	if merged.Items[0].Source != "codex" {
 		t.Errorf("surviving finding source = %q, want codex", merged.Items[0].Source)
+	}
+}
+
+func TestReviewStep_FanOut_FailOpenCannotDropInvalidVerdict(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	valid := &mockAgent{name: "codex", runFn: reviewReturning(Findings{
+		RiskLevel:     "low",
+		RiskRationale: "clean",
+	})}
+	invalid := &mockAgent{
+		name:                   "claude",
+		preserveReviewEvidence: true,
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{
+				Output:  []byte(`{"findings":[],"summary":"clean","risk_level":"low"}`),
+				Metrics: &agent.InvocationMetrics{ModelRoundtrips: 1},
+			}, nil
+		},
+	}
+	sctx := newTestContext(t, &mockAgent{name: "fixer"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Reviewers = []agent.Agent{valid, invalid}
+	sctx.Config.Review.FailOpen = true
+	sctx.Config.Review.Reviewers = []config.ReviewerSpec{{Agent: types.AgentCodex}, {Agent: types.AgentClaude}}
+
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !outcome.NeedsTriage {
+		t.Fatal("invalid verdict must park even when review.fail_open=true")
+	}
+	if got := len(invalid.calls); got != 2 {
+		t.Fatalf("invalid reviewer calls = %d, want initial + one retry", got)
+	}
+	if got := len(valid.calls); got != 1 {
+		t.Fatalf("valid reviewer calls = %d, want 1", got)
 	}
 }

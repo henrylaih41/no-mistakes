@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func runCodex(args []string, scenario *Scenario) int {
+	started := time.Now()
 	prompt := extractCodexPrompt(args)
 	logInvocation("codex", prompt, args)
 
@@ -16,6 +18,7 @@ func runCodex(args []string, scenario *Scenario) int {
 	if err := applyAction(action); err != nil {
 		return 1
 	}
+	waitForFakeReviewEvidence(started, prompt)
 
 	// Real codex constrains output to --output-schema, so the fake
 	// mirrors that by trimming the scenario's catch-all structured map
@@ -48,6 +51,9 @@ func runCodex(args []string, scenario *Scenario) int {
 			fmt.Fprintf(os.Stderr, "fakeagent: codex patch: %v\n", err)
 			return 1
 		}
+		if strings.Contains(prompt, "Review the code changes and return structured findings") {
+			patched = addCodexReviewEvidence(patched)
+		}
 		os.Stdout.Write(patched)
 		return 0
 	}
@@ -60,6 +66,16 @@ func runCodex(args []string, scenario *Scenario) int {
 	}
 
 	enc := json.NewEncoder(os.Stdout)
+	if strings.Contains(prompt, "Review the code changes and return structured findings") {
+		_ = enc.Encode(map[string]any{
+			"type": "item.started",
+			"item": map[string]any{"id": "fake-review-read", "type": "command_execution", "command": "git diff --stat"},
+		})
+		_ = enc.Encode(map[string]any{
+			"type": "item.completed",
+			"item": map[string]any{"id": "fake-review-read", "type": "command_execution", "command": "git diff --stat"},
+		})
+	}
 	_ = enc.Encode(map[string]any{
 		"type": "item.completed",
 		"item": map[string]any{
@@ -76,6 +92,12 @@ func runCodex(args []string, scenario *Scenario) int {
 		},
 	})
 	return 0
+}
+
+func addCodexReviewEvidence(raw []byte) []byte {
+	evidence := []byte("{\"type\":\"item.started\",\"item\":{\"id\":\"fake-review-read\",\"type\":\"command_execution\",\"command\":\"git diff --stat\"}}\n" +
+		"{\"type\":\"item.completed\",\"item\":{\"id\":\"fake-review-read\",\"type\":\"command_execution\",\"command\":\"git diff --stat\"}}\n")
+	return append(evidence, raw...)
 }
 
 // patchCodexFixture rewrites the agent_message item's text body to

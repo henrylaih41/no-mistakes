@@ -67,7 +67,7 @@ func TestReviewStep_DropsDeferredPipelineOwnedPRFinding(t *testing.T) {
 	sctx.UserIntent = "REQUIRED: Open PR A unmerged."
 	sctx.IntentSource = db.RunIntentSourceAgent
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +128,7 @@ func TestReviewStep_KeepsExternalPRLifecycleFinding(t *testing.T) {
 	sctx.UserIntent = "REQUIRED: keep PR #456 open and unmerged while shipping this change."
 	sctx.IntentSource = db.RunIntentSourceAgent
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +177,7 @@ func TestReviewStep_StripsOnlyDeferredAmongMixedFindings(t *testing.T) {
 	}
 
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)

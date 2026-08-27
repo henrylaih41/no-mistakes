@@ -160,7 +160,7 @@ func TestGrokAgent_Run_ReapsLeakedGrandchildOnCleanExit(t *testing.T) {
 	bin := writeFakeGrok(t, dir, `#!/bin/sh
 ( sleep 120 >/dev/null 2>&1 ) &
 echo $! > "`+pidFile+`"
-printf 'ok\n'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
 exit 0
 `, "")
 

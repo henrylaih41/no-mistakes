@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -12,9 +13,55 @@ import (
 )
 
 // ReviewStep reviews the diff for bugs, security issues, and doc gaps.
-type ReviewStep struct{}
+type ReviewStep struct {
+	// verdictMinimum is a test seam. Production uses the bounded workload
+	// floor; unit tests that exercise unrelated review behavior may set zero.
+	verdictMinimum func(*agent.InvocationWorkload) time.Duration
+}
 
 func (s *ReviewStep) Name() types.StepName { return types.StepReview }
+
+func (s *ReviewStep) minimumVerdictDuration(workload *agent.InvocationWorkload) time.Duration {
+	if s.verdictMinimum != nil {
+		return s.verdictMinimum(workload)
+	}
+	return minimumReviewVerdictDuration(workload)
+}
+
+func (s *ReviewStep) runVerifiedReview(
+	sctx *pipeline.StepContext,
+	reviewer agent.Agent,
+	opts agent.RunOpts,
+	first func() (*agent.Result, error),
+	dropSession func(),
+) (*agent.Result, *reviewVerdictFailure, error) {
+	started := time.Now()
+	result, err := first()
+	if err != nil {
+		return nil, nil, err
+	}
+	evidenceErr := validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	if evidenceErr == nil {
+		return result, nil, nil
+	}
+
+	sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", reviewer.Name(), evidenceErr))
+	if dropSession != nil {
+		dropSession()
+	}
+	coldOpts := opts
+	coldOpts.Session = nil
+	started = time.Now()
+	result, err = reviewer.Run(sctx.Ctx, coldOpts)
+	if err != nil {
+		return nil, nil, err
+	}
+	evidenceErr = validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	if evidenceErr != nil {
+		return nil, &reviewVerdictFailure{reviewer: reviewer.Name(), reason: evidenceErr}, nil
+	}
+	return result, nil, nil
+}
 
 func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
@@ -256,24 +303,47 @@ Risk assessment (after listing all findings):
 		// stay independent and cold because each may use a different family,
 		// binary, or model override.
 		opts.OnChunk = sctx.LogChunk
-		result, err := sctx.RunAgentSession(pipeline.SessionRoleReviewer, opts)
+		result, invalid, err := s.runVerifiedReview(
+			sctx,
+			reviewers[0],
+			opts,
+			func() (*agent.Result, error) {
+				return sctx.RunAgentSession(pipeline.SessionRoleReviewer, opts)
+			},
+			func() { sctx.DropAgentSession(pipeline.SessionRoleReviewer) },
+		)
 		if err != nil {
 			return nil, fmt.Errorf("agent review: %w", err)
+		}
+		if invalid != nil {
+			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, fixSummary), nil
 		}
 		findings = parseReviewFindings(result, sctx.Log)
 	} else if len(reviewers) <= 1 {
 		// A configured one-member panel remains an explicitly selected reviewer
 		// and therefore does not share the implementation agent's session.
 		opts.OnChunk = sctx.LogChunk
-		result, err := reviewers[0].Run(ctx, opts)
+		result, invalid, err := s.runVerifiedReview(
+			sctx,
+			reviewers[0],
+			opts,
+			func() (*agent.Result, error) { return reviewers[0].Run(ctx, opts) },
+			nil,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("agent review: %w", err)
 		}
+		if invalid != nil {
+			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, fixSummary), nil
+		}
 		findings = parseReviewFindings(result, sctx.Log)
 	} else {
-		merged, err := runReviewPanel(sctx, reviewers, opts)
+		merged, invalid, err := runReviewPanel(sctx, reviewers, opts, s.minimumVerdictDuration(opts.Workload))
 		if err != nil {
 			return nil, err
+		}
+		if len(invalid) > 0 {
+			return reviewVerdictTriageOutcome(invalid, fixSummary), nil
 		}
 		findings = merged
 	}

@@ -5,10 +5,48 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestParseGrokEventsSurfacesUsageAndReviewActivity(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"grok-session","model":"grok-4.6"}`,
+		`{"type":"assistant","message":{"model":"grok-4.6","content":[{"type":"tool_use","name":"Read"},{"type":"text","text":"inspecting"}]},"session_id":"grok-session"}`,
+		`{"type":"assistant","message":{"model":"grok-4.6","content":[{"type":"tool_use","name":"StructuredOutput"}]},"session_id":"grok-session"}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"findings":[]},"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"reasoning_tokens":2}}`,
+		"",
+	}, "\n")
+	var chunks []string
+	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), func(chunk string) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("parseGrokEvents() error = %v", err)
+	}
+	if got, want := string(result.Output), `{"findings":[]}`; got != want {
+		t.Fatalf("output = %s, want %s", got, want)
+	}
+	if result.SessionID != "grok-session" || result.Model != "grok-4.6" {
+		t.Fatalf("identity = %+v", result)
+	}
+	wantUsage := TokenUsage{
+		InputTokens: 19, OutputTokens: 7, CacheReadTokens: 5,
+		CacheCreationTokens: 3, ReasoningTokens: 2,
+		Reported: true, CacheCreationReported: true,
+	}
+	if !reflect.DeepEqual(result.Usage, wantUsage) {
+		t.Fatalf("usage = %+v, want %+v", result.Usage, wantUsage)
+	}
+	if result.Metrics == nil || result.Metrics.ModelRoundtrips != 2 || result.Metrics.ToolCalls != 1 || result.Metrics.ToolCategories.Read != 1 {
+		t.Fatalf("activity metrics = %+v, want 2 rounds and one repository Read", result.Metrics)
+	}
+	if !reflect.DeepEqual(chunks, []string{"inspecting"}) {
+		t.Fatalf("chunks = %v", chunks)
+	}
+}
 
 func TestGrokAgentBuildArgsWithJSONSchema(t *testing.T) {
 	a := &grokAgent{bin: "grok"}
@@ -16,6 +54,7 @@ func TestGrokAgentBuildArgsWithJSONSchema(t *testing.T) {
 	want := []string{
 		"--permission-mode", "bypassPermissions",
 		"-p", "review this",
+		"--output-format", "streaming-messages-json",
 		"--json-schema", `{"type":"object"}`,
 	}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
@@ -29,7 +68,7 @@ func TestGrokAgentBuildArgsWithPlainOutput(t *testing.T) {
 	want := []string{
 		"--permission-mode", "bypassPermissions",
 		"-p", "review this",
-		"--output-format", "plain",
+		"--output-format", "streaming-messages-json",
 	}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("args = %q, want %q", got, want)
@@ -46,7 +85,7 @@ func TestGrokAgentBuildArgsPrependsModelAndReasoningOverrides(t *testing.T) {
 		"-m", "grok-code-fast-1", "--reasoning-effort", "high",
 		"--permission-mode", "bypassPermissions",
 		"-p", "review this",
-		"--output-format", "plain",
+		"--output-format", "streaming-messages-json",
 	}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("args = %q, want %q", got, want)
@@ -56,8 +95,9 @@ func TestGrokAgentBuildArgsPrependsModelAndReasoningOverrides(t *testing.T) {
 func TestGrokAgentRunCapturesStructuredOutputAndChunk(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakeGrok(t, dir, `#!/bin/sh
-printf '%s' '{"ok":true}'
-`, "@echo off\r\n<nul set /p ={\"ok\":true}\r\n")
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"inspected"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"ok":true}}'
+`, "@echo off\r\necho {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"inspected\"}]}}\r\necho {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"structured_output\":{\"ok\":true}}\r\n")
 	var chunks []string
 	a := &grokAgent{bin: bin}
 	result, err := a.Run(context.Background(), RunOpts{
@@ -72,19 +112,20 @@ printf '%s' '{"ok":true}'
 	if string(result.Output) != `{"ok":true}` {
 		t.Fatalf("structured output = %s", result.Output)
 	}
-	if result.Text != `{"ok":true}` {
+	if result.Text != "done" {
 		t.Fatalf("text = %q", result.Text)
 	}
-	if len(chunks) != 1 || chunks[0] != `{"ok":true}` {
+	if len(chunks) != 1 || chunks[0] != "inspected" {
 		t.Fatalf("chunks = %q", chunks)
 	}
 }
 
-func TestGrokAgentRunUsesEnvelopeStructuredOutputWhenTextHasMultipleSummaries(t *testing.T) {
+func TestGrokAgentRunUsesTerminalStructuredOutputWhenTextHasMultipleSummaries(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakeGrok(t, dir, `#!/bin/sh
-printf '%s' '{"text":"{\"summary\":\"Investigating ...\"}{\"summary\":\"Implementing ...\"}{\"summary\":\"Done\"}","stopReason":"EndTurn","sessionId":"session-1","requestId":"request-1","structuredOutput":{"summary":"Done"}}'
-`, "@echo off\r\n<nul set /p ={\"text\":\"{\\\"summary\\\":\\\"Investigating ...\\\"}{\\\"summary\\\":\\\"Implementing ...\\\"}{\\\"summary\\\":\\\"Done\\\"}\",\"stopReason\":\"EndTurn\",\"sessionId\":\"session-1\",\"requestId\":\"request-1\",\"structuredOutput\":{\"summary\":\"Done\"}}\r\n")
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"{\"summary\":\"Investigating ...\"}{\"summary\":\"Implementing ...\"}"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"summary":"Done"}}'
+`, "@echo off\r\necho {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Investigating\"}]}}\r\necho {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"structured_output\":{\"summary\":\"Done\"}}\r\n")
 	a := &grokAgent{bin: bin}
 	result, err := a.Run(context.Background(), RunOpts{
 		Prompt:     "review",
@@ -99,12 +140,12 @@ printf '%s' '{"text":"{\"summary\":\"Investigating ...\"}{\"summary\":\"Implemen
 	}
 }
 
-func TestGrokAgentRunOnceEmitsRawOutputWhenEnvelopeStructuredOutputIsInvalid(t *testing.T) {
+func TestGrokAgentRunOnceEmitsAssistantTextWhenStructuredOutputIsInvalid(t *testing.T) {
 	dir := t.TempDir()
-	response := `{"text":"` + strings.Repeat("progress summary; ", 20) + `","structuredOutput":{"summary":42}}`
+	progress := strings.Repeat("progress summary; ", 20)
 	bin := writeFakeGrok(t, dir,
-		"#!/bin/sh\nprintf '%s' '"+response+"'\n",
-		"@echo off\r\n<nul set /p ="+response+"\r\n",
+		"#!/bin/sh\nprintf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\""+progress+"\"}]}}'\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"summary\":42}}'\n",
+		"@echo off\r\necho {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"progress\"}]}}\r\necho {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"summary\":42}}\r\n",
 	)
 	var chunks []string
 	a := &grokAgent{bin: bin}
@@ -117,15 +158,18 @@ func TestGrokAgentRunOnceEmitsRawOutputWhenEnvelopeStructuredOutputIsInvalid(t *
 	if err == nil {
 		t.Fatal("expected invalid structured output error")
 	}
-	if len(chunks) != 1 || chunks[0] != response {
-		t.Fatalf("chunks = %q, want complete raw response %q", chunks, response)
+	if len(chunks) != 1 || (runtime.GOOS != "windows" && chunks[0] != progress) {
+		t.Fatalf("chunks = %q, want assistant progress", chunks)
 	}
 }
 
 func TestGrokAgentRunUsesWorktreeCWD(t *testing.T) {
 	dir := t.TempDir()
 	binDir := t.TempDir()
-	bin := writeFakeGrok(t, binDir, "#!/bin/sh\npwd\n", "@echo off\r\ncd\r\n")
+	bin := writeFakeGrok(t, binDir,
+		"#!/bin/sh\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"%s\"}\\n' \"$(pwd)\"\n",
+		"@echo off\r\nfor /f \"delims=\" %%i in ('cd') do echo {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"%%i\"}\r\n",
+	)
 	a := &grokAgent{bin: bin}
 	result, err := a.Run(context.Background(), RunOpts{Prompt: "cwd", CWD: dir})
 	if err != nil {

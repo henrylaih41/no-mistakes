@@ -363,7 +363,7 @@ When reviewers are configured, no-mistakes sends the same review prompt to each 
 | `review.reviewers[].args` | `string[]` | Inherits `agent_args_override.<agent>` | Extra native-agent CLI flags for this reviewer |
 | `review.reviewers[].path` | `string` | Inherits `agent_path_override.<agent>` or default binary | Binary path for this reviewer |
 | `review.max_parallel` | `int` | `0` | Maximum reviewers to run at once; `0` means all reviewers at once |
-| `review.fail_open` | `bool` | `false` | When `false`, any reviewer error fails the review step; when `true`, failed reviewers are dropped if at least one reviewer succeeds |
+| `review.fail_open` | `bool` | `false` | When `false`, any reviewer process error fails the review step; when `true`, process errors may be dropped if at least one reviewer succeeds. Review-verdict evidence failures always fail closed. |
 | `review.max_fix_rounds` | `int` | `0` | Maximum review fix/re-review rounds before parking at `awaiting_triage`; `0` means unlimited |
 
 Each reviewer returns its own findings. In the merged gate, finding IDs are namespaced by reviewer and each finding's `source` is set to the reviewer name, so the TUI, AXI output, and fix prompt can show who reported it.

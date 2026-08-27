@@ -21,9 +21,10 @@ import (
 // It mints deterministic session ids ("sess-1", "sess-2", ...) for new
 // sessions and echoes resumed ids, recording every invocation.
 type sessionMockAgent struct {
-	mu     sync.Mutex
-	calls  []agent.RunOpts
-	nextID int
+	mu                     sync.Mutex
+	calls                  []agent.RunOpts
+	nextID                 int
+	preserveReviewEvidence bool
 	// respond picks the reply for one invocation (called under the lock).
 	respond func(opts agent.RunOpts) *agent.Result
 }
@@ -40,6 +41,9 @@ func (m *sessionMockAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 	m.calls = append(m.calls, opts)
 
 	result := m.respond(opts)
+	if result != nil && opts.Purpose == "review" && !m.preserveReviewEvidence && result.Metrics == nil {
+		result.Metrics = &agent.InvocationMetrics{ModelRoundtrips: 2}
+	}
 	if opts.Session != nil {
 		if opts.Session.ID != "" {
 			result.SessionID = opts.Session.ID
@@ -50,6 +54,73 @@ func (m *sessionMockAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 		}
 	}
 	return result, nil
+}
+
+func TestReviewStep_InvalidVerdictRetriesOnceCold(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	call := 0
+	mock := &sessionMockAgent{preserveReviewEvidence: true}
+	mock.respond = func(agent.RunOpts) *agent.Result {
+		call++
+		metrics := &agent.InvocationMetrics{ModelRoundtrips: 1}
+		if call == 2 {
+			metrics.ModelRoundtrips = 2
+		}
+		return &agent.Result{
+			Output:  []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean"}`),
+			Metrics: metrics,
+		}
+	}
+
+	sctx := newTestContext(t, mock, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Sessions = pipeline.NewRunSessions(sctx.DB, sctx.Run.ID, mock, true)
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if outcome.NeedsTriage {
+		t.Fatal("valid cold retry must be accepted")
+	}
+	reviews := reviewCalls(mock.snapshot())
+	if len(reviews) != 2 {
+		t.Fatalf("review calls = %d, want exactly 2", len(reviews))
+	}
+	if reviews[0].Session == nil {
+		t.Fatal("first review must use the durable reviewer session")
+	}
+	if reviews[1].Session != nil {
+		t.Fatalf("retry session = %+v, want a cold invocation", reviews[1].Session)
+	}
+}
+
+func TestReviewStep_SecondInvalidVerdictParksAwaitingTriage(t *testing.T) {
+	mock := &sessionMockAgent{preserveReviewEvidence: true}
+	mock.respond = func(agent.RunOpts) *agent.Result {
+		return &agent.Result{
+			Output:  []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean"}`),
+			Metrics: &agent.InvocationMetrics{ModelRoundtrips: 1},
+		}
+	}
+
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{newTestReviewStep()})
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForReviewStatus(t, database, run.ID, types.StepStatusAwaitingTriage)
+	if got := len(reviewCalls(mock.snapshot())); got != 2 {
+		t.Fatalf("review calls before triage = %d, want initial + one cold retry", got)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve triage: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("execute after triage approval: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("executor did not resume from evidence triage")
+	}
 }
 
 func (m *sessionMockAgent) snapshot() []agent.RunOpts {
@@ -136,7 +207,7 @@ func TestReviewLoop_OneReviewerSessionOneFixerSession(t *testing.T) {
 		}
 	}
 
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{newTestReviewStep()})
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -232,7 +303,7 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 		}
 	}
 
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{newTestReviewStep()})
 	done := make(chan error, 1)
 	go func() {
 		done <- exec.Execute(context.Background(), run, repo, workDir)
@@ -283,7 +354,7 @@ func TestReviewLoop_OtherStepsStaySessionIsolated(t *testing.T) {
 		}
 	}
 
-	steps := []pipeline.Step{&ReviewStep{}, &DocumentStep{}, &LintStep{}}
+	steps := []pipeline.Step{newTestReviewStep(), &DocumentStep{}, &LintStep{}}
 	exec, _, run, repo, workDir := reviewSessionHarness(t, mock, steps)
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)

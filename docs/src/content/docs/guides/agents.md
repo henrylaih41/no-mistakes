@@ -162,6 +162,7 @@ Merged review findings keep a `source` showing which reviewer reported them, and
 In a reviewer spec, `agent: auto` expands to the already resolved pipeline `agent`; name a reviewer family explicitly when you want a different model family.
 `review.max_parallel` limits concurrent reviewers; `0` means all reviewers run at once.
 `review.fail_open` defaults to `false`, so any reviewer error fails the review step instead of silently reducing coverage.
+Successful reviewer responses must also satisfy the [review verdict evidence contract](/no-mistakes/reference/pipeline-steps/#2-review); an invalid verdict gets one cold retry and cannot be dropped through `review.fail_open`.
 
 Repo-level `review` is code-executing config because it selects extra agent processes.
 Like repo `commands` and `agent`, it is read from the trusted default-branch `.no-mistakes.yaml` unless `allow_repo_commands: true` is already set there.
@@ -326,11 +327,10 @@ The Copilot CLI has no output-schema flag, so when structured output is requeste
 
 ## Grok Build
 
-Spawns a `grok` subprocess for each invocation with `--permission-mode bypassPermissions -p <prompt>` and the run worktree as its cwd, adding `--output-format plain` when structured output is not requested.
-When structured output is requested, no-mistakes adds Grok's native `--json-schema` flag, omits `--output-format`, and validates the response envelope's `structuredOutput` instead of treating progress summaries in `text` as the result. Direct structured JSON output from older Grok versions remains supported.
+Spawns a `grok` subprocess for each invocation with `--permission-mode bypassPermissions -p <prompt> --output-format streaming-messages-json` and the run worktree as its cwd.
+When structured output is requested, no-mistakes also adds Grok's native `--json-schema` flag and validates `structured_output` from the terminal result event. The streaming parser records reported token usage plus bounded model-round and tool-activity counts, so review verdicts can be checked for minimum execution evidence.
 `agent_args_override.grok` and reviewer-local `args` can select options such as `-m` and `--reasoning-effort`.
 The managed prompt, output, schema, permission, and cwd flags are reserved so those overrides cannot redirect or weaken the pipeline invocation.
-These response modes do not expose token usage to the adapter, so no-mistakes records zero token counts for Grok invocations.
 
 ## ACP via acpx
 
