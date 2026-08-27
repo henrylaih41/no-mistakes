@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
 
 func TestApplyEditsCreatesParentDirectoriesForNewFiles(t *testing.T) {
@@ -80,6 +82,15 @@ func TestApplyActionHonorsDelay(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 20*time.Millisecond {
 		t.Fatalf("applyActionInDir returned after %s, want at least 20ms", elapsed)
+	}
+}
+
+func TestIsReviewPromptUsesSharedProductionOpening(t *testing.T) {
+	if !isReviewPrompt(agent.ReviewPromptOpening + "\n\nContext:\n- branch: feature") {
+		t.Fatal("shared production review opening was not recognized")
+	}
+	if isReviewPrompt("Review something else") {
+		t.Fatal("unrelated prompt was classified as a source review")
 	}
 }
 

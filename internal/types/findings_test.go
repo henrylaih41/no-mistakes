@@ -580,3 +580,18 @@ func TestFinding_Action_Values(t *testing.T) {
 		}
 	}
 }
+
+func TestHasReviewVerdictEvidenceFindingRequiresGateSource(t *testing.T) {
+	if !HasReviewVerdictEvidenceFinding(Findings{Items: []Finding{{
+		ID:     FindingIDReviewVerdictEvidence,
+		Source: FindingSourceReviewGate,
+	}}}) {
+		t.Fatal("canonical evidence finding was not recognized")
+	}
+	if HasReviewVerdictEvidenceFinding(Findings{Items: []Finding{{
+		ID:     FindingIDReviewVerdictEvidence,
+		Source: "codex",
+	}}}) {
+		t.Fatal("reviewer-controlled ID collision was recognized as gate evidence")
+	}
+}

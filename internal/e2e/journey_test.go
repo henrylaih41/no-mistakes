@@ -86,7 +86,15 @@ func TestAgentlessRunFailsBeforePipelineStarts(t *testing.T) {
 }
 
 func runHappyPath(t *testing.T, agentName string) {
-	h := NewHarness(t, SetupOpts{Agent: agentName, Scenario: cleanReviewScenario(t)})
+	opts := SetupOpts{Agent: agentName, Scenario: cleanReviewScenario(t)}
+	// OpenCode remains covered as the implementation agent, but its adapter
+	// does not yet surface bounded activity metrics. Route review through a
+	// metrics-capable Claude reviewer so the happy-path journey does not weaken
+	// the production fail-closed evidence contract.
+	if agentName == "opencode" {
+		opts.Reviewers = []string{"claude"}
+	}
+	h := NewHarness(t, opts)
 
 	assertRootVersion(t, h)
 	assertRootHelp(t, h)
@@ -202,7 +210,7 @@ func runHappyPath(t *testing.T, agentName string) {
 		t.Fatalf("expected fake agent to be invoked, got 0 invocations")
 	}
 	for _, inv := range invs {
-		if inv.Agent != agentName {
+		if inv.Agent != agentName && !(agentName == "opencode" && inv.Agent == "claude") {
 			t.Errorf("expected invocations under %q, got %q (%v)", agentName, inv.Agent, inv.Args)
 		}
 	}

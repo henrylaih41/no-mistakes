@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -12,9 +13,53 @@ import (
 )
 
 // ReviewStep reviews the diff for bugs, security issues, and doc gaps.
-type ReviewStep struct{}
+type ReviewStep struct {
+	// verdictMinimum is a test seam. Production uses the bounded workload
+	// floor; unit tests that exercise unrelated review behavior may set zero.
+	verdictMinimum func(*agent.InvocationWorkload) time.Duration
+}
 
 func (s *ReviewStep) Name() types.StepName { return types.StepReview }
+
+func (s *ReviewStep) minimumVerdictDuration(workload *agent.InvocationWorkload) time.Duration {
+	if s.verdictMinimum != nil {
+		return s.verdictMinimum(workload)
+	}
+	return minimumReviewVerdictDuration(workload)
+}
+
+func (s *ReviewStep) runVerifiedReview(
+	sctx *pipeline.StepContext,
+	reviewer agent.Agent,
+	opts agent.RunOpts,
+	first func() (*agent.Result, error),
+	dropSession func(),
+) (*agent.Result, *reviewVerdictFailure, error) {
+	started := time.Now()
+	result, err := first()
+	if err != nil {
+		return nil, nil, err
+	}
+	evidenceErr := validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	if evidenceErr == nil {
+		return result, nil, nil
+	}
+
+	sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", reviewer.Name(), evidenceErr))
+	if dropSession != nil {
+		dropSession()
+	}
+	started = time.Now()
+	result, err = first()
+	if err != nil {
+		return nil, nil, err
+	}
+	evidenceErr = validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	if evidenceErr != nil {
+		return nil, &reviewVerdictFailure{reviewer: reviewer.Name(), reason: evidenceErr}, nil
+	}
+	return result, nil, nil
+}
 
 func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
@@ -179,7 +224,7 @@ Previous review findings to address:
 	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause()
 
 	prompt := fmt.Sprintf(
-		`Review the code changes and return structured findings with a risk assessment.
+		agent.ReviewPromptOpening+`
 
 Context:
 - branch: %s
@@ -256,24 +301,47 @@ Risk assessment (after listing all findings):
 		// stay independent and cold because each may use a different family,
 		// binary, or model override.
 		opts.OnChunk = sctx.LogChunk
-		result, err := sctx.RunAgentSession(pipeline.SessionRoleReviewer, opts)
+		result, invalid, err := s.runVerifiedReview(
+			sctx,
+			reviewers[0],
+			opts,
+			func() (*agent.Result, error) {
+				return sctx.RunAgentSession(pipeline.SessionRoleReviewer, opts)
+			},
+			func() { sctx.DropAgentSession(pipeline.SessionRoleReviewer) },
+		)
 		if err != nil {
 			return nil, fmt.Errorf("agent review: %w", err)
+		}
+		if invalid != nil {
+			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, Findings{}, fixSummary), nil
 		}
 		findings = parseReviewFindings(result, sctx.Log)
 	} else if len(reviewers) <= 1 {
 		// A configured one-member panel remains an explicitly selected reviewer
 		// and therefore does not share the implementation agent's session.
 		opts.OnChunk = sctx.LogChunk
-		result, err := reviewers[0].Run(ctx, opts)
+		result, invalid, err := s.runVerifiedReview(
+			sctx,
+			reviewers[0],
+			opts,
+			func() (*agent.Result, error) { return reviewers[0].Run(ctx, opts) },
+			nil,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("agent review: %w", err)
 		}
+		if invalid != nil {
+			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, Findings{}, fixSummary), nil
+		}
 		findings = parseReviewFindings(result, sctx.Log)
 	} else {
-		merged, err := runReviewPanel(sctx, reviewers, opts)
+		merged, invalid, err := runReviewPanel(sctx, reviewers, opts, s.minimumVerdictDuration(opts.Workload))
 		if err != nil {
 			return nil, err
+		}
+		if len(invalid) > 0 {
+			return reviewVerdictTriageOutcome(invalid, stripDeferredReviewFindings(sctx, merged), fixSummary), nil
 		}
 		findings = merged
 	}
@@ -282,10 +350,7 @@ Risk assessment (after listing all findings):
 	// owned delivery (push/PR/CI for this run) has not happened yet. Prompt
 	// guidance alone is not enough - models still emit these under
 	// authoritative intent criteria like "Open PR A unmerged".
-	if stripped, n := stripDeferredPipelineOwnedDeliveryFindings(findings); n > 0 {
-		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
-		findings = stripped
-	}
+	findings = stripDeferredReviewFindings(sctx, findings)
 
 	needsApproval := hasBlockingFindings(findings.Items)
 	findingsJSON, _ := json.Marshal(findings)
@@ -310,7 +375,23 @@ func parseReviewFindings(result *agent.Result, log func(string)) Findings {
 			findings = Findings{Summary: result.Text}
 		}
 	}
-	return findings
+	for i := range findings.Items {
+		if findings.Items[i].ID == types.FindingIDReviewVerdictEvidence {
+			findings.Items[i].ID = ""
+		}
+		if findings.Items[i].Source == types.FindingSourceReviewGate {
+			findings.Items[i].Source = ""
+		}
+	}
+	return types.NormalizeFindings(findings, "review")
+}
+
+func stripDeferredReviewFindings(sctx *pipeline.StepContext, findings Findings) Findings {
+	stripped, n := stripDeferredPipelineOwnedDeliveryFindings(findings)
+	if n > 0 {
+		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
+	}
+	return stripped
 }
 
 func sanitizedPreviousFindingsForPrompt(raw string) string {

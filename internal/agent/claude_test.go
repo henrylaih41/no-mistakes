@@ -245,6 +245,109 @@ func TestParseClaudeEvents_MultipleEvents(t *testing.T) {
 	}
 }
 
+func TestParseClaudeEvents_ReportsReviewActivityMetrics(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","name":"Read"}]}}`,
+		`{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","name":"StructuredOutput"}]}}`,
+		`{"type":"result","subtype":"success","structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatalf("parseClaudeEvents() error = %v", err)
+	}
+	result, err := finalizeClaudeResult(parsed, json.RawMessage(`{"type":"object"}`), usage)
+	if err != nil {
+		t.Fatalf("finalizeClaudeResult() error = %v", err)
+	}
+	if result.Metrics == nil {
+		t.Fatal("Claude activity metrics are unknown")
+	}
+	if result.Metrics.ModelRoundtrips != 2 {
+		t.Fatalf("model roundtrips = %d, want 2", result.Metrics.ModelRoundtrips)
+	}
+	if result.Metrics.ToolCalls != 1 {
+		t.Fatalf("tool calls = %d, want only the repository Read tool (StructuredOutput is not review activity)", result.Metrics.ToolCalls)
+	}
+	if result.Metrics.ToolCategories.Read != 1 {
+		t.Fatalf("read tool calls = %d, want 1", result.Metrics.ToolCategories.Read)
+	}
+}
+
+func TestParseClaudeEvents_ClassifiesBashCommands(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status && go test ./internal/agent"}}]}}`,
+		`{"type":"result","subtype":"success","structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatalf("parseClaudeEvents() error = %v", err)
+	}
+	if parsed == nil {
+		t.Fatal("expected result event")
+	}
+	metrics := parsed.metrics
+	if metrics.ToolCalls != 1 || metrics.ToolCategories.Git != 1 || metrics.ToolCategories.TestLint != 1 || metrics.ToolCategories.Other != 0 {
+		t.Fatalf("tool metrics = %+v, want one Bash call classified as git plus test/lint", metrics)
+	}
+}
+
+func TestParseClaudeEvents_LenientToolInputPreservesAssistantFrame(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"id":"msg-1","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","name":"Bash","input":{"command":["git","status"]}},{"type":"text","text":"kept"}]}}`,
+		`{"type":"result","subtype":"success","structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	var chunks []string
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), func(chunk string) {
+		chunks = append(chunks, chunk)
+	}, &usage, &parsed); err != nil {
+		t.Fatalf("parseClaudeEvents() error = %v", err)
+	}
+	if parsed == nil {
+		t.Fatal("expected result event")
+	}
+	metrics := parsed.metrics
+	if metrics.ModelRoundtrips != 1 || metrics.ToolCalls != 1 || metrics.ToolCategories.Other != 1 {
+		t.Fatalf("tool metrics = %+v, want preserved response with structured-name fallback", metrics)
+	}
+	if usage.InputTokens != 10 || usage.OutputTokens != 5 || parsed.text != "kept" || len(chunks) != 1 || chunks[0] != "kept" {
+		t.Fatalf("frame data lost: usage=%+v text=%q chunks=%v", usage, parsed.text, chunks)
+	}
+}
+
+func TestParseClaudeEvents_CountsDistinctMessageIDsAsModelRoundtrips(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"id":"msg-1","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"thinking"}]}}`,
+		`{"type":"assistant","message":{"id":"msg-1","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","name":"StructuredOutput"}]}}`,
+		`{"type":"assistant","message":{"id":"msg-2","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"final"}]}}`,
+		`{"type":"result","subtype":"success","structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatalf("parseClaudeEvents() error = %v", err)
+	}
+	if parsed == nil {
+		t.Fatal("expected result event")
+	}
+	if got := parsed.metrics.ModelRoundtrips; got != 2 {
+		t.Fatalf("model roundtrips = %d, want 2 distinct message IDs", got)
+	}
+	if got := parsed.metrics.ToolCalls; got != 0 {
+		t.Fatalf("tool calls = %d, want StructuredOutput excluded", got)
+	}
+	if usage.InputTokens != 20 || usage.OutputTokens != 10 {
+		t.Fatalf("usage = %+v, want duplicate msg-1 frame counted once", usage)
+	}
+}
+
 func TestParseClaudeEvents_NoSeparatorForFirstMessage(t *testing.T) {
 	events := `{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"only message"}]}}
 `

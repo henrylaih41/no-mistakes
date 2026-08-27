@@ -181,6 +181,12 @@ func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.A
 		return fmt.Errorf("--action retry is only valid while a step is awaiting_agent_retry")
 	}
 	if action == types.ActionFix {
+		for _, id := range findingIDs {
+			if id == types.FindingIDReviewVerdictEvidence {
+				e.mu.Unlock()
+				return fmt.Errorf("finding %q is diagnostic and cannot be selected for source-fix work; select a real reviewer finding or approve/skip after triage", id)
+			}
+		}
 		if e.waitingAtFixRoundCap {
 			if fixOverrideReason == "" {
 				max := e.waitingMaxFixRounds
@@ -755,7 +761,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	} else {
 		wrapped := make([]agent.Agent, 0, len(reviewers))
 		for _, reviewer := range reviewers {
-			wrapped = append(wrapped, &lifecycleAgent{inner: reviewer, onLifecycle: onAgentLifecycle})
+			wrappedReviewer := agent.Agent(&lifecycleAgent{inner: reviewer, onLifecycle: onAgentLifecycle})
+			wrappedReviewer = &perfRecordingAgent{
+				inner:    wrappedReviewer,
+				db:       e.db,
+				runID:    run.ID,
+				stepName: stepName,
+				round:    func() int { return roundNum + 1 },
+			}
+			wrapped = append(wrapped, wrappedReviewer)
 		}
 		reviewers = wrapped
 	}
@@ -975,8 +989,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Freeze execution timer before entering approval wait.
 		executionMS += time.Since(phaseStart).Milliseconds()
 
-		// Determine approval status: awaiting_triage after review.max_fix_rounds
-		// is consumed, fix_review after a fix cycle, awaiting_approval otherwise.
+		// Determine approval status: awaiting_triage after review evidence fails
+		// closed or max_fix_rounds is consumed, fix_review after a fix cycle,
+		// awaiting_approval otherwise.
 		approvalStatus := types.StepStatusAwaitingApproval
 		var diffText string
 		if sctx.Fixing {
@@ -987,7 +1002,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				diffText = d
 			}
 		}
-		if reviewCapReached {
+		if reviewCapReached || outcome.NeedsTriage {
 			approvalStatus = types.StepStatusAwaitingTriage
 		} else if sctx.Fixing {
 			approvalStatus = types.StepStatusFixReview
@@ -1014,12 +1029,17 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Publish the run marker and step gate in one transaction. If either
 		// write fails, clear the in-memory waiter and fail loudly instead of
 		// blocking at a gate that status readers cannot observe.
-		if _, dbErr := e.db.EnterApprovalGate(ctx, run.ID, sr.ID, approvalStatus, executionMS, nil); dbErr != nil {
+		triageReason := reviewApprovalGateReason(outcome.NeedsTriage, reviewCapReached)
+		if _, dbErr := e.db.EnterApprovalGate(ctx, run.ID, sr.ID, approvalStatus, executionMS, triageReason); dbErr != nil {
 			e.clearApprovalWaitState()
 			publishErr := fmt.Errorf("publish approval gate for step %s: %w", stepName, dbErr)
 			return false, e.failGatePublication(stepName, sr.ID, executionMS, publishErr)
 		}
-		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, diffText, "", &executionMS)
+		gateError := ""
+		if triageReason != nil {
+			gateError = *triageReason
+		}
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, diffText, gateError, &executionMS)
 
 		response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, true)
 		parkedMS := time.Since(parkStart).Milliseconds()
@@ -1277,6 +1297,21 @@ func (e *Executor) reviewFixRoundCapReached(stepName types.StepName, stepResultI
 		return false, 0, max, err
 	}
 	return count >= max, count, max, nil
+}
+
+func reviewApprovalGateReason(evidenceTriage, fixRoundCap bool) *string {
+	reasons := make([]string, 0, 2)
+	if evidenceTriage {
+		reasons = append(reasons, types.ReviewTriageReasonEvidence)
+	}
+	if fixRoundCap {
+		reasons = append(reasons, types.ReviewTriageReasonFixRoundCap)
+	}
+	if len(reasons) == 0 {
+		return nil
+	}
+	reason := strings.Join(reasons, "; ")
+	return &reason
 }
 
 // waitForApprovalOrReconcile blocks until an approval response arrives, the parked

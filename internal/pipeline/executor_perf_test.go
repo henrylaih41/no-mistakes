@@ -115,6 +115,57 @@ func TestExecutor_RecordsAgentInvocationsLocally(t *testing.T) {
 	}
 }
 
+func TestExecutor_RecordsConfiguredReviewerInvocationsLocally(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	reviewer := &fallbackUsageAgent{
+		name: "panel-reviewer",
+		result: &agent.Result{
+			Output:  json.RawMessage(`{}`),
+			Metrics: &agent.InvocationMetrics{ModelRoundtrips: 2, ToolCalls: 1},
+		},
+	}
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			result, err := sctx.Reviewers[0].Run(sctx.Ctx, agent.RunOpts{
+				Prompt:  "review",
+				Purpose: "review",
+				Workload: &agent.InvocationWorkload{
+					Files: 3,
+					Lines: 120,
+				},
+			})
+			if err != nil {
+				return nil, err
+			}
+			_ = result
+			return &StepOutcome{}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, &config.Config{Agent: types.AgentClaude}, &usageAgent{}, []Step{step}, nil)
+	exec.SetReviewers([]agent.Agent{reviewer})
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	invocations, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get invocations: %v", err)
+	}
+	if len(invocations) != 1 {
+		t.Fatalf("configured reviewer invocation rows = %d, want 1", len(invocations))
+	}
+	got := invocations[0]
+	if got.Purpose != "review" || got.Agent != "panel-reviewer" || got.WorkloadFiles == nil || *got.WorkloadFiles != 3 || got.WorkloadLines == nil || *got.WorkloadLines != 120 {
+		t.Fatalf("configured reviewer telemetry = %+v", got)
+	}
+	if got.ModelRoundtrips == nil || *got.ModelRoundtrips != 2 || got.ToolCalls == nil || *got.ToolCalls != 1 || got.DurationMS < 0 {
+		t.Fatalf("configured reviewer activity telemetry = %+v", got)
+	}
+}
+
 func TestPerfRecordingAgent_RecordsFallbackAttemptsSeparately(t *testing.T) {
 	database, _, run, _ := setupTest(t)
 	wrapped := &perfRecordingAgent{

@@ -67,7 +67,7 @@ func TestReviewStep_DropsDeferredPipelineOwnedPRFinding(t *testing.T) {
 	sctx.UserIntent = "REQUIRED: Open PR A unmerged."
 	sctx.IntentSource = db.RunIntentSourceAgent
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +128,7 @@ func TestReviewStep_KeepsExternalPRLifecycleFinding(t *testing.T) {
 	sctx.UserIntent = "REQUIRED: keep PR #456 open and unmerged while shipping this change."
 	sctx.IntentSource = db.RunIntentSourceAgent
 
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +177,7 @@ func TestReviewStep_StripsOnlyDeferredAmongMixedFindings(t *testing.T) {
 	}
 
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	step := &ReviewStep{}
+	step := newTestReviewStep()
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -190,5 +190,51 @@ func TestReviewStep_StripsOnlyDeferredAmongMixedFindings(t *testing.T) {
 	}
 	if !strings.Contains(outcome.Findings, "nil pointer dereference") {
 		t.Fatalf("real finding must be kept: %s", outcome.Findings)
+	}
+}
+
+func TestReviewStep_StripsDeferredPanelFindingsBeforeEvidenceTriage(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	valid := &mockAgent{name: "codex", runFn: reviewReturning(Findings{
+		Items: []Finding{{
+			Severity:    "error",
+			Action:      types.ActionAskUser,
+			Description: "the remote branch and PR do not exist yet",
+			ReviewScope: types.FindingReviewScopePipelineOwnedDelivery,
+		}},
+		Summary:   "missing delivery",
+		RiskLevel: "high",
+		RiskScope: types.FindingsRiskScopePipelineOwnedDelivery,
+	})}
+	invalid := &mockAgent{
+		name:                   "claude",
+		preserveReviewEvidence: true,
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{
+				Output:  []byte(`{"findings":[],"summary":"clean"}`),
+				Metrics: &agent.InvocationMetrics{ModelRoundtrips: 1},
+			}, nil
+		},
+	}
+	sctx := newTestContext(t, &mockAgent{name: "fixer"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Reviewers = []agent.Agent{valid, invalid}
+
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsTriage {
+		t.Fatal("invalid reviewer must still require triage")
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !types.HasReviewVerdictEvidenceFinding(findings) {
+		t.Fatalf("missing evidence finding: %+v", findings.Items)
+	}
+	if strings.Contains(outcome.Findings, "remote branch") || len(findings.Items) != 1 {
+		t.Fatalf("deferred delivery finding survived triage boundary: %s", outcome.Findings)
 	}
 }

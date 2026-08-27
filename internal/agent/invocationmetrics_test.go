@@ -132,6 +132,21 @@ func TestClassifyToolCommand_UnwrapsShellAndClassifiesVerbs(t *testing.T) {
 	}
 }
 
+func TestClassifyStructuredTool(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want ToolCategory
+	}{
+		{name: "Read", want: ToolRead},
+		{name: "NotebookEdit", want: ToolEdit},
+		{name: "WebFetch", want: ToolOther},
+	} {
+		if got := classifyStructuredTool(tc.name); got != tc.want {
+			t.Errorf("classifyStructuredTool(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestToolCategoryCounts_AddAndTotal(t *testing.T) {
 	var c ToolCategoryCounts
 	for _, cat := range []ToolCategory{ToolWait, ToolTestLint, ToolTestLint, ToolEdit, ToolRead, ToolGit, ToolOther, "unrecognized"} {

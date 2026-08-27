@@ -308,10 +308,10 @@ type codexItem struct {
 }
 
 type codexUsage struct {
-	InputTokens         int `json:"input_tokens"`
-	CachedInputTokens   int `json:"cached_input_tokens"`
-	OutputTokens        int `json:"output_tokens"`
-	ReasoningOutputToks int `json:"reasoning_output_tokens"`
+	InputTokens         int  `json:"input_tokens"`
+	CachedInputTokens   int  `json:"cached_input_tokens"`
+	OutputTokens        int  `json:"output_tokens"`
+	ReasoningOutputToks *int `json:"reasoning_output_tokens"`
 }
 
 // parseCodexEvents reads JSONL from the reader and dispatches events.
@@ -367,12 +367,17 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 
 		case "turn.completed":
 			if event.Usage != nil {
+				reasoningTokens := 0
+				if event.Usage.ReasoningOutputToks != nil {
+					reasoningTokens = *event.Usage.ReasoningOutputToks
+				}
 				usage.Add(TokenUsage{
-					InputTokens:     event.Usage.InputTokens,
-					OutputTokens:    event.Usage.OutputTokens,
-					CacheReadTokens: event.Usage.CachedInputTokens,
-					ReasoningTokens: event.Usage.ReasoningOutputToks,
-					Reported:        true,
+					InputTokens:       event.Usage.InputTokens,
+					OutputTokens:      event.Usage.OutputTokens,
+					CacheReadTokens:   event.Usage.CachedInputTokens,
+					ReasoningTokens:   reasoningTokens,
+					ReasoningReported: event.Usage.ReasoningOutputToks != nil,
+					Reported:          true,
 				})
 			}
 		}

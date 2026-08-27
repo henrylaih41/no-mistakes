@@ -71,10 +71,11 @@ func (m *codexMetricsAccumulator) onItem(eventType string, item *codexItem, at t
 
 func (m *codexMetricsAccumulator) metrics() InvocationMetrics {
 	return InvocationMetrics{
-		ModelRoundtrips:  m.modelRoundtrips,
-		ToolCalls:        m.toolCalls,
-		ToolCategories:   m.categories,
-		SubprocessWaitMS: m.subprocessWaitMS,
+		ModelRoundtrips:        m.modelRoundtrips,
+		ToolCalls:              m.toolCalls,
+		ToolCategories:         m.categories,
+		SubprocessWaitMS:       m.subprocessWaitMS,
+		SubprocessWaitReported: true,
 	}
 }
 

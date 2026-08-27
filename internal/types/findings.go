@@ -26,6 +26,13 @@ const (
 )
 
 const (
+	FindingSourceReviewGate        = "review-gate"
+	FindingIDReviewVerdictEvidence = "review-verdict-evidence"
+	ReviewTriageReasonEvidence     = "review verdict evidence failed after one cold retry"
+	ReviewTriageReasonFixRoundCap  = "review max_fix_rounds cap reached"
+)
+
+const (
 	FindingReviewScopeSource                = "source"
 	FindingReviewScopePipelineOwnedDelivery = "pipeline-owned-delivery"
 	FindingReviewScopeExternalDelivery      = "external-delivery"
@@ -119,6 +126,15 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		items = wire.Legacy
 	}
 	return Findings{Items: items, Summary: wire.Summary, Tested: wire.Tested, TestingSummary: wire.TestingSummary, Artifacts: wire.Artifacts, RiskLevel: wire.RiskLevel, RiskRationale: wire.RiskRationale, RiskScope: wire.RiskScope}, nil
+}
+
+func HasReviewVerdictEvidenceFinding(findings Findings) bool {
+	for _, finding := range findings.Items {
+		if finding.ID == FindingIDReviewVerdictEvidence && finding.Source == FindingSourceReviewGate {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeFindings assigns deterministic IDs to findings that do not have one yet.

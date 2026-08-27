@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"path"
 	"strings"
 )
@@ -8,8 +9,8 @@ import (
 // This file is the single authoritative definition of the local per-invocation
 // performance metrics and their boundaries. Every count, category, and timing
 // split recorded to agent_invocations is defined here so the semantics live in
-// exactly one place; the codex adapter fills them from its event stream, the
-// pipeline records them, and `no-mistakes stats` renders them, all against
+// exactly one place; instrumented adapters fill them from their event streams,
+// the pipeline records them, and `no-mistakes stats` renders them, all against
 // these definitions. Nothing here reads or stores prompts, outputs, diffs, or
 // raw command arguments - only bounded counts, categories, and durations.
 
@@ -73,25 +74,25 @@ func (c ToolCategoryCounts) Total() int {
 
 // InvocationMetrics is the bounded activity evidence an adapter extracts from
 // one invocation's event stream. A nil *InvocationMetrics means the adapter
-// reported nothing (recorded as NULL, never a fabricated zero); a non-nil value
-// means every field is meaningful, including a genuine zero.
+// reported nothing (recorded as NULL, never a fabricated zero). Fields with
+// independent reporting flags remain unknown unless their flag is set.
 type InvocationMetrics struct {
-	// ModelRoundtrips counts the model-authored items in the turn (assistant
-	// messages plus tool calls). It is a live-stream proxy for productive model
-	// round-trips: because codex batches an exec into a single turn and does not
-	// surface internal poll round-trips as items, every counted item is
-	// productive work, not "are-we-there-yet" polling.
+	// ModelRoundtrips is an adapter-specific live-stream proxy for productive
+	// model work. Claude and Grok count distinct assistant messages; Codex counts
+	// completed agent-message and tool-call items because its exec stream does
+	// not expose internal model requests. It excludes wait/poll activity.
 	ModelRoundtrips int
 	// ToolCalls counts whole tool invocations (one command_execution item is one
 	// tool call regardless of how many sub-commands it chains).
 	ToolCalls int
 	// ToolCategories is the per-sub-command histogram (see ToolCategoryCounts).
 	ToolCategories ToolCategoryCounts
-	// SubprocessWaitMS is the wall-clock spent inside tool subprocesses,
-	// measured by the reader as the sum of each tool item's started->completed
-	// interval. Combined with the invocation duration it separates subprocess
-	// wait from model/reasoning time (see ModelTimeMS).
-	SubprocessWaitMS int64
+	// SubprocessWaitMS is the wall-clock spent inside tool subprocesses when
+	// SubprocessWaitReported is true, measured by the reader as the sum of each
+	// tool item's started->completed interval. Combined with invocation duration
+	// it separates subprocess wait from model/reasoning time (see ModelTimeMS).
+	SubprocessWaitMS       int64
+	SubprocessWaitReported bool
 }
 
 // ModelTimeMS is the authoritative split of invocation wall-clock into
@@ -153,6 +154,31 @@ func ClassifyToolCommand(command string) []ToolCategory {
 		categories = append(categories, classifySubcommand(sub))
 	}
 	return categories
+}
+
+func structuredToolCommand(input json.RawMessage) string {
+	var payload struct {
+		Command json.RawMessage `json:"command"`
+	}
+	if len(input) == 0 || json.Unmarshal(input, &payload) != nil || len(payload.Command) == 0 {
+		return ""
+	}
+	var command string
+	if json.Unmarshal(payload.Command, &command) != nil {
+		return ""
+	}
+	return command
+}
+
+func classifyStructuredTool(name string) ToolCategory {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "read", "glob", "grep", "ls", "listfiles", "search":
+		return ToolRead
+	case "edit", "write", "multiedit", "notebookedit":
+		return ToolEdit
+	default:
+		return ToolOther
+	}
 }
 
 // shellNames are the shells codex/agents wrap tool commands in.

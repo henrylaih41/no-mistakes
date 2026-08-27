@@ -9,14 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // TestGrokAgentJourney proves the native Grok adapter at the product boundary:
 // a user initializes a repo, pushes a feature branch through the gate, and the
 // daemon launches Grok both as the implementation agent and as a review-panel
-// member. The fake speaks Grok's real headless contract (plain stdout or one
-// schema-constrained JSON object), so this catches adapter/CLI flag conflicts
+// member. The fake speaks Grok's streaming-messages-json contract, so this
+// catches adapter/CLI flag and event-parser drift
 // that package-level argument tests cannot.
 func TestGrokAgentJourney(t *testing.T) {
 	h := NewHarness(t, SetupOpts{
@@ -49,7 +50,7 @@ func TestGrokAgentJourney(t *testing.T) {
 		}
 		grokInvocations = append(grokInvocations, inv)
 		assertGrokManagedInvocation(t, h, inv)
-		if strings.Contains(inv.Prompt, "Review the code changes and return structured findings") {
+		if strings.Contains(inv.Prompt, agent.ReviewPromptOpening) {
 			copy := inv
 			grokReview = &copy
 		}
@@ -110,8 +111,12 @@ func assertGrokManagedInvocation(t *testing.T, h *Harness, inv Invocation) {
 	if valueAfter(inv.Args, "--json-schema") == "" {
 		t.Fatalf("Grok args = %q, want native --json-schema structured output", inv.Args)
 	}
-	if containsArg(inv.Args, "--output-format") {
-		t.Fatalf("Grok structured invocation must omit conflicting --output-format: %q", inv.Args)
+	if strings.Contains(inv.Prompt, agent.ReviewPromptOpening) {
+		if valueAfter(inv.Args, "--output-format") != "streaming-messages-json" {
+			t.Fatalf("Grok review output args = %q, want --output-format streaming-messages-json", inv.Args)
+		}
+	} else if containsArg(inv.Args, "--output-format") {
+		t.Fatalf("Grok non-review output args = %q, want legacy structured output without --output-format", inv.Args)
 	}
 	worktreesRoot := filepath.Clean(filepath.Join(h.NMHome, "worktrees")) + string(filepath.Separator)
 	if !strings.HasPrefix(filepath.Clean(inv.CWD)+string(filepath.Separator), worktreesRoot) {

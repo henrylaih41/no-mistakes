@@ -68,9 +68,21 @@ func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (
 	return sctx.Sessions.Run(sctx.Ctx, sctx.Agent, role, opts, sctx.Log)
 }
 
+// DropAgentSession discards one role identity before a mandatory cold retry.
+// It is intentionally narrower than exposing the session manager itself.
+func (sctx *StepContext) DropAgentSession(role SessionRole) {
+	if sctx.Sessions != nil {
+		sctx.Sessions.forget(role)
+	}
+}
+
 // StepOutcome is the result of executing a pipeline step.
 type StepOutcome struct {
 	NeedsApproval bool // whether the step pauses for an approval response
+	// NeedsTriage parks this outcome at awaiting_triage even when the review
+	// fix-round cap was not reached. It is reserved for evidence failures that
+	// need authority before the pipeline may trust the step result.
+	NeedsTriage   bool
 	AutoFixable   bool
 	Findings      string // JSON findings for TUI display (optional)
 	ExitCode      int    // process exit code (0 = success)

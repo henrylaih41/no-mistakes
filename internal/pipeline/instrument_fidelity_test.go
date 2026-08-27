@@ -42,17 +42,19 @@ func (a *cumulativeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*ag
 		Model:         "gpt-5.6-sol",
 		ModelProvider: "openai",
 		Usage: agent.TokenUsage{
-			InputTokens:     a.cumInput,
-			OutputTokens:    a.cumOutput,
-			CacheReadTokens: a.cumCache,
-			ReasoningTokens: 5 * a.round,
+			InputTokens:       a.cumInput,
+			OutputTokens:      a.cumOutput,
+			CacheReadTokens:   a.cumCache,
+			ReasoningTokens:   5 * a.round,
+			ReasoningReported: true,
 		},
 		UsageReported: true,
 		Metrics: &agent.InvocationMetrics{
-			ModelRoundtrips:  4,
-			ToolCalls:        3,
-			ToolCategories:   agent.ToolCategoryCounts{TestLint: 1, Edit: 1, Read: 1},
-			SubprocessWaitMS: 1200,
+			ModelRoundtrips:        4,
+			ToolCalls:              3,
+			ToolCategories:         agent.ToolCategoryCounts{TestLint: 1, Edit: 1, Read: 1},
+			SubprocessWaitMS:       1200,
+			SubprocessWaitReported: true,
 		},
 		SessionUsageCumulative: true,
 		CacheCreationReported:  false,
@@ -241,6 +243,45 @@ func TestPerfRecording_MissingProviderUsageIsUnknown(t *testing.T) {
 	}
 	if inv.SubprocessWaitMS != nil {
 		t.Fatalf("subprocess wait must be unknown, got %d", *inv.SubprocessWaitMS)
+	}
+}
+
+type partialFidelityAgent struct{}
+
+func (partialFidelityAgent) Name() string { return "partial-fidelity" }
+func (partialFidelityAgent) Close() error { return nil }
+func (partialFidelityAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
+	return &agent.Result{
+		Usage:         agent.TokenUsage{InputTokens: 20, OutputTokens: 5, Reported: true},
+		UsageReported: true,
+		Metrics:       &agent.InvocationMetrics{ModelRoundtrips: 2, ToolCalls: 1},
+	}, nil
+}
+
+func TestPerfRecording_PartialFidelityKeepsUnreportedFieldsUnknown(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	wrapped := &perfRecordingAgent{
+		inner:    partialFidelityAgent{},
+		db:       database,
+		runID:    run.ID,
+		stepName: types.StepReview,
+		round:    func() int { return 1 },
+	}
+	if _, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	invs, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invs) != 1 {
+		t.Fatalf("got %d rows, want 1", len(invs))
+	}
+	inv := invs[0]
+	assertPtr(t, "model roundtrips", inv.ModelRoundtrips, 2)
+	assertPtr(t, "tool calls", inv.ToolCalls, 1)
+	if inv.ReasoningTokens != nil || inv.SubprocessWaitMS != nil || inv.CacheCreationTokens != nil {
+		t.Fatalf("unreported fidelity fields must stay NULL: reasoning=%v subprocess=%v cache_creation=%v", inv.ReasoningTokens, inv.SubprocessWaitMS, inv.CacheCreationTokens)
 	}
 }
 

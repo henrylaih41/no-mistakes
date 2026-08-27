@@ -46,7 +46,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
-| Grok Build | `grok` | Subprocess per invocation, plain or schema-constrained output |
+| Grok Build | `grok` | Subprocess per invocation, streaming review events or one-shot output |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
 ## Runner requirements
@@ -162,6 +162,8 @@ Merged review findings keep a `source` showing which reviewer reported them, and
 In a reviewer spec, `agent: auto` expands to the already resolved pipeline `agent`; name a reviewer family explicitly when you want a different model family.
 `review.max_parallel` limits concurrent reviewers; `0` means all reviewers run at once.
 `review.fail_open` defaults to `false`, so any reviewer error fails the review step instead of silently reducing coverage.
+Successful reviewer responses must also satisfy the [review verdict evidence contract](/no-mistakes/reference/pipeline-steps/#review); an invalid verdict gets one cold retry and cannot be dropped through `review.fail_open`.
+Claude, Codex, and Grok review mode currently surface the required activity evidence. Review verdicts from the other adapter families fail closed at this contract, although those adapters remain available for other agent-backed duties.
 
 Repo-level `review` is code-executing config because it selects extra agent processes.
 Like repo `commands` and `agent`, it is read from the trusted default-branch `.no-mistakes.yaml` unless `allow_repo_commands: true` is already set there.
@@ -216,7 +218,7 @@ The full driving protocol - how to read the home view and `gate:` objects, when 
 Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
 The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 
-If review reaches `review.max_fix_rounds`, it parks as `awaiting_triage`; `--yes` stops there. Report the residual findings for master triage. Only after master rules a residual merge-blocking may an agent send `axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <ids>`; the reason is persisted on the triggering round.
+Review parks as `awaiting_triage` after a second invalid review verdict evidence result, after reaching `review.max_fix_rounds`, or when both causes apply; `--yes` stops there. The `review-verdict-evidence` item is diagnostic and cannot be selected for source-fix work. At evidence-only triage, a normal fix may select preserved real reviewer findings. Whenever the fix-round cap is one of the causes, only after master rules a residual merge-blocking may an agent send `axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <ids>`; the reason is persisted on the triggering round.
 
 If the gate status is `awaiting_agent_retry`, the agent invocation exhausted bounded retries for a transient provider/runtime failure.
 There are no findings to fix: respond with `no-mistakes axi respond --action retry` to retry that same step.
@@ -326,11 +328,11 @@ The Copilot CLI has no output-schema flag, so when structured output is requeste
 
 ## Grok Build
 
-Spawns a `grok` subprocess for each invocation with `--permission-mode bypassPermissions -p <prompt>` and the run worktree as its cwd, adding `--output-format plain` when structured output is not requested.
-When structured output is requested, no-mistakes adds Grok's native `--json-schema` flag, omits `--output-format`, and validates the response envelope's `structuredOutput` instead of treating progress summaries in `text` as the result. Direct structured JSON output from older Grok versions remains supported.
+Spawns a `grok` subprocess for each invocation with `--permission-mode bypassPermissions -p <prompt>` and the run worktree as its cwd.
+Review invocations add `--output-format streaming-messages-json` and, when structured output is requested, Grok's native `--json-schema` flag. The streaming parser validates `structured_output` from the terminal result event and records reported token usage plus bounded model-round and tool-activity counts, so review verdicts can be checked for minimum execution evidence.
+Every non-review purpose retains the legacy one-shot contract: unconstrained calls use `--output-format plain`, while structured calls use `--json-schema` and accept either Grok's response envelope or a bare structured object. These modes do not expose token usage to the adapter. Direct structured JSON output from older Grok versions remains supported.
 `agent_args_override.grok` and reviewer-local `args` can select options such as `-m` and `--reasoning-effort`.
 The managed prompt, output, schema, permission, and cwd flags are reserved so those overrides cannot redirect or weaken the pipeline invocation.
-These response modes do not expose token usage to the adapter, so no-mistakes records zero token counts for Grok invocations.
 
 ## ACP via acpx
 

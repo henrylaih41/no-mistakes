@@ -138,6 +138,10 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 		cacheCreation := result.Usage.CacheCreationTokens
 		inv.CacheCreationTokens = &cacheCreation
 	}
+	if result.Usage.ReasoningReported {
+		reasoning := result.Usage.ReasoningTokens
+		inv.ReasoningTokens = &reasoning
+	}
 
 	// Per-round deltas: for a resumed session whose raw counters are cumulative,
 	// subtract the same session's prior cumulative so the row cannot be mistaken
@@ -154,12 +158,6 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 
 	if result.Metrics != nil {
 		m := result.Metrics
-		// Reasoning tokens are reported only by adapters that also report
-		// activity metrics (codex); a real zero there is meaningful.
-		if result.UsageReported {
-			reasoning := result.Usage.ReasoningTokens
-			inv.ReasoningTokens = &reasoning
-		}
 		roundtrips := m.ModelRoundtrips
 		inv.ModelRoundtrips = &roundtrips
 		toolCalls := m.ToolCalls
@@ -176,8 +174,10 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 		inv.ToolReadCalls = &read
 		inv.ToolGitCalls = &git
 		inv.ToolOtherCalls = &other
-		subprocessWait := m.SubprocessWaitMS
-		inv.SubprocessWaitMS = &subprocessWait
+		if m.SubprocessWaitReported {
+			subprocessWait := m.SubprocessWaitMS
+			inv.SubprocessWaitMS = &subprocessWait
+		}
 	}
 
 	if count, ok := countOutputFindings(result.Output); ok {

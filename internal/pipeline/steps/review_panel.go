@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -33,26 +34,49 @@ type reviewerReport struct {
 // per-reviewer worktree. A reviewer that writes files is a misconfiguration,
 // not a scenario this code defends against - so shared-worktree concurrency is
 // not a data-safety issue here and should not be flagged as one.
-func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts agent.RunOpts) (Findings, error) {
+func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts agent.RunOpts, verdictFloor time.Duration) (Findings, []reviewVerdictFailure, error) {
 	opts.OnChunk = nil
 	results := agent.FanOut(sctx.Ctx, reviewers, opts, sctx.Config.Review.MaxParallel)
 
-	reports, err := processReviewerResults(results, sctx.Config.Review.FailOpen, sctx.Log, sctx.LogFile)
+	var invalid []reviewVerdictFailure
+	invalidSlots := make(map[int]bool)
+	for idx := range results {
+		res := &results[idx]
+		if res.Err != nil {
+			continue
+		}
+		evidenceErr := validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor)
+		if evidenceErr != nil {
+			initialEvidenceErr := evidenceErr
+			sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", res.Agent.Name(), evidenceErr))
+			coldOpts := opts
+			coldOpts.Session = nil
+			started := time.Now()
+			result, retryErr := res.Agent.Run(sctx.Ctx, coldOpts)
+			res.Result = result
+			res.Err = retryErr
+			res.Duration = time.Since(started)
+			if res.Err == nil {
+				evidenceErr = validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor)
+			} else {
+				evidenceErr = fmt.Errorf("%v; cold retry failed: %w", initialEvidenceErr, res.Err)
+			}
+		}
+		if evidenceErr != nil {
+			invalid = append(invalid, reviewVerdictFailure{reviewer: res.Agent.Name(), reason: evidenceErr})
+			invalidSlots[idx] = true
+		}
+	}
+	reports, err := processReviewerResultsExcluding(results, sctx.Config.Review.FailOpen, invalidSlots, sctx.Log, sctx.LogFile)
 	if err != nil {
-		return Findings{}, err
+		return Findings{}, nil, err
 	}
 
 	// Per-reviewer user-visible summary, emitted serially from the main
 	// goroutine now that every reviewer has finished.
-	for _, r := range reports {
-		risk := r.Findings.RiskLevel
-		if risk == "" {
-			risk = "none"
-		}
-		sctx.Log(fmt.Sprintf("[reviewer %s] %d finding(s), risk=%s", r.Name, len(r.Findings.Items), risk))
-	}
+	logReviewerSummaries(sctx.Log, reports)
 
-	return combineReviewerFindings(reports), nil
+	return combineReviewerFindings(reports), invalid, nil
 }
 
 // processReviewerResults turns FanOut results into attributed reviewer reports,
@@ -68,10 +92,15 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 // Fail policy: when failOpen is false (the default) the first reviewer error
 // fails the step with an error naming that reviewer family. When failOpen is
 // true a failed reviewer is dropped with a loud, user-visible warning and the
-// step continues only if at least one reviewer succeeded. log is the
+// step continues only if at least one reviewer succeeded or an excluded
+// evidence-invalid reviewer still requires triage. log is the
 // user-visible callback; logFile is the file-only audit callback. Both run on
 // the caller's goroutine.
 func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, logFile func(string)) ([]reviewerReport, error) {
+	return processReviewerResultsExcluding(results, failOpen, nil, log, logFile)
+}
+
+func processReviewerResultsExcluding(results []agent.FanOutResult, failOpen bool, excluded map[int]bool, log, logFile func(string)) ([]reviewerReport, error) {
 	reports := make([]reviewerReport, 0, len(results))
 	var dropped []string
 	var firstTransient *agent.TransientError
@@ -94,29 +123,50 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 			}
 			continue
 		}
-		parsed := parseReviewFindings(res.Result, log)
-		prefix := fmt.Sprintf("review-%s-%d", name, idx+1)
-		for i := range parsed.Items {
-			parsed.Items[i].ID = ""
+		if excluded[idx] {
+			continue
 		}
-		parsed = types.NormalizeFindings(parsed, prefix)
-		for i := range parsed.Items {
-			parsed.Items[i].Source = name
-		}
-		reports = append(reports, reviewerReport{Name: name, Findings: parsed})
-		if logFile != nil {
-			if raw, mErr := json.Marshal(parsed); mErr == nil {
-				logFile(fmt.Sprintf("[reviewer %s] report: %s", name, string(raw)))
-			}
-		}
+		reports = append(reports, reviewerReportFromResult(idx, res, log, logFile))
 	}
 	if len(reports) == 0 {
+		if len(excluded) > 0 {
+			return reports, nil
+		}
 		if firstTransient != nil {
 			return nil, fmt.Errorf("review panel: all reviewers failed (%s): %w", strings.Join(dropped, ", "), firstTransient)
 		}
 		return nil, fmt.Errorf("review panel: all reviewers failed (%s)", strings.Join(dropped, ", "))
 	}
 	return reports, nil
+}
+
+func reviewerReportFromResult(idx int, res agent.FanOutResult, log, logFile func(string)) reviewerReport {
+	name := res.Agent.Name()
+	parsed := parseReviewFindings(res.Result, log)
+	prefix := fmt.Sprintf("review-%s-%d", name, idx+1)
+	for i := range parsed.Items {
+		parsed.Items[i].ID = ""
+	}
+	parsed = types.NormalizeFindings(parsed, prefix)
+	for i := range parsed.Items {
+		parsed.Items[i].Source = name
+	}
+	if logFile != nil {
+		if raw, err := json.Marshal(parsed); err == nil {
+			logFile(fmt.Sprintf("[reviewer %s] report: %s", name, string(raw)))
+		}
+	}
+	return reviewerReport{Name: name, Findings: parsed}
+}
+
+func logReviewerSummaries(log func(string), reports []reviewerReport) {
+	for _, report := range reports {
+		risk := report.Findings.RiskLevel
+		if risk == "" {
+			risk = "none"
+		}
+		log(fmt.Sprintf("[reviewer %s] %d finding(s), risk=%s", report.Name, len(report.Findings.Items), risk))
+	}
 }
 
 // combineReviewerFindings merges reviewer reports into a plain attributed union.

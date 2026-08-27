@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	toon "github.com/toon-format/toon-go"
@@ -481,6 +482,15 @@ func gateFields(gate stepView) []toon.Field {
 	if parsed.RiskLevel != "" {
 		gfields = append(gfields, toon.Field{Key: "risk", Value: parsed.RiskLevel})
 	}
+	evidenceTriage := gate.Status == string(types.StepStatusAwaitingTriage) && types.HasReviewVerdictEvidenceFinding(parsed)
+	fixRoundCapTriage := gate.Status == string(types.StepStatusAwaitingTriage) && (!evidenceTriage || strings.Contains(gate.Error, types.ReviewTriageReasonFixRoundCap))
+	selectableFinding := false
+	for _, finding := range parsed.Items {
+		if finding.ID != types.FindingIDReviewVerdictEvidence || finding.Source != types.FindingSourceReviewGate {
+			selectableFinding = true
+			break
+		}
+	}
 	// Point-of-use reminder at the review gate: review auto-fix defaults to
 	// disabled, so agents should expect blocking and both manual actions to park
 	// unless config explicitly opts back in.
@@ -488,7 +498,13 @@ func gateFields(gate stepView) []toon.Field {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking findings plus `ask-master` and `ask-user` review findings park for a decision rather than being silently self-fixed."})
 	}
 	if gate.Status == string(types.StepStatusAwaitingTriage) {
-		gfields = append(gfields, toon.Field{Key: "triage", Value: "Review max_fix_rounds has been reached. Residual findings require master triage: approve accepted/follow-up residuals, or use a one-round override only for a merge-blocking ruling."})
+		triage := "Review max_fix_rounds has been reached. Residual findings require master triage: approve accepted/follow-up residuals, or use a one-round override only for a merge-blocking ruling."
+		if evidenceTriage && fixRoundCapTriage {
+			triage = "Review verdict evidence failed after one cold retry and review max_fix_rounds was reached. Both causes apply: a valid source review is still required, and any further source-fix round for real reviewer findings requires an attributed one-round override. The review-verdict-evidence item is diagnostic and cannot be selected."
+		} else if evidenceTriage {
+			triage = "Review verdict evidence failed after one cold retry. A valid source review is still required; approve only after master triage, or use a normal fix round for real reviewer findings. The review-verdict-evidence item is diagnostic and cannot be selected."
+		}
+		gfields = append(gfields, toon.Field{Key: "triage", Value: triage})
 	}
 	rows := make([]findingRow, 0, len(parsed.Items))
 	for _, f := range parsed.Items {
@@ -506,11 +522,11 @@ func gateFields(gate stepView) []toon.Field {
 	help := []string{
 		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
 	}
-	if gate.Status == string(types.StepStatusAwaitingTriage) {
+	if fixRoundCapTriage && selectableFinding {
 		help = append(help,
 			"Run `no-mistakes axi respond --action fix --fix-override --override-reason \"<master triage reason>\" --findings <ids>` only after master rules a residual merge-blocking",
 		)
-	} else {
+	} else if selectableFinding || !evidenceTriage {
 		help = append(help,
 			"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
 		)

@@ -20,6 +20,8 @@ type Agent interface {
 	Close() error
 }
 
+const ReviewPromptOpening = "Review the code changes and return structured findings with a risk assessment."
+
 // RunOpts configures a single agent invocation.
 type RunOpts struct {
 	Prompt      string
@@ -207,9 +209,10 @@ type Result struct {
 	// fallback wrappers persist a session against the provider that minted it.
 	Provider string
 	// Metrics is the bounded per-invocation activity evidence the adapter
-	// extracted from its event stream (round-trips, tool calls + categories,
-	// subprocess wait time). Nil means the adapter reported nothing, which is
-	// recorded as unknown (NULL) rather than a fabricated zero.
+	// extracted from its event stream (round-trips and tool calls + categories;
+	// subprocess wait time when separately reported). Nil means the adapter
+	// reported nothing, which is recorded as unknown (NULL) rather than a
+	// fabricated zero.
 	Metrics *InvocationMetrics
 	// CacheCreationReported reports whether Usage.CacheCreationTokens is a
 	// meaningful value. Adapters whose provider does not surface cache-creation
@@ -229,10 +232,12 @@ type TokenUsage struct {
 	CacheReadTokens     int
 	CacheCreationTokens int
 	// ReasoningTokens is the output tokens the model spent on hidden reasoning,
-	// when the provider reports it separately. Zero when not reported.
+	// when the provider reports it separately. ReasoningReported distinguishes
+	// an unreported value from a real zero.
 	ReasoningTokens       int
 	Reported              bool
 	CacheCreationReported bool
+	ReasoningReported     bool
 }
 
 // InvocationWorkload is the bounded size of the change an invocation works
@@ -777,6 +782,7 @@ func (u *TokenUsage) Add(other TokenUsage) {
 	u.ReasoningTokens += other.ReasoningTokens
 	u.Reported = u.Reported || other.Reported
 	u.CacheCreationReported = u.CacheCreationReported || other.CacheCreationReported
+	u.ReasoningReported = u.ReasoningReported || other.ReasoningReported
 }
 
 // New creates an agent by name with the given binary path.

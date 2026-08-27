@@ -81,7 +81,7 @@ On follow-up review passes, that history tells the agent not to re-report user-i
 
 After a user-triggered fix, the step re-runs and pauses again to show you the results (`fix_review` status). You can then approve, fix again, skip, or abort.
 Yolo and AXI `--yes` approve that fix review automatically after their one fix round, so a finding that remains after the fix does not trigger an unbounded fix loop.
-When `review.max_fix_rounds` is configured and reached, the review step parks at `awaiting_triage` instead; neither yolo nor `--yes` resolves that gate, and another fix round requires an explicit `--fix-override --override-reason` triage decision.
+Review also parks at `awaiting_triage` after a second invalid verdict-evidence result; neither yolo nor AXI `--yes` resolves any triage gate. The evidence diagnostic itself is not fixable, but a normal fix round may address preserved real reviewer findings when verdict evidence is the only triage cause. When `review.max_fix_rounds` is also configured and reached, another fix round requires an explicit `--fix-override --override-reason` triage decision. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns the verdict-evidence contract.
 
 ## Fix commits
 

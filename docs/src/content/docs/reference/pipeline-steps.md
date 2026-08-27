@@ -71,7 +71,8 @@ AI code review of your diff.
 - Keeps the later Push, PR, and CI steps responsible for strictly validating their own outcomes after review completes
 - Each reviewer returns findings with severity (`error`, `warning`, `info`), file location, description, and an `action` (`no-op`, `auto-fix`, `ask-master`, `ask-user`)
 - In review-panel mode, merged findings keep a reviewer `source`, get reviewer-namespaced IDs, concatenate reviewer summaries/rationales, and use the highest reported `risk_level`
-- `review.max_parallel` bounds concurrent reviewers; `review.fail_open: false` (the default) fails the review step on any reviewer error, while `true` drops failed reviewers if at least one reviewer succeeds
+- `review.max_parallel` bounds concurrent reviewers; `review.fail_open: false` (the default) fails the review step on any reviewer process error, while `true` may drop process errors if another reviewer succeeds or the failed cold retry is already being parked for verdict-evidence triage
+- A structured verdict is trusted only when the adapter reports activity metrics, the turn includes at least one tool call or more than one model round-trip, elapsed wall time meets a bounded floor scaled by changed-file and line counts, and the summary/risk rationale does not contain recognized non-final deferral language. An invalid verdict is retried once cold; a second invalid verdict parks at `awaiting_triage`. `review.fail_open` never drops this validity failure.
 - Also returns a `risk_level` (`low`, `medium`, `high`) and `risk_rationale`
 - With the default `session_reuse: true`, the single-reviewer path can reuse one Claude or Codex reviewer session across the initial review and every full rereview, while the pipeline agent uses a separate fixer session across review-fix turns; configured panel reviewers run independently and cold
 - A resume failure retries the same turn in a fresh session for that role, never skips the full rereview, and unsupported agents run cold
@@ -259,7 +260,7 @@ Each step progresses through these statuses:
 | `awaiting_approval` | Paused, waiting for the finding's owning authority |
 | `awaiting_agent_retry` | Paused after an agent invocation exhausted bounded retries for a transient provider/runtime failure; resume with `axi respond --action retry` to retry the step |
 | `fix_review` | Paused after a fix cycle, showing results for review |
-| `awaiting_triage` | Review fix-round cap reached; residual findings require master triage |
+| `awaiting_triage` | Review verdict evidence failed twice, the review fix-round cap was reached, or both; master triage is required |
 | `completed` | Finished successfully |
 | `skipped` | Pre-skipped for the run, skipped by the user, or skipped automatically by the pipeline |
 | `failed` | Step failed; the step log includes the returned error message so command stderr and provider errors are visible in the per-step log, not only in the daemon log |

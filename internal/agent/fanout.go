@@ -3,15 +3,17 @@ package agent
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // FanOutResult pairs a reviewer agent with the outcome of running it. For a
 // completed agent exactly one of Result or Err is non-nil; Agent is always the
 // input agent for that slot so callers can attribute the outcome.
 type FanOutResult struct {
-	Agent  Agent
-	Result *Result
-	Err    error
+	Agent    Agent
+	Result   *Result
+	Err      error
+	Duration time.Duration
 }
 
 // FanOut runs the same RunOpts against every agent concurrently and returns one
@@ -55,7 +57,9 @@ func FanOut(ctx context.Context, agents []Agent, opts RunOpts, maxParallel int) 
 				results[i].Err = err
 				return
 			}
+			started := time.Now()
 			res, err := ag.Run(ctx, opts)
+			results[i].Duration = time.Since(started)
 			results[i].Result = res
 			results[i].Err = err
 		}(i, ag)
