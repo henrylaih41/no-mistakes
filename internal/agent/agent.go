@@ -231,10 +231,12 @@ type TokenUsage struct {
 	CacheReadTokens     int
 	CacheCreationTokens int
 	// ReasoningTokens is the output tokens the model spent on hidden reasoning,
-	// when the provider reports it separately. Zero when not reported.
+	// when the provider reports it separately. ReasoningReported distinguishes
+	// an unreported value from a real zero.
 	ReasoningTokens       int
 	Reported              bool
 	CacheCreationReported bool
+	ReasoningReported     bool
 }
 
 // InvocationWorkload is the bounded size of the change an invocation works
@@ -779,6 +781,7 @@ func (u *TokenUsage) Add(other TokenUsage) {
 	u.ReasoningTokens += other.ReasoningTokens
 	u.Reported = u.Reported || other.Reported
 	u.CacheCreationReported = u.CacheCreationReported || other.CacheCreationReported
+	u.ReasoningReported = u.ReasoningReported || other.ReasoningReported
 }
 
 // New creates an agent by name with the given binary path.

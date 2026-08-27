@@ -35,7 +35,7 @@ func TestParseGrokEventsSurfacesUsageAndReviewActivity(t *testing.T) {
 	wantUsage := TokenUsage{
 		InputTokens: 19, OutputTokens: 7, CacheReadTokens: 5,
 		CacheCreationTokens: 3, ReasoningTokens: 2,
-		Reported: true, CacheCreationReported: true,
+		Reported: true, CacheCreationReported: true, ReasoningReported: true,
 	}
 	if !reflect.DeepEqual(result.Usage, wantUsage) {
 		t.Fatalf("usage = %+v, want %+v", result.Usage, wantUsage)
@@ -85,9 +85,9 @@ func TestParseGrokEventsSkipsMalformedAndNonEventOutput(t *testing.T) {
 	}
 }
 
-func TestGrokAgentBuildArgsWithJSONSchema(t *testing.T) {
+func TestGrokAgentBuildArgsForStreamingReview(t *testing.T) {
 	a := &grokAgent{bin: "grok"}
-	got := a.buildArgs("review this", json.RawMessage(`{"type":"object"}`))
+	got := a.buildArgs("review this", json.RawMessage(`{"type":"object"}`), true)
 	want := []string{
 		"--permission-mode", "bypassPermissions",
 		"-p", "review this",
@@ -101,11 +101,24 @@ func TestGrokAgentBuildArgsWithJSONSchema(t *testing.T) {
 
 func TestGrokAgentBuildArgsWithPlainOutput(t *testing.T) {
 	a := &grokAgent{bin: "grok"}
-	got := a.buildArgs("review this", nil)
+	got := a.buildArgs("fix this", nil, false)
 	want := []string{
 		"--permission-mode", "bypassPermissions",
-		"-p", "review this",
-		"--output-format", "streaming-messages-json",
+		"-p", "fix this",
+		"--output-format", "plain",
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
+}
+
+func TestGrokAgentBuildArgsWithNonReviewJSONSchema(t *testing.T) {
+	a := &grokAgent{bin: "grok"}
+	got := a.buildArgs("fix this", json.RawMessage(`{"type":"object"}`), false)
+	want := []string{
+		"--permission-mode", "bypassPermissions",
+		"-p", "fix this",
+		"--json-schema", `{"type":"object"}`,
 	}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("args = %q, want %q", got, want)
@@ -117,7 +130,7 @@ func TestGrokAgentBuildArgsPrependsModelAndReasoningOverrides(t *testing.T) {
 		bin:       "grok",
 		extraArgs: []string{"-m", "grok-code-fast-1", "--reasoning-effort", "high"},
 	}
-	got := a.buildArgs("review this", nil)
+	got := a.buildArgs("review this", nil, true)
 	want := []string{
 		"-m", "grok-code-fast-1", "--reasoning-effort", "high",
 		"--permission-mode", "bypassPermissions",
@@ -140,6 +153,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"d
 	result, err := a.Run(context.Background(), RunOpts{
 		Prompt:     "review",
 		CWD:        dir,
+		Purpose:    "review",
 		JSONSchema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`),
 		OnChunk:    func(chunk string) { chunks = append(chunks, chunk) },
 	})
@@ -167,6 +181,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"d
 	result, err := a.Run(context.Background(), RunOpts{
 		Prompt:     "review",
 		CWD:        dir,
+		Purpose:    "review",
 		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`),
 	})
 	if err != nil {
@@ -189,6 +204,7 @@ func TestGrokAgentRunOnceEmitsAssistantTextWhenStructuredOutputIsInvalid(t *test
 	_, err := a.runOnce(context.Background(), RunOpts{
 		Prompt:     "review",
 		CWD:        dir,
+		Purpose:    "review",
 		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`),
 		OnChunk:    func(chunk string) { chunks = append(chunks, chunk) },
 	})
@@ -215,12 +231,67 @@ func TestFinalizeGrokResultAllowsNullOptionalProperties(t *testing.T) {
 	}
 }
 
+func TestNormalizedGrokUsagePreservesOptionalFieldPresence(t *testing.T) {
+	cacheZero := 0
+	reasoningZero := 0
+	withoutOptional := normalizedGrokUsage(&grokUsage{InputTokens: 1})
+	if withoutOptional.CacheCreationReported || withoutOptional.ReasoningReported {
+		t.Fatalf("usage = %+v, want optional fidelity fields unknown", withoutOptional)
+	}
+	withZeroOptional := normalizedGrokUsage(&grokUsage{
+		CacheCreationInputTokens: &cacheZero,
+		ReasoningTokens:          &reasoningZero,
+	})
+	if !withZeroOptional.CacheCreationReported || !withZeroOptional.ReasoningReported || withZeroOptional.CacheCreationTokens != 0 || withZeroOptional.ReasoningTokens != 0 {
+		t.Fatalf("usage = %+v, want reported real zeros", withZeroOptional)
+	}
+}
+
+func TestGrokAgentRunNonReviewRetainsLegacyOutputShapes(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
+	tests := []struct {
+		name       string
+		stdout     string
+		schema     json.RawMessage
+		wantText   string
+		wantOutput string
+	}{
+		{name: "plain", stdout: "done", wantText: "done"},
+		{name: "response envelope", stdout: `{"text":"working","structuredOutput":{"ok":true}}`, schema: schema, wantText: "working", wantOutput: `{"ok":true}`},
+		{name: "bare structured", stdout: `{"ok":true}`, schema: schema, wantText: `{"ok":true}`, wantOutput: `{"ok":true}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := writeFakeGrok(t, dir,
+				"#!/bin/sh\nprintf '%s\\n' '"+tc.stdout+"'\n",
+				"@echo off\r\necho "+tc.stdout+"\r\n",
+			)
+			result, err := (&grokAgent{bin: bin}).Run(context.Background(), RunOpts{
+				Prompt:     "fix",
+				Purpose:    "review-fix",
+				CWD:        dir,
+				JSONSchema: tc.schema,
+			})
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if result.Text != tc.wantText || string(result.Output) != tc.wantOutput {
+				t.Fatalf("result = text %q output %s, want text %q output %s", result.Text, result.Output, tc.wantText, tc.wantOutput)
+			}
+			if result.Metrics != nil {
+				t.Fatalf("legacy non-review metrics = %+v, want unknown", result.Metrics)
+			}
+		})
+	}
+}
+
 func TestGrokAgentRunUsesWorktreeCWD(t *testing.T) {
 	dir := t.TempDir()
 	binDir := t.TempDir()
 	bin := writeFakeGrok(t, binDir,
-		"#!/bin/sh\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"%s\"}\\n' \"$(pwd)\"\n",
-		"@echo off\r\nfor /f \"delims=\" %%i in ('cd') do echo {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"%%i\"}\r\n",
+		"#!/bin/sh\npwd\n",
+		"@echo off\r\ncd\r\n",
 	)
 	a := &grokAgent{bin: bin}
 	result, err := a.Run(context.Background(), RunOpts{Prompt: "cwd", CWD: dir})
@@ -265,6 +336,7 @@ func TestGrokAgentRunOnceEmitsBoundedStdoutOnParseFailure(t *testing.T) {
 	_, err := a.runOnce(context.Background(), RunOpts{
 		Prompt:  "review",
 		CWD:     dir,
+		Purpose: "review",
 		OnChunk: func(chunk string) { chunks = append(chunks, chunk) },
 	})
 	if err == nil || !strings.Contains(err.Error(), "no result event") {

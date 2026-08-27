@@ -275,6 +275,26 @@ func TestParseClaudeEvents_ReportsReviewActivityMetrics(t *testing.T) {
 	}
 }
 
+func TestParseClaudeEvents_ClassifiesBashCommands(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status && go test ./internal/agent"}}]}}`,
+		`{"type":"result","subtype":"success","structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatalf("parseClaudeEvents() error = %v", err)
+	}
+	if parsed == nil {
+		t.Fatal("expected result event")
+	}
+	metrics := parsed.metrics
+	if metrics.ToolCalls != 1 || metrics.ToolCategories.Git != 1 || metrics.ToolCategories.TestLint != 1 || metrics.ToolCategories.Other != 0 {
+		t.Fatalf("tool metrics = %+v, want one Bash call classified as git plus test/lint", metrics)
+	}
+}
+
 func TestParseClaudeEvents_CountsDistinctMessageIDsAsModelRoundtrips(t *testing.T) {
 	events := strings.Join([]string{
 		`{"type":"assistant","message":{"id":"msg-1","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"thinking"}]}}`,

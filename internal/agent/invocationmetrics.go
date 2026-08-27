@@ -73,8 +73,8 @@ func (c ToolCategoryCounts) Total() int {
 
 // InvocationMetrics is the bounded activity evidence an adapter extracts from
 // one invocation's event stream. A nil *InvocationMetrics means the adapter
-// reported nothing (recorded as NULL, never a fabricated zero); a non-nil value
-// means every field is meaningful, including a genuine zero.
+// reported nothing (recorded as NULL, never a fabricated zero). Fields with
+// independent reporting flags remain unknown unless their flag is set.
 type InvocationMetrics struct {
 	// ModelRoundtrips counts the model-authored items in the turn (assistant
 	// messages plus tool calls). It is a live-stream proxy for productive model
@@ -91,7 +91,8 @@ type InvocationMetrics struct {
 	// measured by the reader as the sum of each tool item's started->completed
 	// interval. Combined with the invocation duration it separates subprocess
 	// wait from model/reasoning time (see ModelTimeMS).
-	SubprocessWaitMS int64
+	SubprocessWaitMS       int64
+	SubprocessWaitReported bool
 }
 
 // ModelTimeMS is the authoritative split of invocation wall-clock into

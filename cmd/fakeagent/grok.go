@@ -7,9 +7,7 @@ import (
 	"time"
 )
 
-// runGrok matches the Grok Build headless contract used by no-mistakes: one
-// prompt supplied with -p and streaming-messages-json events on stdout, with
-// structured_output on the terminal result when --json-schema is present.
+// runGrok matches the Grok Build headless contracts used by no-mistakes.
 func runGrok(args []string, scenario *Scenario) int {
 	started := time.Now()
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "-v") {
@@ -30,11 +28,18 @@ func runGrok(args []string, scenario *Scenario) int {
 	}
 	waitForFakeReviewEvidence(started, prompt)
 
-	if valueAfterGrokArg(args, "--output-format") != "streaming-messages-json" {
-		fmt.Fprintln(os.Stderr, "fakeagent: grok streaming-messages-json output required")
-		return 2
-	}
 	enc := json.NewEncoder(os.Stdout)
+	if valueAfterGrokArg(args, "--output-format") != "streaming-messages-json" {
+		if hasGrokArg(args, "--json-schema") {
+			_ = enc.Encode(map[string]any{
+				"text":             action.textOrDefault(),
+				"structuredOutput": json.RawMessage(action.structuredJSON()),
+			})
+		} else {
+			fmt.Fprintln(os.Stdout, action.textOrDefault())
+		}
+		return 0
+	}
 	content := []any{map[string]any{"type": "text", "text": action.textOrDefault()}}
 	if isReviewPrompt(prompt) {
 		content = append([]any{map[string]any{"type": "tool_use", "name": "Read"}}, content...)

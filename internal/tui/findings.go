@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -21,16 +22,39 @@ func (m Model) awaitingActionState() (showSelectionActions bool, allowFix bool, 
 	if len(items) == 0 {
 		return false, false, 0, 0
 	}
-	if step.Status == types.StepStatusAwaitingTriage {
+	if step.Status == types.StepStatusAwaitingTriage && !isEvidenceOnlyReviewTriage(step) {
 		return false, false, 0, len(items)
 	}
-	totalCount = len(items)
+	for _, item := range items {
+		if findingSelectableForFix(item) {
+			totalCount++
+		}
+	}
+	if totalCount == 0 {
+		return false, false, 0, 0
+	}
 	selected, ok := m.findingSelections[step.StepName]
 	if !ok {
 		return true, true, totalCount, totalCount
 	}
-	selectedCount = len(selected)
+	for _, item := range items {
+		if findingSelectableForFix(item) && selected[item.ID] {
+			selectedCount++
+		}
+	}
 	return true, selectedCount > 0, selectedCount, totalCount
+}
+
+func isEvidenceOnlyReviewTriage(step *ipc.StepResultInfo) bool {
+	return step != nil &&
+		step.StepName == types.StepReview &&
+		step.Status == types.StepStatusAwaitingTriage &&
+		step.Error != nil &&
+		*step.Error == types.ReviewTriageReasonEvidence
+}
+
+func findingSelectableForFix(item finding) bool {
+	return item.ID != types.FindingIDReviewVerdictEvidence
 }
 
 // findingItems returns the complete list of findings rendered for the step,
@@ -104,7 +128,7 @@ func (m *Model) resetFindingSelection(step types.StepName) {
 	}
 	selected := make(map[string]bool)
 	for _, item := range m.findingItems(step) {
-		if item.ID != "" {
+		if item.ID != "" && findingSelectableForFix(item) {
 			selected[item.ID] = true
 		}
 	}
@@ -122,7 +146,7 @@ func (m *Model) selectedFindingIDs(step types.StepName) []string {
 	}
 	var ids []string
 	for _, item := range m.agentFindingItems(step) {
-		if selected[item.ID] {
+		if findingSelectableForFix(item) && selected[item.ID] {
 			ids = append(ids, item.ID)
 		}
 	}
@@ -139,7 +163,7 @@ func (m *Model) selectedUserAddedFindings(step types.StepName) []finding {
 	selected := m.findingSelections[step]
 	var result []finding
 	for _, item := range added {
-		if selected == nil || selected[item.ID] {
+		if findingSelectableForFix(item) && (selected == nil || selected[item.ID]) {
 			result = append(result, item)
 		}
 	}
@@ -195,7 +219,7 @@ func (m *Model) toggleCurrentFinding(step types.StepName) {
 		return
 	}
 	id := items[cur].ID
-	if id == "" {
+	if id == "" || !findingSelectableForFix(items[cur]) {
 		return
 	}
 	m.findingSelections[step][id] = !m.findingSelections[step][id]

@@ -18,9 +18,9 @@ const grokScannerMaxTokenSize = 256 * 1024 * 1024
 
 var errGrokNoStructuredOutput = errors.New("grok returned no structured output")
 
-// grokAgent spawns the Grok Build CLI in single-turn streaming mode for each
-// invocation. Streaming messages expose usage and activity evidence that the
-// old one-shot response envelope discarded.
+// grokAgent spawns the Grok Build CLI in single-turn mode. Review invocations
+// use streaming events for activity evidence; other duties retain the
+// one-shot response formats supported by older Grok versions.
 type grokAgent struct {
 	bin       string
 	extraArgs []string
@@ -37,7 +37,8 @@ func (a *grokAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 func (a *grokAgent) Close() error { return nil }
 
 func (a *grokAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
-	cmd := exec.CommandContext(ctx, a.bin, a.buildArgs(opts.Prompt, opts.JSONSchema)...)
+	streamReview := opts.Purpose == "review"
+	cmd := exec.CommandContext(ctx, a.bin, a.buildArgs(opts.Prompt, opts.JSONSchema, streamReview)...)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
@@ -55,6 +56,20 @@ func (a *grokAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 			return nil, fmt.Errorf("grok exited: %w: %s", err, detail)
 		}
 		return nil, fmt.Errorf("grok exited: %w", err)
+	}
+	if !streamReview {
+		text := strings.TrimSpace(stdout.String())
+		result, err := finalizeLegacyGrokResult(text, opts.JSONSchema, TokenUsage{})
+		if err != nil {
+			if opts.OnChunk != nil && text != "" {
+				opts.OnChunk(text)
+			}
+			return nil, err
+		}
+		if opts.OnChunk != nil && result.Text != "" {
+			opts.OnChunk(result.Text)
+		}
+		return result, nil
 	}
 
 	result, rawResultEvent, err := parseGrokEvents(ctx, bytes.NewReader(stdout.Bytes()), opts.OnChunk)
@@ -101,7 +116,7 @@ type grokUsage struct {
 	InputTokens              int  `json:"input_tokens"`
 	OutputTokens             int  `json:"output_tokens"`
 	CacheReadInputTokens     int  `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int  `json:"cache_creation_input_tokens"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens,omitempty"`
 	ReasoningTokens          *int `json:"reasoning_tokens,omitempty"`
 }
 
@@ -198,23 +213,53 @@ func normalizedGrokUsage(raw *grokUsage) TokenUsage {
 	if raw == nil {
 		return TokenUsage{}
 	}
+	cacheCreation := 0
+	if raw.CacheCreationInputTokens != nil {
+		cacheCreation = *raw.CacheCreationInputTokens
+	}
 	reasoning := 0
 	if raw.ReasoningTokens != nil {
 		reasoning = *raw.ReasoningTokens
 	}
 	if raw.InputTokens == 0 && raw.OutputTokens == 0 && raw.CacheReadInputTokens == 0 &&
-		raw.CacheCreationInputTokens == 0 && reasoning == 0 {
+		cacheCreation == 0 && reasoning == 0 && raw.CacheCreationInputTokens == nil && raw.ReasoningTokens == nil {
 		return TokenUsage{}
 	}
 	return TokenUsage{
-		InputTokens:           raw.InputTokens + raw.CacheReadInputTokens + raw.CacheCreationInputTokens,
+		InputTokens:           raw.InputTokens + raw.CacheReadInputTokens + cacheCreation,
 		OutputTokens:          raw.OutputTokens,
 		CacheReadTokens:       raw.CacheReadInputTokens,
-		CacheCreationTokens:   raw.CacheCreationInputTokens,
+		CacheCreationTokens:   cacheCreation,
 		ReasoningTokens:       reasoning,
 		Reported:              true,
-		CacheCreationReported: true,
+		CacheCreationReported: raw.CacheCreationInputTokens != nil,
+		ReasoningReported:     raw.ReasoningTokens != nil,
 	}
+}
+
+type grokResponse struct {
+	Text             string          `json:"text"`
+	StructuredOutput json.RawMessage `json:"structuredOutput"`
+}
+
+func finalizeLegacyGrokResult(text string, schema json.RawMessage, usage TokenUsage) (*Result, error) {
+	if len(schema) == 0 {
+		return finalizeTextResult("grok", text, nil, usage)
+	}
+
+	var response grokResponse
+	if err := json.Unmarshal([]byte(text), &response); err == nil &&
+		len(response.StructuredOutput) > 0 &&
+		!bytes.Equal(bytes.TrimSpace(response.StructuredOutput), []byte("null")) {
+		result, err := finalizeTextResult("grok", string(response.StructuredOutput), schema, usage)
+		if err != nil {
+			return nil, err
+		}
+		result.Text = response.Text
+		return result, nil
+	}
+
+	return finalizeTextResult("grok", text, schema, usage)
 }
 
 func finalizeGrokResult(result *Result, schema json.RawMessage) (*Result, error) {
@@ -239,16 +284,20 @@ func finalizeGrokResult(result *Result, schema json.RawMessage) (*Result, error)
 // buildArgs constructs the managed Grok CLI invocation. Permitted user CLI
 // overrides are prepended, while prompt, output, schema, permission, and cwd
 // control remain reserved by config validation.
-func (a *grokAgent) buildArgs(prompt string, schema json.RawMessage) []string {
+func (a *grokAgent) buildArgs(prompt string, schema json.RawMessage, streamReview bool) []string {
 	args := make([]string, 0, len(a.extraArgs)+10)
 	args = append(args, a.extraArgs...)
 	args = append(args,
 		"--permission-mode", "bypassPermissions",
 		"-p", prompt,
-		"--output-format", "streaming-messages-json",
 	)
+	if streamReview {
+		args = append(args, "--output-format", "streaming-messages-json")
+	}
 	if len(schema) > 0 {
 		args = append(args, "--json-schema", string(schema))
+	} else if !streamReview {
+		args = append(args, "--output-format", "plain")
 	}
 	return args
 }

@@ -119,6 +119,9 @@ func (m Model) respondCmd(action types.ApprovalAction, autoRetry bool) tea.Cmd {
 		return nil
 	}
 	if action == types.ActionFix {
+		if step.Status == types.StepStatusAwaitingTriage && !isEvidenceOnlyReviewTriage(step) {
+			return nil
+		}
 		ids := m.selectedFindingIDs(step.StepName)
 		userAdded := m.selectedUserAddedFindings(step.StepName)
 		if len(ids) == 0 && len(userAdded) == 0 && len(m.findingItems(step.StepName)) > 0 {
