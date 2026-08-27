@@ -858,18 +858,18 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 		return 0, fmt.Errorf("recover interrupted ci monitor steps: %w", err)
 	}
 
-	// Fail stale steps (running, awaiting_approval, fixing, fix_review) for
+	// Fail stale steps (running, awaiting_approval, fixing, fix_review, awaiting_triage) for
 	// pending/running runs, excluding preserved runs. The CI monitor runs
 	// recovered above are no longer pending/running, so they are left alone.
 	stepArgs := []any{
 		types.StepStatusFailed, errMsg, ts,
-		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview,
+		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview, types.StepStatusAwaitingTriage,
 		types.RunPending, types.RunRunning,
 	}
 	stepArgs = append(stepArgs, args...)
 	_, err = tx.Exec(
 		`UPDATE step_results SET status = ?, error = ?, completed_at = ?
-		 WHERE status IN (?, ?, ?, ?) AND run_id IN (
+		 WHERE status IN (?, ?, ?, ?, ?) AND run_id IN (
 			SELECT id FROM runs WHERE status IN (?, ?)`+placeholders+`
 		 )`,
 		stepArgs...,

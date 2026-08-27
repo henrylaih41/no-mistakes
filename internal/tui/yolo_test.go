@@ -35,6 +35,19 @@ func TestModel_Update_YoloKeyTogglesMode(t *testing.T) {
 	}
 }
 
+func TestModel_Yolo_DoesNotAutoResolveAwaitingTriage(t *testing.T) {
+	run := testRun()
+	run.Steps[0].Status = types.StepStatusAwaitingTriage
+	findings := `{"findings":[{"id":"review-1","severity":"error","description":"still wrong","action":"auto-fix"}],"summary":"1"}`
+	run.Steps[0].FindingsJSON = &findings
+
+	m := NewModel("/tmp/sock", nil, run)
+	m.yoloMode = true
+	if cmd := m.maybeAutoApproveCmd(); cmd != nil {
+		t.Fatal("yolo must not auto-resolve awaiting_triage")
+	}
+}
+
 func TestModel_Yolo_AutoApprovesAwaitingStep(t *testing.T) {
 	sock := testSocketPath(t)
 	srv := startTestIPCServer(t, sock)

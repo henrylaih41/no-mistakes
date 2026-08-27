@@ -103,6 +103,9 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if step == nil || m.yoloApproved[step.StepName] {
 		return nil
 	}
+	if step.Status == types.StepStatusAwaitingTriage {
+		return nil
+	}
 	if !m.approvalReady(step) {
 		return nil
 	}

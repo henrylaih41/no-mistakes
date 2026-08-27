@@ -36,10 +36,11 @@ const (
 )
 
 type approvalResponse struct {
-	action        types.ApprovalAction
-	findingIDs    []string
-	instructions  map[string]string
-	addedFindings []types.Finding
+	action            types.ApprovalAction
+	findingIDs        []string
+	instructions      map[string]string
+	addedFindings     []types.Finding
+	fixOverrideReason string
 }
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
@@ -60,10 +61,13 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
-	mu          sync.Mutex
-	approvalCh  chan approvalResponse // buffered channel for approval responses
-	waiting     bool                  // true when blocked on approval
-	waitingStep types.StepName        // which step is currently awaiting approval
+	mu                   sync.Mutex
+	approvalCh           chan approvalResponse // buffered channel for approval responses
+	waiting              bool                  // true when blocked on approval
+	waitingStep          types.StepName        // which step is currently awaiting approval
+	waitingAtFixRoundCap bool
+	waitingFixRoundCount int
+	waitingMaxFixRounds  int
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -155,6 +159,13 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 // instructions and user-authored findings. Both are merged into the round's
 // findings on a fix action before the fix agent runs.
 func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding) error {
+	return e.RespondWithOverrideReason(step, action, findingIDs, instructions, addedFindings, "")
+}
+
+// RespondWithOverrideReason allows one attributed review fix round after the
+// configured cap has been consumed. The reason is accepted only at that gate.
+func (e *Executor) RespondWithOverrideReason(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, fixOverrideReason string) error {
+	fixOverrideReason = strings.TrimSpace(fixOverrideReason)
 	e.mu.Lock()
 	if !e.waiting {
 		e.mu.Unlock()
@@ -164,14 +175,30 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
+	if fixOverrideReason != "" && action != types.ActionFix {
+		e.mu.Unlock()
+		return fmt.Errorf("fix override reason is only valid with --action fix")
+	}
+	if action == types.ActionFix {
+		if e.waitingAtFixRoundCap && fixOverrideReason == "" {
+			count, max := e.waitingFixRoundCount, e.waitingMaxFixRounds
+			e.mu.Unlock()
+			return fmt.Errorf("review max_fix_rounds cap reached (%d consumed, cap %d); step is awaiting_triage for master triage; use --fix-override --override-reason <reason> only after an explicit triage ruling", count, max)
+		}
+		if !e.waitingAtFixRoundCap && fixOverrideReason != "" {
+			e.mu.Unlock()
+			return fmt.Errorf("--fix-override is only valid while review is awaiting_triage after max_fix_rounds is reached")
+		}
+	}
 	e.waiting = false
 	e.mu.Unlock()
 
 	e.approvalCh <- approvalResponse{
-		action:        action,
-		findingIDs:    findingIDs,
-		instructions:  instructions,
-		addedFindings: addedFindings,
+		action:            action,
+		findingIDs:        findingIDs,
+		instructions:      instructions,
+		addedFindings:     addedFindings,
+		fixOverrideReason: fixOverrideReason,
 	}
 	return nil
 }
@@ -417,6 +444,18 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.mu.Lock()
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
+	if gate.stepResult.Status == types.StepStatusAwaitingTriage {
+		count, countErr := e.db.CountStepFixRounds(gate.stepResult.ID)
+		if countErr != nil {
+			e.mu.Unlock()
+			return e.failRun(run, repo, fmt.Errorf("count recovered review fix rounds: %w", countErr), ctx)
+		}
+		e.waitingAtFixRoundCap = true
+		e.waitingFixRoundCount = count
+		if e.config != nil {
+			e.waitingMaxFixRounds = e.config.Review.MaxFixRounds
+		}
+	}
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -430,6 +469,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	)
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, false)
+	if response.fixOverrideReason != "" {
+		if gate.lastRoundID == "" {
+			err = fmt.Errorf("step %s: cannot persist fix override reason (no round record); refusing unattributed override fix round", gate.step.Name())
+		} else if dbErr := e.db.SetStepRoundFixOverrideReason(gate.lastRoundID, response.fixOverrideReason); dbErr != nil {
+			err = fmt.Errorf("step %s: persist fix override reason: %w", gate.step.Name(), dbErr)
+		}
+	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
@@ -454,6 +500,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	if selectedCount := selectedFindingCount(gate.findings, response.findingIDs); selectedCount > 0 {
 		approvalFields["selected_findings_count"] = selectedCount
+	}
+	if response.fixOverrideReason != "" {
+		approvalFields["fix_override"] = true
 	}
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
@@ -489,7 +538,11 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				if merged != "" && merged != selected {
 					userFindingsJSON = &merged
 				}
-				if dbErr := e.db.SetStepRoundUserDecision(gate.lastRoundID, &idsJSON, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
+				selectionSource := db.RoundSelectionSourceUser
+				if response.fixOverrideReason != "" {
+					selectionSource = db.RoundSelectionSourceUserOverride
+				}
+				if dbErr := e.db.SetStepRoundUserDecision(gate.lastRoundID, &idsJSON, selectionSource, userFindingsJSON); dbErr != nil {
 					slog.Warn("failed to record recovered user decision", "step", gate.step.Name(), "round", gate.round, "error", dbErr)
 				}
 			}
@@ -546,7 +599,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 		if result.StepName != e.steps[index].Name() {
 			return nil, fmt.Errorf("recovered step %d is %q, want %q", index, result.StepName, e.steps[index].Name())
 		}
-		if result.Status == types.StepStatusAwaitingApproval || result.Status == types.StepStatusFixReview {
+		if result.Status == types.StepStatusAwaitingApproval || result.Status == types.StepStatusFixReview || result.Status == types.StepStatusAwaitingTriage {
 			if gate != nil || result.FindingsJSON == nil || result.StartedAt == nil || result.DurationMS == nil || result.AgentPID != nil {
 				return nil, fmt.Errorf("recovered approval gate is incomplete")
 			}
@@ -944,13 +997,18 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			e.emitRunEvent(ipc.EventRunUpdated, run, repo)
 		}
 
+		reviewCapReached, reviewFixRoundCount, reviewMaxFixRounds, capErr := e.reviewFixRoundCapReached(stepName, sr.ID)
+		if capErr != nil {
+			return false, "", fmt.Errorf("step %s: enforce review max_fix_rounds: %w", stepName, capErr)
+		}
+
 		// Check if auto-fix should be attempted.
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
 		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
 			fixableFindings := autoFixableFindingsJSON(outcome.Findings)
-			if fixableFindings != "" {
+			if fixableFindings != "" && !reviewCapReached {
 				autoFixAttempts++
 				telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
 				slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
@@ -973,6 +1031,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				sctx.PreviousFindings = fixableFindings
 				nextTrigger = "auto_fix"
 				continue
+			} else if fixableFindings != "" && reviewCapReached {
+				slog.Info("review fix-round cap reached; parking for triage", "step", stepName, "fix_rounds", reviewFixRoundCount, "max_fix_rounds", reviewMaxFixRounds)
 			}
 		}
 
@@ -995,7 +1055,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Consumers fetch it on demand from the run's worktree instead
 		// (ipc.MethodGetStepDiff).
 		approvalStatus := types.StepStatusAwaitingApproval
-		if sctx.Fixing {
+		if reviewCapReached {
+			approvalStatus = types.StepStatusAwaitingTriage
+		} else if sctx.Fixing {
 			approvalStatus = types.StepStatusFixReview
 		}
 
@@ -1005,6 +1067,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.mu.Lock()
 		e.waiting = true
 		e.waitingStep = stepName
+		e.waitingAtFixRoundCap = reviewCapReached
+		e.waitingFixRoundCount = reviewFixRoundCount
+		e.waitingMaxFixRounds = reviewMaxFixRounds
 		e.mu.Unlock()
 
 		// Parking starts before the gate becomes observable. This includes the
@@ -1026,7 +1091,21 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, "", &executionMS)
 
 		response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, true)
-		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+		parkedMS := time.Since(parkStart).Milliseconds()
+		if err == nil && !reconciled && response.action == types.ActionFix && response.fixOverrideReason != "" {
+			var persistErr error
+			if currentRoundID == "" {
+				persistErr = fmt.Errorf("step %s: cannot persist fix override reason (no round record); refusing unattributed override fix round", stepName)
+			} else if dbErr := e.db.SetStepRoundFixOverrideReason(currentRoundID, response.fixOverrideReason); dbErr != nil {
+				persistErr = fmt.Errorf("step %s: persist fix override reason: %w", stepName, dbErr)
+			}
+			if persistErr != nil {
+				_ = e.db.CompleteRunAwaitingAgent(run.ID, parkedMS)
+				_ = e.db.FailStep(sr.ID, persistErr.Error(), executionMS)
+				return false, "", persistErr
+			}
+		}
+		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, parkedMS); dbErr != nil {
 			slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 		}
 		if err != nil {
@@ -1051,6 +1130,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		if selectedCount := selectedFindingCount(outcome.Findings, response.findingIDs); selectedCount > 0 {
 			approvalFields["selected_findings_count"] = selectedCount
+		}
+		if response.fixOverrideReason != "" {
+			approvalFields["fix_override"] = true
 		}
 		telemetry.Track("approval", approvalFields)
 
@@ -1100,7 +1182,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 					if mergedFindings != "" && mergedFindings != selectedFindings {
 						userFindingsJSON = &mergedFindings
 					}
-					if dbErr := e.db.SetStepRoundUserDecision(currentRoundID, &idsJSON, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
+					selectionSource := db.RoundSelectionSourceUser
+					if response.fixOverrideReason != "" {
+						selectionSource = db.RoundSelectionSourceUserOverride
+					}
+					if dbErr := e.db.SetStepRoundUserDecision(currentRoundID, &idsJSON, selectionSource, userFindingsJSON); dbErr != nil {
 						slog.Warn("failed to record user decision", "step", stepName, "round", roundNum, "error", dbErr)
 					}
 				}
@@ -1289,6 +1375,24 @@ func pluralize(n int, singular, plural string) string {
 	return plural
 }
 
+func (e *Executor) reviewFixRoundCapReached(stepName types.StepName, stepResultID string) (bool, int, int, error) {
+	if stepName != types.StepReview || e.config == nil {
+		return false, 0, 0, nil
+	}
+	max := e.config.Review.MaxFixRounds
+	if max < 0 {
+		return false, 0, max, fmt.Errorf("invalid review.max_fix_rounds: %d (must be >= 0)", max)
+	}
+	if max == 0 {
+		return false, 0, max, nil
+	}
+	count, err := e.db.CountStepFixRounds(stepResultID)
+	if err != nil {
+		return false, 0, max, err
+	}
+	return count >= max, count, max, nil
+}
+
 // waitForApprovalOrReconcile blocks until a user action arrives, the parked
 // gate's external source of truth makes it obsolete, or the context is
 // cancelled. Reconciliation runs synchronously under a bounded child context,
@@ -1299,6 +1403,9 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		e.mu.Lock()
 		e.waiting = false
 		e.waitingStep = ""
+		e.waitingAtFixRoundCap = false
+		e.waitingFixRoundCount = 0
+		e.waitingMaxFixRounds = 0
 		e.mu.Unlock()
 		// Drain any stale response that arrived after context cancellation or
 		// raced with an external reconciliation.
@@ -1596,7 +1703,7 @@ func shouldTrackStepTelemetry(eventType ipc.EventType, status string) bool {
 		return false
 	}
 	switch types.StepStatus(status) {
-	case types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusFailed:
+	case types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusAwaitingTriage, types.StepStatusFailed:
 		return true
 	default:
 		return false

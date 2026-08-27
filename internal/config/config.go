@@ -150,6 +150,7 @@ type GlobalConfig struct {
 	Commit CommitRaw
 	Intent IntentRaw
 	Test   TestRaw
+	Review ReviewRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -182,6 +183,7 @@ type globalConfigRaw struct {
 	Commit                  CommitRaw                  `yaml:"commit"`
 	Intent                  IntentRaw                  `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
+	Review                  ReviewRaw                  `yaml:"review"`
 	Eval                    EvalRaw                    `yaml:"eval"`
 	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
 }
@@ -276,6 +278,8 @@ type DesignContextRaw struct {
 
 // ReviewRaw is the YAML representation of review-step settings.
 type ReviewRaw struct {
+	// MaxFixRounds caps persisted review fix attempts. Zero or nil is unlimited.
+	MaxFixRounds *int `yaml:"max_fix_rounds"`
 	// PathInstructions scope extra review guidance to the paths a change
 	// actually touches. The review step appends the blocks whose glob matches
 	// at least one changed file; a run that touches nothing matching leaves
@@ -553,6 +557,7 @@ type DesignContext struct {
 // trusted default-branch repo config and scope extra review guidance to the
 // changed paths each glob matches.
 type Review struct {
+	MaxFixRounds     int
 	PathInstructions []PathInstruction
 }
 
@@ -1748,6 +1753,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateReviewRaw(raw.Review); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 	if err := validateTestRaw(raw.Test); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
@@ -1866,6 +1874,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	cfg.Review = raw.Review
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
 
 	return cfg, nil
@@ -2033,6 +2042,9 @@ func validatePRRaw(pr PRRaw) error {
 // invalid block has to fail here, before it merges, rather than brick the
 // repository's pipeline afterwards. Do not scope this to the trusted copy.
 func validateReviewRaw(review ReviewRaw) error {
+	if review.MaxFixRounds != nil && *review.MaxFixRounds < 0 {
+		return fmt.Errorf("review.max_fix_rounds must be >= 0, got %d", *review.MaxFixRounds)
+	}
 	if len(review.PathInstructions) > MaxReviewPathInstructions {
 		return fmt.Errorf("review.path_instructions has %d entries, at most %d are allowed", len(review.PathInstructions), MaxReviewPathInstructions)
 	}
@@ -2496,6 +2508,13 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	if repo.Commit.FixMessage != nil {
 		commit.FixMessage = *repo.Commit.FixMessage
 	}
+	reviewMaxFixRounds := 0
+	if global.Review.MaxFixRounds != nil {
+		reviewMaxFixRounds = *global.Review.MaxFixRounds
+	}
+	if repo.Review.MaxFixRounds != nil {
+		reviewMaxFixRounds = *repo.Review.MaxFixRounds
+	}
 
 	cfg := &Config{
 		Agent:                global.Agent,
@@ -2525,7 +2544,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Test:           test,
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		DesignContext:  resolveDesignContext(repo.DesignContext),
-		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
+		Review:         Review{MaxFixRounds: reviewMaxFixRounds, PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
 		PR:             PR{BaseBranch: strings.TrimSpace(repo.PR.BaseBranch)},
 		ForgeProfiles:  global.ForgeProfiles,
 		// repo is the EffectiveRepoConfig result, so this value is already

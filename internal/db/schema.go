@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     user_findings_json   TEXT,
     selected_finding_ids TEXT,
     selection_source     TEXT,
+    fix_override_reason  TEXT,
     fix_summary          TEXT,
     duration_ms          INTEGER NOT NULL,
     created_at           INTEGER NOT NULL
@@ -165,6 +166,7 @@ var migrationStatements = []string{
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN fix_override_reason TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN user_findings_json TEXT`,
 	// A parked round may retain the reviewed commit as a non-authoritative

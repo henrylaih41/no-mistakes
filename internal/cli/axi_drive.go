@@ -466,7 +466,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			return run, false, nil
 		}
 		if gate, ok := rv.awaitingStep(); ok {
-			if !autoApprove {
+			if !autoApprove || !gateAllowsAutoResolution(gate) {
 				return run, false, nil
 			}
 			gateKey := gate.Name + "\x00" + gate.Status
@@ -480,7 +480,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
 			}
-			if err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil); err != nil {
+			if err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, ""); err != nil {
 				return nil, false, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
 			}
 			pendingGate = gateKey
@@ -494,6 +494,10 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			return run, true, nil
 		}
 	}
+}
+
+func gateAllowsAutoResolution(gate stepView) bool {
+	return gate.Status != string(types.StepStatusAwaitingTriage)
 }
 
 // ciReadyToMerge reports whether the CI step is actively monitoring and the
@@ -570,14 +574,15 @@ func getRunInfo(client *ipc.Client, runID string) (*ipc.RunInfo, error) {
 }
 
 // sendRespond issues an approval action to the daemon for a step.
-func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, added []types.Finding) error {
+func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, added []types.Finding, fixOverrideReason string) error {
 	params := &ipc.RespondParams{
-		RunID:         runID,
-		Step:          step,
-		Action:        action,
-		FindingIDs:    findingIDs,
-		Instructions:  instructions,
-		AddedFindings: added,
+		RunID:             runID,
+		Step:              step,
+		Action:            action,
+		FindingIDs:        findingIDs,
+		Instructions:      instructions,
+		AddedFindings:     added,
+		FixOverrideReason: fixOverrideReason,
 	}
 	var result ipc.RespondResult
 	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
@@ -700,30 +705,35 @@ func successReportHelp(fixes []fixRow) []string {
 }
 
 func newAxiRespondCmd() *cobra.Command {
-	var action, step, findings, instructions, addFinding string
-	var autoYes bool
+	var action, step, findings, instructions, addFinding, overrideReason string
+	var autoYes, fixOverride bool
 
 	cmd := &cobra.Command{
 		Use:   "respond",
 		Short: "Answer the current approval gate and continue the run",
 		Long: "Sends approve/fix/skip for the step currently awaiting approval, then\n" +
-			"blocks until the next gate, CI-ready decision point, or final outcome.\n\n" +
+			"blocks until the next gate, CI-ready decision point, or final outcome.\n" +
+			"An awaiting_triage review requires --fix-override and an attributed\n" +
+			"--override-reason before one more fix round can run.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackAxiSurface("axi-respond", "/axi/respond", telemetry.Fields{
-				"action":   sanitizeAxiTelemetryAction(action),
-				"auto_yes": autoYes,
+				"action":       sanitizeAxiTelemetryAction(action),
+				"auto_yes":     autoYes,
+				"fix_override": fixOverride,
 			}, func() error {
 				return runAxiRespond(cmd, respondArgs{
-					action:       action,
-					step:         step,
-					findings:     findings,
-					instructions: instructions,
-					addFinding:   addFinding,
-					autoYes:      autoYes,
+					action:         action,
+					step:           step,
+					findings:       findings,
+					instructions:   instructions,
+					addFinding:     addFinding,
+					fixOverride:    fixOverride,
+					overrideReason: overrideReason,
+					autoYes:        autoYes,
 				})
 			})
 		},
@@ -733,17 +743,21 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
+	cmd.Flags().BoolVar(&fixOverride, "fix-override", false, "allow one more review fix round after awaiting_triage (requires --override-reason)")
+	cmd.Flags().StringVar(&overrideReason, "override-reason", "", "master triage reason for --fix-override")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every subsequent gate until a decision point or outcome")
 	return cmd
 }
 
 type respondArgs struct {
-	action       string
-	step         string
-	findings     string
-	instructions string
-	addFinding   string
-	autoYes      bool
+	action         string
+	step           string
+	findings       string
+	instructions   string
+	addFinding     string
+	fixOverride    bool
+	overrideReason string
+	autoYes        bool
 }
 
 func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
@@ -758,6 +772,17 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
 			"Valid actions: approve, fix, skip")
+	}
+	overrideReason := strings.TrimSpace(ra.overrideReason)
+	if ra.fixOverride {
+		if act != types.ActionFix {
+			return emitError(cmd, 2, "--fix-override requires --action fix")
+		}
+		if overrideReason == "" {
+			return emitError(cmd, 2, "--fix-override requires non-empty --override-reason")
+		}
+	} else if overrideReason != "" {
+		return emitError(cmd, 2, "--override-reason requires --fix-override")
 	}
 
 	env, err := openAxiDaemonEnv()
@@ -821,7 +846,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		}
 	}
 
-	if err := sendRespond(env.client, runID, stepName, act, findingIDs, instructions, added); err != nil {
+	if err := sendRespond(env.client, runID, stepName, act, findingIDs, instructions, added, overrideReason); err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("respond to %s: %v", stepName, err))
 	}
 

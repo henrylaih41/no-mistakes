@@ -191,7 +191,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 // At most one step awaits at a time, so the first match is the active gate.
 func (rv runView) awaitingStep() (stepView, bool) {
 	for _, s := range rv.Steps {
-		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview) {
+		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview) || s.Status == string(types.StepStatusAwaitingTriage) {
 			return s, true
 		}
 	}
@@ -440,14 +440,21 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 // gateFields renders the active approval gate: the awaiting step, its findings
 // table, and the next-step commands an agent can run to clear it.
 func gateFields(gate stepView) []toon.Field {
-	return gateFieldsWithHelp(gate, []string{
+	help := []string{
 		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
-		"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
+	}
+	if gate.Status == string(types.StepStatusAwaitingTriage) {
+		help = append(help, "Run `no-mistakes axi respond --action fix --fix-override --override-reason \"<master triage reason>\" --findings <ids>` only after master rules a residual merge-blocking")
+	} else {
+		help = append(help, "Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)")
+	}
+	help = append(help,
 		"Run `no-mistakes axi respond --action skip` to skip this step",
 		fmt.Sprintf("Run `%s` to read the full step log", axiLogsFullCommand(gate.Name, "")),
 		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
 		preserveGateFixCommitsGuidance,
-	})
+	)
+	return gateFieldsWithHelp(gate, help)
 }
 
 func inspectionOnlyGateFields(gate stepView, runID string) []toon.Field {
@@ -474,6 +481,9 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 	// unless config explicitly opts back in.
 	if gate.Name == string(types.StepReview) {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."})
+	}
+	if gate.Status == string(types.StepStatusAwaitingTriage) {
+		gfields = append(gfields, toon.Field{Key: "triage", Value: "Review max_fix_rounds has been reached. Residual findings require master triage; one more fix round requires an explicit, attributed override."})
 	}
 	rows := make([]findingRow, 0, len(parsed.Items))
 	for _, f := range parsed.Items {
