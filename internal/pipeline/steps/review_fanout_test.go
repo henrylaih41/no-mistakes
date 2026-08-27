@@ -263,6 +263,74 @@ func TestReviewStep_FanOut_FailOpenCannotDropInvalidVerdict(t *testing.T) {
 	}
 }
 
+func TestReviewStep_FanOut_InvalidVerdictRetryErrorPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		failOpen bool
+	}{
+		{name: "fail closed", failOpen: false},
+		{name: "fail open", failOpen: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			valid := &mockAgent{name: "codex", runFn: reviewReturning(Findings{
+				Items: []Finding{{Severity: "warning", Description: "valid codex defect", Action: types.ActionAutoFix}},
+			})}
+			call := 0
+			invalid := &mockAgent{
+				name:                   "claude",
+				preserveReviewEvidence: true,
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					call++
+					if call == 2 {
+						return nil, errors.New("cold retry crashed")
+					}
+					return &agent.Result{
+						Output:  []byte(`{"findings":[],"summary":"clean"}`),
+						Metrics: &agent.InvocationMetrics{ModelRoundtrips: 1},
+					}, nil
+				},
+			}
+			sctx := newTestContext(t, &mockAgent{name: "fixer"}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Reviewers = []agent.Agent{valid, invalid}
+			sctx.Config.Review.FailOpen = tc.failOpen
+			var logs, audit []string
+			sctx.Log = func(line string) { logs = append(logs, line) }
+			sctx.LogFile = func(line string) { audit = append(audit, line) }
+
+			outcome, err := newTestReviewStep().Execute(sctx)
+			if !tc.failOpen {
+				if err == nil || !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "cold retry crashed") {
+					t.Fatalf("Execute() error = %v, want retry process failure", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if !outcome.NeedsTriage {
+				t.Fatal("invalid verdict followed by retry error must park for triage")
+			}
+			if !sliceContainsText(logs, "claude", "DROPPED") || !sliceContainsText(audit, "claude", "cold retry crashed") {
+				t.Fatalf("retry process error was not surfaced; logs=%v audit=%v", logs, audit)
+			}
+			findings, parseErr := types.ParseFindingsJSON(outcome.Findings)
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			if !types.HasReviewVerdictEvidenceFinding(findings) {
+				t.Fatalf("triage findings = %+v, want evidence finding", findings.Items)
+			}
+			if !strings.Contains(findings.Items[0].Description, "insufficient activity") || !strings.Contains(findings.Items[0].Description, "cold retry crashed") {
+				t.Fatalf("evidence reason = %q, want initial failure and retry error", findings.Items[0].Description)
+			}
+			if preserved, ok := findingBySource(findings.Items, "codex"); !ok || preserved.Description != "valid codex defect" {
+				t.Fatalf("triage findings = %+v, want preserved valid report", findings.Items)
+			}
+		})
+	}
+}
+
 func TestReviewStep_FanOut_InvalidVerdictRetryCanRecover(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

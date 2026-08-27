@@ -47,6 +47,7 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 		}
 		evidenceErr := validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor)
 		if evidenceErr != nil {
+			initialEvidenceErr := evidenceErr
 			sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", res.Agent.Name(), evidenceErr))
 			coldOpts := opts
 			coldOpts.Session = nil
@@ -57,9 +58,11 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 			res.Duration = time.Since(started)
 			if res.Err == nil {
 				evidenceErr = validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor)
+			} else {
+				evidenceErr = fmt.Errorf("%v; cold retry failed: %w", initialEvidenceErr, res.Err)
 			}
 		}
-		if res.Err == nil && evidenceErr != nil {
+		if evidenceErr != nil {
 			invalid = append(invalid, reviewVerdictFailure{reviewer: res.Agent.Name(), reason: evidenceErr})
 			invalidSlots[idx] = true
 		}

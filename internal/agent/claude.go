@@ -300,11 +300,21 @@ type claudeContent struct {
 	Type  string          `json:"type"`
 	Text  string          `json:"text"`
 	Name  string          `json:"name"`
-	Input claudeToolInput `json:"input"`
+	Input json.RawMessage `json:"input"`
 }
 
-type claudeToolInput struct {
-	Command string `json:"command"`
+func claudeToolCommand(input json.RawMessage) string {
+	var payload struct {
+		Command json.RawMessage `json:"command"`
+	}
+	if len(input) == 0 || json.Unmarshal(input, &payload) != nil || len(payload.Command) == 0 {
+		return ""
+	}
+	var command string
+	if json.Unmarshal(payload.Command, &command) != nil {
+		return ""
+	}
+	return command
 }
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
@@ -368,7 +378,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			for _, c := range msg.Content {
 				if c.Type == "tool_use" && !strings.EqualFold(c.Name, "StructuredOutput") {
 					metrics.ToolCalls++
-					categories := ClassifyToolCommand(c.Input.Command)
+					categories := ClassifyToolCommand(claudeToolCommand(c.Input))
 					if len(categories) == 0 {
 						categories = []ToolCategory{classifyStructuredTool(c.Name)}
 					}

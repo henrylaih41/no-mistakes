@@ -165,7 +165,7 @@ exit 0
 `, "")
 
 	ga := &grokAgent{bin: bin}
-	result, err := ga.Run(context.Background(), RunOpts{Prompt: "review", CWD: t.TempDir()})
+	result, err := ga.Run(context.Background(), RunOpts{Prompt: "review", Purpose: "review", CWD: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
