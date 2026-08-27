@@ -72,7 +72,7 @@ func TestReviewStep_InvalidVerdictRetriesOnceCold(t *testing.T) {
 		}
 	}
 
-	sctx := newTestContext(t, mock, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, mock, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Sessions = pipeline.NewRunSessions(sctx.DB, sctx.Run.ID, mock, true)
 	outcome, err := newTestReviewStep().Execute(sctx)
 	if err != nil {
@@ -88,8 +88,15 @@ func TestReviewStep_InvalidVerdictRetriesOnceCold(t *testing.T) {
 	if reviews[0].Session == nil {
 		t.Fatal("first review must use the durable reviewer session")
 	}
-	if reviews[1].Session != nil {
-		t.Fatalf("retry session = %+v, want a cold invocation", reviews[1].Session)
+	if reviews[1].Session == nil || reviews[1].Session.ID != "" {
+		t.Fatalf("retry session = %+v, want a fresh durable invocation", reviews[1].Session)
+	}
+	sessions, err := sctx.DB.GetRunAgentSessions(sctx.Run.ID)
+	if err != nil {
+		t.Fatalf("get replacement session: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].Role != string(pipeline.SessionRoleReviewer) || sessions[0].SessionID != "sess-2" {
+		t.Fatalf("persisted sessions = %+v, want replacement reviewer session sess-2", sessions)
 	}
 }
 

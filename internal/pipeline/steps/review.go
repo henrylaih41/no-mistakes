@@ -49,10 +49,8 @@ func (s *ReviewStep) runVerifiedReview(
 	if dropSession != nil {
 		dropSession()
 	}
-	coldOpts := opts
-	coldOpts.Session = nil
 	started = time.Now()
-	result, err = reviewer.Run(sctx.Ctx, coldOpts)
+	result, err = first()
 	if err != nil {
 		return nil, nil, err
 	}

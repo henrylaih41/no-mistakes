@@ -40,11 +40,27 @@ func TestParseGrokEventsSurfacesUsageAndReviewActivity(t *testing.T) {
 	if !reflect.DeepEqual(result.Usage, wantUsage) {
 		t.Fatalf("usage = %+v, want %+v", result.Usage, wantUsage)
 	}
-	if result.Metrics == nil || result.Metrics.ModelRoundtrips != 2 || result.Metrics.ToolCalls != 1 || result.Metrics.ToolCategories.Read != 1 {
-		t.Fatalf("activity metrics = %+v, want 2 rounds and one repository Read", result.Metrics)
+	if result.Metrics == nil || result.Metrics.ModelRoundtrips != 1 || result.Metrics.ToolCalls != 1 || result.Metrics.ToolCategories.Read != 1 {
+		t.Fatalf("activity metrics = %+v, want one genuine round and one repository Read", result.Metrics)
 	}
 	if !reflect.DeepEqual(chunks, []string{"inspecting"}) {
 		t.Fatalf("chunks = %v", chunks)
+	}
+}
+
+func TestParseGrokEventsStructuredOutputEnvelopeIsNotActivity(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"reasoning"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	result, _, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	if err != nil {
+		t.Fatalf("parseGrokEvents() error = %v", err)
+	}
+	if result.Metrics == nil || result.Metrics.ModelRoundtrips != 1 || result.Metrics.ToolCalls != 0 {
+		t.Fatalf("activity metrics = %+v, want one genuine round and no repository tools", result.Metrics)
 	}
 }
 
@@ -234,6 +250,31 @@ func TestGrokAgentRunReportsExitStderr(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "provider unavailable") {
 		t.Fatalf("error = %v, want stderr detail", err)
+	}
+}
+
+func TestGrokAgentRunOnceEmitsBoundedStdoutOnParseFailure(t *testing.T) {
+	dir := t.TempDir()
+	raw := strings.Repeat("x", 240) + "TAIL_MARKER"
+	bin := writeFakeGrok(t, dir,
+		"#!/bin/sh\nprintf '%s\\n' '"+raw+"'\n",
+		"@echo off\r\necho "+raw+"\r\n",
+	)
+	var chunks []string
+	a := &grokAgent{bin: bin}
+	_, err := a.runOnce(context.Background(), RunOpts{
+		Prompt:  "review",
+		CWD:     dir,
+		OnChunk: func(chunk string) { chunks = append(chunks, chunk) },
+	})
+	if err == nil || !strings.Contains(err.Error(), "no result event") {
+		t.Fatalf("runOnce() error = %v, want missing result event", err)
+	}
+	if want := outputSnippet(raw); !reflect.DeepEqual(chunks, []string{want}) {
+		t.Fatalf("chunks = %q, want bounded stdout snippet %q", chunks, want)
+	}
+	if strings.Contains(strings.Join(chunks, ""), "TAIL_MARKER") {
+		t.Fatalf("diagnostic leaked output beyond snippet bound: %q", chunks)
 	}
 }
 

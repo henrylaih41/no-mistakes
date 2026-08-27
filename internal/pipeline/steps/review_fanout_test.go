@@ -263,6 +263,42 @@ func TestReviewStep_FanOut_FailOpenCannotDropInvalidVerdict(t *testing.T) {
 	}
 }
 
+func TestReviewStep_FanOut_InvalidVerdictRetryCanRecover(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	call := 0
+	recovering := &mockAgent{
+		name:                   "grok",
+		preserveReviewEvidence: true,
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			call++
+			rounds := 1
+			if call == 2 {
+				rounds = 2
+			}
+			return &agent.Result{
+				Output:  []byte(`{"findings":[],"summary":"clean","risk_level":"low"}`),
+				Metrics: &agent.InvocationMetrics{ModelRoundtrips: rounds},
+			}, nil
+		},
+	}
+	sctx := newTestContext(t, &mockAgent{name: "fixer"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Reviewers = []agent.Agent{recovering}
+	sctx.Config.Review.Reviewers = []config.ReviewerSpec{{Agent: types.AgentGrok}}
+
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if outcome.NeedsTriage {
+		t.Fatal("valid retry must clear evidence triage")
+	}
+	if len(recovering.calls) != 2 {
+		t.Fatalf("reviewer calls = %d, want initial plus one cold retry", len(recovering.calls))
+	}
+}
+
 func TestReviewStep_FanOut_ProcessErrorWinsBeforeEvidenceTriage(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

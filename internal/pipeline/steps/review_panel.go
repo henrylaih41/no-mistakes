@@ -38,18 +38,16 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 	opts.OnChunk = nil
 	results := agent.FanOut(sctx.Ctx, reviewers, opts, sctx.Config.Review.MaxParallel)
 
-	// A validity failure is categorically different from an ordinary reviewer
-	// process error: review.fail_open must never drop it. Retry only invalid
-	// slots once, cold, then return durable triage failures for any reviewer
-	// that still cannot prove a real review turn occurred.
+	var invalid []reviewVerdictFailure
+	invalidSlots := make(map[int]bool)
 	for idx := range results {
 		res := &results[idx]
 		if res.Err != nil {
 			continue
 		}
-		if err := validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor); err != nil {
-			name := res.Agent.Name()
-			sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", name, err))
+		evidenceErr := validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor)
+		if evidenceErr != nil {
+			sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", res.Agent.Name(), evidenceErr))
 			coldOpts := opts
 			coldOpts.Session = nil
 			started := time.Now()
@@ -57,17 +55,12 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 			res.Result = result
 			res.Err = retryErr
 			res.Duration = time.Since(started)
+			if res.Err == nil {
+				evidenceErr = validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor)
+			}
 		}
-	}
-
-	var invalid []reviewVerdictFailure
-	invalidSlots := make(map[int]bool)
-	for idx, res := range results {
-		if res.Err != nil {
-			continue
-		}
-		if err := validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor); err != nil {
-			invalid = append(invalid, reviewVerdictFailure{reviewer: res.Agent.Name(), reason: err})
+		if res.Err == nil && evidenceErr != nil {
+			invalid = append(invalid, reviewVerdictFailure{reviewer: res.Agent.Name(), reason: evidenceErr})
 			invalidSlots[idx] = true
 		}
 	}

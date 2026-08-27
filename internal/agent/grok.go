@@ -59,6 +59,11 @@ func (a *grokAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 
 	result, rawResultEvent, err := parseGrokEvents(ctx, bytes.NewReader(stdout.Bytes()), opts.OnChunk)
 	if err != nil {
+		if opts.OnChunk != nil {
+			if snippet := outputSnippet(stdout.String()); snippet != "" {
+				opts.OnChunk(snippet)
+			}
+		}
 		return nil, fmt.Errorf("grok parse events: %w", err)
 	}
 	finalized, err := finalizeGrokResult(result, opts.JSONSchema)
@@ -133,7 +138,9 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 			if err := json.Unmarshal(event.Message, &message); err != nil {
 				continue
 			}
-			result.Metrics.ModelRoundtrips++
+			if len(message.Content) > 0 && !isGrokStructuredOutputEnvelope(message) {
+				result.Metrics.ModelRoundtrips++
+			}
 			if message.Model != "" && message.Model != "unknown" {
 				result.Model = message.Model
 				result.ModelProvider = "xai"
@@ -179,6 +186,12 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 		return nil, nil, fmt.Errorf("grok returned no result event")
 	}
 	return result, rawResultEvent, nil
+}
+
+func isGrokStructuredOutputEnvelope(message grokMessage) bool {
+	return len(message.Content) == 1 &&
+		message.Content[0].Type == "tool_use" &&
+		strings.EqualFold(message.Content[0].Name, "StructuredOutput")
 }
 
 func normalizedGrokUsage(raw *grokUsage) TokenUsage {
