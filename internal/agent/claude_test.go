@@ -275,6 +275,30 @@ func TestParseClaudeEvents_ReportsReviewActivityMetrics(t *testing.T) {
 	}
 }
 
+func TestParseClaudeEvents_CountsDistinctMessageIDsAsModelRoundtrips(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"id":"msg-1","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"thinking"}]}}`,
+		`{"type":"assistant","message":{"id":"msg-1","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","name":"StructuredOutput"}]}}`,
+		`{"type":"assistant","message":{"id":"msg-2","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"final"}]}}`,
+		`{"type":"result","subtype":"success","structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatalf("parseClaudeEvents() error = %v", err)
+	}
+	if parsed == nil {
+		t.Fatal("expected result event")
+	}
+	if got := parsed.metrics.ModelRoundtrips; got != 2 {
+		t.Fatalf("model roundtrips = %d, want 2 distinct message IDs", got)
+	}
+	if got := parsed.metrics.ToolCalls; got != 0 {
+		t.Fatalf("tool calls = %d, want StructuredOutput excluded", got)
+	}
+}
+
 func TestParseClaudeEvents_NoSeparatorForFirstMessage(t *testing.T) {
 	events := `{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"only message"}]}}
 `

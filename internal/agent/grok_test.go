@@ -20,7 +20,7 @@ func TestParseGrokEventsSurfacesUsageAndReviewActivity(t *testing.T) {
 		"",
 	}, "\n")
 	var chunks []string
-	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), func(chunk string) {
+	result, _, err := parseGrokEvents(context.Background(), strings.NewReader(events), func(chunk string) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -45,6 +45,27 @@ func TestParseGrokEventsSurfacesUsageAndReviewActivity(t *testing.T) {
 	}
 	if !reflect.DeepEqual(chunks, []string{"inspecting"}) {
 		t.Fatalf("chunks = %v", chunks)
+	}
+}
+
+func TestParseGrokEventsSkipsMalformedAndNonEventOutput(t *testing.T) {
+	events := strings.Join([]string{
+		`Grok CLI update available`,
+		`{"notice":"warming cache"}`,
+		`{"type":"assistant","message":"malformed"}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"findings":[]}}`,
+		"",
+	}, "\n")
+	result, _, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	if err != nil {
+		t.Fatalf("parseGrokEvents() error = %v", err)
+	}
+	if got := string(result.Output); got != `{"findings":[]}` {
+		t.Fatalf("output = %s", got)
+	}
+	if result.Metrics == nil || result.Metrics.ToolCalls != 1 {
+		t.Fatalf("activity metrics = %+v, want one repository tool call", result.Metrics)
 	}
 }
 
@@ -158,8 +179,23 @@ func TestGrokAgentRunOnceEmitsAssistantTextWhenStructuredOutputIsInvalid(t *test
 	if err == nil {
 		t.Fatal("expected invalid structured output error")
 	}
-	if len(chunks) != 1 || (runtime.GOOS != "windows" && chunks[0] != progress) {
-		t.Fatalf("chunks = %q, want assistant progress", chunks)
+	if len(chunks) != 2 || (runtime.GOOS != "windows" && chunks[0] != progress) {
+		t.Fatalf("chunks = %q, want assistant progress and raw result diagnostic", chunks)
+	}
+	if !strings.Contains(chunks[1], "raw result event:") || !strings.Contains(chunks[1], `"structured_output":{"summary":42}`) {
+		t.Fatalf("diagnostic chunk = %q, want raw terminal result event", chunks[1])
+	}
+}
+
+func TestFinalizeGrokResultAllowsNullOptionalProperties(t *testing.T) {
+	result := &Result{Output: json.RawMessage(`{"summary":"clean","line":null}`)}
+	schema := json.RawMessage(`{
+		"type":"object",
+		"properties":{"summary":{"type":"string"},"line":{"type":"integer"}},
+		"required":["summary"]
+	}`)
+	if _, err := finalizeGrokResult(result, schema); err != nil {
+		t.Fatalf("finalizeGrokResult() rejected optional null: %v", err)
 	}
 }
 

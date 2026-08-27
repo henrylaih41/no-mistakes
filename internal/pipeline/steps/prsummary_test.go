@@ -894,3 +894,22 @@ func TestBuildTestingSummaryForPR_FallsBackForBinaryEvidence(t *testing.T) {
 		t.Fatalf("did not expect binary content to be embedded as text, got:\n%s", md)
 	}
 }
+
+func TestWriteStepStatusDetailDistinguishesEvidenceTriage(t *testing.T) {
+	findings, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{{
+		ID:     types.FindingIDReviewVerdictEvidence,
+		Source: types.FindingSourceReviewGate,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal findings: %v", err)
+	}
+	var b strings.Builder
+	writeStepStatusDetail(&b, &db.StepResult{
+		StepName:     types.StepReview,
+		Status:       types.StepStatusAwaitingTriage,
+		FindingsJSON: &findings,
+	})
+	if got := b.String(); !strings.Contains(got, "Review verdict evidence failed after one cold retry") || strings.Contains(got, "fix-round cap") {
+		t.Fatalf("evidence triage detail = %q", got)
+	}
+}

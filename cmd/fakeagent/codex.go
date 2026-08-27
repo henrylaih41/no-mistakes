@@ -51,7 +51,7 @@ func runCodex(args []string, scenario *Scenario) int {
 			fmt.Fprintf(os.Stderr, "fakeagent: codex patch: %v\n", err)
 			return 1
 		}
-		if strings.Contains(prompt, "Review the code changes and return structured findings") {
+		if isReviewPrompt(prompt) {
 			patched = addCodexReviewEvidence(patched)
 		}
 		os.Stdout.Write(patched)
@@ -66,7 +66,7 @@ func runCodex(args []string, scenario *Scenario) int {
 	}
 
 	enc := json.NewEncoder(os.Stdout)
-	if strings.Contains(prompt, "Review the code changes and return structured findings") {
+	if isReviewPrompt(prompt) {
 		_ = enc.Encode(map[string]any{
 			"type": "item.started",
 			"item": map[string]any{"id": "fake-review-read", "type": "command_execution", "command": "git diff --stat"},

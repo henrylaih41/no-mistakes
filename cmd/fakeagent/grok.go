@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -37,7 +36,7 @@ func runGrok(args []string, scenario *Scenario) int {
 	}
 	enc := json.NewEncoder(os.Stdout)
 	content := []any{map[string]any{"type": "text", "text": action.textOrDefault()}}
-	if strings.Contains(prompt, "Review the code changes and return structured findings") {
+	if isReviewPrompt(prompt) {
 		content = append([]any{map[string]any{"type": "tool_use", "name": "Read"}}, content...)
 	}
 	_ = enc.Encode(map[string]any{

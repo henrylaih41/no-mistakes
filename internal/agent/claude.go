@@ -290,6 +290,7 @@ type claudeUsage struct {
 }
 
 type claudeMessage struct {
+	ID      string          `json:"id"`
 	Model   string          `json:"model"`
 	Usage   claudeUsage     `json:"usage"`
 	Content []claudeContent `json:"content"`
@@ -310,6 +311,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	var lastSessionID string
 	var lastModel string
 	var metrics InvocationMetrics
+	seenMessageIDs := make(map[string]struct{})
 
 	for scanner.Scan() {
 		select {
@@ -340,7 +342,12 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			if msg.Model != "" {
 				lastModel = msg.Model
 			}
-			metrics.ModelRoundtrips++
+			if msg.ID == "" {
+				metrics.ModelRoundtrips++
+			} else if _, seen := seenMessageIDs[msg.ID]; !seen {
+				seenMessageIDs[msg.ID] = struct{}{}
+				metrics.ModelRoundtrips++
+			}
 			usage.Add(TokenUsage{
 				InputTokens:           msg.Usage.InputTokens,
 				OutputTokens:          msg.Usage.OutputTokens,
@@ -381,15 +388,4 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	}
 
 	return scanner.Err()
-}
-
-func classifyStructuredTool(name string) ToolCategory {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "read", "glob", "grep", "ls", "listfiles", "search":
-		return ToolRead
-	case "edit", "write", "multiedit", "notebookedit":
-		return ToolEdit
-	default:
-		return ToolOther
-	}
 }

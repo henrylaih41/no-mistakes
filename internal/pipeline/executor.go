@@ -1009,7 +1009,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.waitingStep = stepName
 		e.waitingStepResultID = sr.ID
 		e.waitingAgentRetry = false
-		e.waitingAtFixRoundCap = reviewCapReached
+		e.waitingAtFixRoundCap = reviewCapReached && !outcome.NeedsTriage
 		e.waitingFixRoundCount = reviewFixRoundCount
 		e.waitingMaxFixRounds = reviewMaxFixRounds
 		e.mu.Unlock()

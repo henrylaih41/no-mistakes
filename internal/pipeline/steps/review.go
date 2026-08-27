@@ -226,7 +226,7 @@ Previous review findings to address:
 	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause()
 
 	prompt := fmt.Sprintf(
-		`Review the code changes and return structured findings with a risk assessment.
+		agent.ReviewPromptOpening+`
 
 Context:
 - branch: %s
@@ -316,7 +316,7 @@ Risk assessment (after listing all findings):
 			return nil, fmt.Errorf("agent review: %w", err)
 		}
 		if invalid != nil {
-			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, fixSummary), nil
+			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, Findings{}, fixSummary), nil
 		}
 		findings = parseReviewFindings(result, sctx.Log)
 	} else if len(reviewers) <= 1 {
@@ -334,7 +334,7 @@ Risk assessment (after listing all findings):
 			return nil, fmt.Errorf("agent review: %w", err)
 		}
 		if invalid != nil {
-			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, fixSummary), nil
+			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, Findings{}, fixSummary), nil
 		}
 		findings = parseReviewFindings(result, sctx.Log)
 	} else {
@@ -343,7 +343,7 @@ Risk assessment (after listing all findings):
 			return nil, err
 		}
 		if len(invalid) > 0 {
-			return reviewVerdictTriageOutcome(invalid, fixSummary), nil
+			return reviewVerdictTriageOutcome(invalid, merged, fixSummary), nil
 		}
 		findings = merged
 	}

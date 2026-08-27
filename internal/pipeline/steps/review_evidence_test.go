@@ -73,6 +73,16 @@ func TestValidateReviewVerdictEvidenceRejectsDeferredPlaceholderVerdict(t *testi
 	}
 }
 
+func TestValidateReviewVerdictEvidenceRejectsObservedPlaceholderVerdict(t *testing.T) {
+	result := &agent.Result{
+		Output:  []byte(`{"findings":[],"summary":"","risk_level":"low","risk_rationale":"Placeholder until review completes."}`),
+		Metrics: &agent.InvocationMetrics{ToolCalls: 1},
+	}
+	if err := validateReviewVerdictEvidence(result, minimumReviewVerdictDuration(nil), nil); err == nil || !strings.Contains(err.Error(), "non-final") {
+		t.Fatalf("placeholder error = %v, want observed deferral rejection", err)
+	}
+}
+
 func TestValidateReviewVerdictEvidenceDoesNotScanFindingDescriptionsForDeferralMarkers(t *testing.T) {
 	result := &agent.Result{
 		Output:  []byte(`{"findings":[{"severity":"warning","description":"The review in progress state is not persisted","action":"ask-master"}],"summary":"one defect","risk_level":"medium","risk_rationale":"state can be lost"}`),

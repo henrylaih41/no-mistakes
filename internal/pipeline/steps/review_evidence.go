@@ -69,6 +69,7 @@ func reviewVerdictLooksDeferred(result *agent.Result) bool {
 		"review is not final",
 		"analysis in progress",
 		"still reviewing",
+		"until review completes",
 	} {
 		if strings.Contains(text, marker) {
 			return true
@@ -82,25 +83,39 @@ type reviewVerdictFailure struct {
 	reason   error
 }
 
-func reviewVerdictTriageOutcome(failures []reviewVerdictFailure, fixSummary string) *pipeline.StepOutcome {
+func reviewVerdictTriageOutcome(failures []reviewVerdictFailure, preserved types.Findings, fixSummary string) *pipeline.StepOutcome {
 	parts := make([]string, 0, len(failures))
 	for _, failure := range failures {
 		parts = append(parts, fmt.Sprintf("%s: %v", failure.reviewer, failure.reason))
 	}
 	detail := strings.Join(parts, "; ")
+	items := make([]types.Finding, 0, len(preserved.Items)+1)
+	items = append(items, types.Finding{
+		ID:          types.FindingIDReviewVerdictEvidence,
+		Severity:    "error",
+		Description: "The review verdict failed the minimum evidence contract after one cold retry (" + detail + "). Triage the reviewer or adapter before accepting this review.",
+		Action:      types.ActionAskMaster,
+		Source:      types.FindingSourceReviewGate,
+		ReviewScope: types.FindingReviewScopeSource,
+	})
+	items = append(items, preserved.Items...)
+	summary := "review verdict evidence invalid after cold retry"
+	if preserved.Summary != "" {
+		summary += "; valid reviewer reports: " + preserved.Summary
+	}
+	riskRationale := "No trustworthy complete source review verdict was produced."
+	if preserved.RiskRationale != "" {
+		riskRationale += " Valid reviewer reports: " + preserved.RiskRationale
+	}
 	findings := types.Findings{
-		Items: []types.Finding{{
-			ID:          "review-verdict-evidence",
-			Severity:    "error",
-			Description: "The review verdict failed the minimum evidence contract after one cold retry (" + detail + "). Triage the reviewer or adapter before accepting this review.",
-			Action:      types.ActionAskMaster,
-			Source:      "review-gate",
-			ReviewScope: types.FindingReviewScopeSource,
-		}},
-		Summary:       "review verdict evidence invalid after cold retry",
-		RiskLevel:     "high",
-		RiskRationale: "No trustworthy source review verdict was produced.",
-		RiskScope:     types.FindingsRiskScopeSourceOrExternal,
+		Items:          items,
+		Summary:        summary,
+		Tested:         preserved.Tested,
+		TestingSummary: preserved.TestingSummary,
+		Artifacts:      preserved.Artifacts,
+		RiskLevel:      "high",
+		RiskRationale:  riskRationale,
+		RiskScope:      types.FindingsRiskScopeSourceOrExternal,
 	}
 	encoded, _ := types.MarshalFindingsJSON(findings)
 	return &pipeline.StepOutcome{

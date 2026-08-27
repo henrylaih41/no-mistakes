@@ -64,16 +64,26 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 	}
 
 	var invalid []reviewVerdictFailure
-	for _, res := range results {
+	invalidSlots := make(map[int]bool)
+	for idx, res := range results {
 		if res.Err != nil {
 			continue
 		}
 		if err := validateReviewVerdictEvidenceAtFloor(res.Result, res.Duration, verdictFloor); err != nil {
 			invalid = append(invalid, reviewVerdictFailure{reviewer: res.Agent.Name(), reason: err})
+			invalidSlots[idx] = true
 		}
 	}
 	if len(invalid) > 0 {
-		return Findings{}, invalid, nil
+		reports := make([]reviewerReport, 0, len(results)-len(invalidSlots))
+		for idx, res := range results {
+			if invalidSlots[idx] || res.Err != nil {
+				continue
+			}
+			reports = append(reports, reviewerReportFromResult(idx, res, sctx.Log, sctx.LogFile))
+		}
+		logReviewerSummaries(sctx.Log, reports)
+		return combineReviewerFindings(reports), invalid, nil
 	}
 
 	reports, err := processReviewerResults(results, sctx.Config.Review.FailOpen, sctx.Log, sctx.LogFile)
@@ -83,13 +93,7 @@ func runReviewPanel(sctx *pipeline.StepContext, reviewers []agent.Agent, opts ag
 
 	// Per-reviewer user-visible summary, emitted serially from the main
 	// goroutine now that every reviewer has finished.
-	for _, r := range reports {
-		risk := r.Findings.RiskLevel
-		if risk == "" {
-			risk = "none"
-		}
-		sctx.Log(fmt.Sprintf("[reviewer %s] %d finding(s), risk=%s", r.Name, len(r.Findings.Items), risk))
-	}
+	logReviewerSummaries(sctx.Log, reports)
 
 	return combineReviewerFindings(reports), nil, nil
 }
@@ -133,21 +137,7 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 			}
 			continue
 		}
-		parsed := parseReviewFindings(res.Result, log)
-		prefix := fmt.Sprintf("review-%s-%d", name, idx+1)
-		for i := range parsed.Items {
-			parsed.Items[i].ID = ""
-		}
-		parsed = types.NormalizeFindings(parsed, prefix)
-		for i := range parsed.Items {
-			parsed.Items[i].Source = name
-		}
-		reports = append(reports, reviewerReport{Name: name, Findings: parsed})
-		if logFile != nil {
-			if raw, mErr := json.Marshal(parsed); mErr == nil {
-				logFile(fmt.Sprintf("[reviewer %s] report: %s", name, string(raw)))
-			}
-		}
+		reports = append(reports, reviewerReportFromResult(idx, res, log, logFile))
 	}
 	if len(reports) == 0 {
 		if firstTransient != nil {
@@ -156,6 +146,35 @@ func processReviewerResults(results []agent.FanOutResult, failOpen bool, log, lo
 		return nil, fmt.Errorf("review panel: all reviewers failed (%s)", strings.Join(dropped, ", "))
 	}
 	return reports, nil
+}
+
+func reviewerReportFromResult(idx int, res agent.FanOutResult, log, logFile func(string)) reviewerReport {
+	name := res.Agent.Name()
+	parsed := parseReviewFindings(res.Result, log)
+	prefix := fmt.Sprintf("review-%s-%d", name, idx+1)
+	for i := range parsed.Items {
+		parsed.Items[i].ID = ""
+	}
+	parsed = types.NormalizeFindings(parsed, prefix)
+	for i := range parsed.Items {
+		parsed.Items[i].Source = name
+	}
+	if logFile != nil {
+		if raw, err := json.Marshal(parsed); err == nil {
+			logFile(fmt.Sprintf("[reviewer %s] report: %s", name, string(raw)))
+		}
+	}
+	return reviewerReport{Name: name, Findings: parsed}
+}
+
+func logReviewerSummaries(log func(string), reports []reviewerReport) {
+	for _, report := range reports {
+		risk := report.Findings.RiskLevel
+		if risk == "" {
+			risk = "none"
+		}
+		log(fmt.Sprintf("[reviewer %s] %d finding(s), risk=%s", report.Name, len(report.Findings.Items), risk))
+	}
 }
 
 // combineReviewerFindings merges reviewer reports into a plain attributed union.

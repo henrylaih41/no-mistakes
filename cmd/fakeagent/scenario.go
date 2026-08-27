@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"gopkg.in/yaml.v3"
 )
 
@@ -146,13 +147,17 @@ func applyActionInDir(wd string, action Action) error {
 // together those make e2e reviews representative without weakening the real
 // gate contract or adding a production-only bypass.
 func waitForFakeReviewEvidence(started time.Time, prompt string) {
-	if !strings.Contains(prompt, "Review the code changes and return structured findings") {
+	if !isReviewPrompt(prompt) {
 		return
 	}
 	const minimum = 2100 * time.Millisecond
 	if remaining := minimum - time.Since(started); remaining > 0 {
 		time.Sleep(remaining)
 	}
+}
+
+func isReviewPrompt(prompt string) bool {
+	return strings.Contains(prompt, agent.ReviewPromptOpening)
 }
 
 func applyEditsInDir(wd string, edits []Edit) error {

@@ -368,6 +368,33 @@ func TestWriteGateShapeAwaitingTriage(t *testing.T) {
 	}
 }
 
+func TestWriteGateShapeAwaitingEvidenceTriage(t *testing.T) {
+	gate := stepView{
+		Name:   "review",
+		Status: "awaiting_triage",
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: types.FindingIDReviewVerdictEvidence, Severity: "error", Source: types.FindingSourceReviewGate, Action: types.ActionAskMaster, Description: "review evidence invalid"},
+			{ID: "review-codex-1-1", Severity: "warning", Source: "codex", Action: types.ActionAutoFix, Description: "valid reviewer finding"},
+		}, "review verdict evidence invalid after cold retry"),
+	}
+	out := axiDoc(gateFields(gate)...)
+
+	for _, want := range []string{
+		"status: awaiting_triage",
+		"Review verdict evidence failed after one cold retry",
+		"no-mistakes axi respond --action approve",
+		"no-mistakes axi respond --action fix --findings <ids>",
+		"no-mistakes axi respond --action skip",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("evidence triage gate missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "--fix-override") || strings.Contains(out, "--override-reason") {
+		t.Fatalf("evidence triage must not render fix-round-cap commands:\n%s", out)
+	}
+}
+
 func TestWriteGateShapeAwaitingAgentRetry(t *testing.T) {
 	gate := stepView{
 		Name:             "test",

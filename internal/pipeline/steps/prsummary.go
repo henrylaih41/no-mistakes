@@ -1180,7 +1180,11 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult) {
 	case types.StepStatusFixReview:
 		b.WriteString("Waiting to review the latest fix.\n\n")
 	case types.StepStatusAwaitingTriage:
-		b.WriteString("Review fix-round cap reached; waiting for master triage.\n\n")
+		if stepHasReviewVerdictEvidenceFinding(sr) {
+			b.WriteString("Review verdict evidence failed after one cold retry; waiting for master triage.\n\n")
+		} else {
+			b.WriteString("Review fix-round cap reached; waiting for master triage.\n\n")
+		}
 	case types.StepStatusSkipped:
 		b.WriteString("Step was skipped.\n\n")
 	case types.StepStatusFailed:
@@ -1195,6 +1199,14 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult) {
 	default:
 		b.WriteString("Status unavailable.\n\n")
 	}
+}
+
+func stepHasReviewVerdictEvidenceFinding(sr *db.StepResult) bool {
+	if sr == nil || sr.FindingsJSON == nil {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+	return err == nil && types.HasReviewVerdictEvidenceFinding(findings)
 }
 
 func awaitingApprovalDetail(sr *db.StepResult) string {

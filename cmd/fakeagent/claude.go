@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -42,6 +41,9 @@ func runClaude(args []string, scenario *Scenario) int {
 			fmt.Fprintf(os.Stderr, "fakeagent: claude patch: %v\n", err)
 			return 1
 		}
+		if isReviewPrompt(prompt) {
+			patched = addClaudeReviewEvidence(patched)
+		}
 		os.Stdout.Write(patched)
 		return 0
 	}
@@ -50,7 +52,7 @@ func runClaude(args []string, scenario *Scenario) int {
 	content := []any{
 		map[string]any{"type": "text", "text": action.textOrDefault()},
 	}
-	if strings.Contains(prompt, "Review the code changes and return structured findings") {
+	if isReviewPrompt(prompt) {
 		content = append([]any{map[string]any{"type": "tool_use", "name": "Read"}}, content...)
 	}
 
@@ -80,6 +82,11 @@ func runClaude(args []string, scenario *Scenario) int {
 		},
 	})
 	return 0
+}
+
+func addClaudeReviewEvidence(raw []byte) []byte {
+	evidence := []byte("{\"type\":\"assistant\",\"message\":{\"id\":\"fake-review-read\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0},\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\"}]}}\n")
+	return append(evidence, raw...)
 }
 
 // patchClaudeFixture rewrites the result event's structured_output to

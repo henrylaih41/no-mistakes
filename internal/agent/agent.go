@@ -20,6 +20,8 @@ type Agent interface {
 	Close() error
 }
 
+const ReviewPromptOpening = "Review the code changes and return structured findings with a risk assessment."
+
 // RunOpts configures a single agent invocation.
 type RunOpts struct {
 	Prompt      string

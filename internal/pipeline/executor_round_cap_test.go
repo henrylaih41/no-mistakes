@@ -83,6 +83,59 @@ func TestExecutor_ReviewMaxFixRoundsParksAtTriageAndRejectsPlainFix(t *testing.T
 	}
 }
 
+func TestExecutor_EvidenceTriageAtFixRoundCapAcceptsPlainFix(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			callCount++
+			switch callCount {
+			case 1:
+				return &StepOutcome{NeedsApproval: true, Findings: reviewCapFinding}, nil
+			case 2:
+				return &StepOutcome{
+					NeedsApproval: true,
+					NeedsTriage:   true,
+					Findings:      `{"findings":[{"id":"review-verdict-evidence","severity":"error","description":"invalid review evidence","action":"ask-master","source":"review-gate"}],"summary":"review verdict evidence invalid"}`,
+				}, nil
+			default:
+				return &StepOutcome{ExitCode: 0}, nil
+			}
+		},
+	}
+
+	cfg := &config.Config{Review: config.Review{MaxFixRounds: 1}}
+	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, workDir)
+	}()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+		t.Fatalf("first fix should be allowed: %v", err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingTriage)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{types.FindingIDReviewVerdictEvidence}); err != nil {
+		t.Fatalf("evidence triage fix should not require a cap override: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("executor error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+	if callCount != 3 {
+		t.Fatalf("call count = %d, want initial + capped evidence triage + plain fix", callCount)
+	}
+}
+
 func TestExecutor_ReviewMaxFixRoundsOverrideRequiresReasonAndPersistsIt(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

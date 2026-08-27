@@ -155,6 +155,17 @@ func ClassifyToolCommand(command string) []ToolCategory {
 	return categories
 }
 
+func classifyStructuredTool(name string) ToolCategory {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "read", "glob", "grep", "ls", "listfiles", "search":
+		return ToolRead
+	case "edit", "write", "multiedit", "notebookedit":
+		return ToolEdit
+	default:
+		return ToolOther
+	}
+}
+
 // shellNames are the shells codex/agents wrap tool commands in.
 var shellNames = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "fish": true,

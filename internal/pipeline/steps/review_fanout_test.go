@@ -218,6 +218,7 @@ func TestReviewStep_FanOut_FailOpenCannotDropInvalidVerdict(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
 	valid := &mockAgent{name: "codex", runFn: reviewReturning(Findings{
+		Items:         []Finding{{Severity: "warning", Description: "valid codex defect", Action: types.ActionAutoFix}},
 		RiskLevel:     "low",
 		RiskRationale: "clean",
 	})}
@@ -248,5 +249,16 @@ func TestReviewStep_FanOut_FailOpenCannotDropInvalidVerdict(t *testing.T) {
 	}
 	if got := len(valid.calls); got != 1 {
 		t.Fatalf("valid reviewer calls = %d, want 1", got)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatalf("parse triage findings: %v", err)
+	}
+	if !types.HasReviewVerdictEvidenceFinding(findings) {
+		t.Fatalf("triage findings = %+v, want evidence finding", findings.Items)
+	}
+	preserved, ok := findingBySource(findings.Items, "codex")
+	if !ok || preserved.Description != "valid codex defect" {
+		t.Fatalf("triage findings = %+v, want preserved codex report", findings.Items)
 	}
 }

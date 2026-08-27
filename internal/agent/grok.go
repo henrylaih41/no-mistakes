@@ -57,11 +57,15 @@ func (a *grokAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		return nil, fmt.Errorf("grok exited: %w", err)
 	}
 
-	result, err := parseGrokEvents(ctx, bytes.NewReader(stdout.Bytes()), opts.OnChunk)
+	result, rawResultEvent, err := parseGrokEvents(ctx, bytes.NewReader(stdout.Bytes()), opts.OnChunk)
 	if err != nil {
 		return nil, fmt.Errorf("grok parse events: %w", err)
 	}
-	return finalizeGrokResult(result, opts.JSONSchema)
+	finalized, err := finalizeGrokResult(result, opts.JSONSchema)
+	if err != nil && opts.OnChunk != nil && len(rawResultEvent) > 0 {
+		opts.OnChunk(fmt.Sprintf("raw result event: %s", string(rawResultEvent)))
+	}
+	return finalized, err
 }
 
 type grokEvent struct {
@@ -96,15 +100,16 @@ type grokUsage struct {
 	ReasoningTokens          *int `json:"reasoning_tokens,omitempty"`
 }
 
-func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*Result, error) {
+func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*Result, json.RawMessage, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), grokScannerMaxTokenSize)
 	result := &Result{Metrics: &InvocationMetrics{}}
 	sawResult := false
+	var rawResultEvent json.RawMessage
 
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		line := scanner.Bytes()
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -112,7 +117,7 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 		}
 		var event grokEvent
 		if err := json.Unmarshal(line, &event); err != nil {
-			return nil, fmt.Errorf("decode event: %w", err)
+			continue
 		}
 		if event.SessionID != "" {
 			result.SessionID = event.SessionID
@@ -126,7 +131,7 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 		case "assistant":
 			var message grokMessage
 			if err := json.Unmarshal(event.Message, &message); err != nil {
-				return nil, fmt.Errorf("decode assistant message: %w", err)
+				continue
 			}
 			result.Metrics.ModelRoundtrips++
 			if message.Model != "" && message.Model != "unknown" {
@@ -144,12 +149,13 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 			}
 		case "result":
 			sawResult = true
+			rawResultEvent = append(rawResultEvent[:0], line...)
 			if event.IsError || event.Subtype != "success" {
 				detail := strings.Join(event.Errors, "; ")
 				if detail == "" {
 					detail = event.Result
 				}
-				return nil, fmt.Errorf("grok error: subtype=%s: %s", event.Subtype, detail)
+				return nil, rawResultEvent, fmt.Errorf("grok error: subtype=%s: %s", event.Subtype, detail)
 			}
 			result.Text = event.Result
 			result.Output = event.StructuredOutput
@@ -163,16 +169,16 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 			if err := json.Unmarshal(event.Message, &message); err != nil {
 				message = strings.TrimSpace(string(event.Message))
 			}
-			return nil, fmt.Errorf("grok error: %s", message)
+			return nil, rawResultEvent, fmt.Errorf("grok error: %s", message)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, rawResultEvent, err
 	}
 	if !sawResult {
-		return nil, fmt.Errorf("grok returned no result event")
+		return nil, nil, fmt.Errorf("grok returned no result event")
 	}
-	return result, nil
+	return result, rawResultEvent, nil
 }
 
 func normalizedGrokUsage(raw *grokUsage) TokenUsage {
@@ -206,7 +212,11 @@ func finalizeGrokResult(result *Result, schema json.RawMessage) (*Result, error)
 		return nil, errGrokNoStructuredOutput
 	}
 	if len(schema) > 0 {
-		if err := validateStructuredOutput(result.Output, schema); err != nil {
+		validationSchema, err := textValidationSchema(schema)
+		if err != nil {
+			return nil, fmt.Errorf("grok structured output schema: %w", err)
+		}
+		if err := validateStructuredOutput(result.Output, validationSchema); err != nil {
 			return nil, fmt.Errorf("grok structured output: %w", err)
 		}
 	}
