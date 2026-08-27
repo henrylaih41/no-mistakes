@@ -9,6 +9,8 @@ const (
 	RoundSelectionSourceUser         = "user"
 	RoundSelectionSourceAutoFix      = "auto_fix"
 	RoundSelectionSourceUserOverride = "user_override"
+	RoundTriggerAgentAutoRetry       = "agent_auto_retry"
+	RoundTriggerAgentManualRetry     = "agent_manual_retry"
 	// RoundSelectionSourceUserDeclined records that a human resolved the
 	// round's approval gate without selecting any finding to fix: approve,
 	// skip, or abort. Before this existed, those three resolutions wrote no
@@ -85,6 +87,12 @@ type StepRoundStats struct {
 // rounds count: they were fix rounds dispatched by an explicit user selection.
 func (r *StepRound) IsFixRound() bool {
 	return r.Trigger == "auto_fix" || r.Trigger == "user_fix"
+}
+
+// IsAgentRetry reports whether this is attribution for an infrastructure retry
+// rather than a findings-producing execution round.
+func (r *StepRound) IsAgentRetry() bool {
+	return r.Trigger == RoundTriggerAgentAutoRetry || r.Trigger == RoundTriggerAgentManualRetry
 }
 
 // StepFixSummaries returns one entry per fix round for a step, in round order:
@@ -313,6 +321,20 @@ func (d *DB) CountStepFixRounds(stepResultID string) (int, error) {
 	count := 0
 	for _, round := range rounds {
 		if round.IsFixRound() {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (d *DB) CountStepAgentAutoRetries(stepResultID string) (int, error) {
+	rounds, err := d.GetRoundsByStep(stepResultID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, round := range rounds {
+		if round.Trigger == RoundTriggerAgentAutoRetry {
 			count++
 		}
 	}

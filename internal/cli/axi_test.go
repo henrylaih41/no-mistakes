@@ -64,6 +64,14 @@ func TestRunViewAwaitingStepIncludesAwaitingTriage(t *testing.T) {
 	}
 }
 
+func TestRunViewAwaitingStepIncludesAgentRetry(t *testing.T) {
+	rv := runView{Steps: []stepView{{Name: "test", Status: string(types.StepStatusAwaitingRetry)}}}
+	gate, ok := rv.awaitingStep()
+	if !ok || gate.Name != "test" {
+		t.Fatalf("gate = %+v, %v; want test retry gate", gate, ok)
+	}
+}
+
 func TestFindingsTally(t *testing.T) {
 	rv := runView{Steps: []stepView{
 		{FindingsJSON: findingsJSON(t, []types.Finding{
@@ -332,6 +340,16 @@ func TestWriteGateShapeAwaitingTriage(t *testing.T) {
 	for _, want := range []string{"status: awaiting_triage", "review fix-round cap reached", "master triage", "--fix-override", "--override-reason"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("triage gate missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestWriteGateShapeAwaitingAgentRetry(t *testing.T) {
+	gate := stepView{Name: "test", Status: string(types.StepStatusAwaitingRetry), Error: "503 after retries", AgentAutoRetries: 1}
+	out := axiDoc(gateFields(gate)...)
+	for _, want := range []string{"awaiting_agent_retry", "503 after retries", "auto_retries: 1", "--action retry"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("retry gate missing %q in:\n%s", want, out)
 		}
 	}
 }

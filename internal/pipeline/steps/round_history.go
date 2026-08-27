@@ -56,6 +56,9 @@ func stepRoundHistorySection(sctx *pipeline.StepContext) string {
 
 	var blocks []string
 	for _, r := range rounds {
+		if r.IsAgentRetry() {
+			continue
+		}
 		block := renderRoundHistoryEntry(r)
 		if block != "" {
 			blocks = append(blocks, block)
@@ -389,7 +392,7 @@ func uncertifiedRoundHistoryPromptSection(sctx *pipeline.StepContext) string {
 }
 
 func renderRoundHistoryEntry(r *db.StepRound) string {
-	if r == nil {
+	if r == nil || r.IsAgentRetry() {
 		return ""
 	}
 

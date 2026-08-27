@@ -48,6 +48,19 @@ func TestModel_Yolo_DoesNotAutoResolveAwaitingTriage(t *testing.T) {
 	}
 }
 
+func TestModel_Yolo_AutoRetriesTransientGateOnlyOnce(t *testing.T) {
+	run := testRun()
+	run.Steps[0].Status = types.StepStatusAwaitingRetry
+	m := NewModel("/tmp/sock", nil, run)
+	m.yoloMode = true
+	if cmd := m.maybeAutoApproveCmd(); cmd == nil {
+		t.Fatal("first transient retry gate should produce an auto-retry command")
+	}
+	if cmd := m.maybeAutoApproveCmd(); cmd != nil {
+		t.Fatal("same transient retry gate must not auto-retry twice")
+	}
+}
+
 func TestModel_Yolo_AutoApprovesAwaitingStep(t *testing.T) {
 	sock := testSocketPath(t)
 	srv := startTestIPCServer(t, sock)

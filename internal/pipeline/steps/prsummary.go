@@ -100,7 +100,7 @@ func BuildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 		if shouldOmitPipelineStep(sr) {
 			continue
 		}
-		stepRounds := rounds[sr.ID]
+		stepRounds := renderableRounds(rounds[sr.ID])
 		line, detail := buildStepEntry(sr, stepRounds, flavor)
 		if line != "" && detail != "" {
 			// Step details quote agent text (findings, fix summaries, tested
@@ -195,7 +195,7 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 			continue
 		}
 
-		stepRounds := rounds[sr.ID]
+		stepRounds := renderableRounds(rounds[sr.ID])
 		line, _ := buildStepEntry(sr, stepRounds, opts.flavor)
 		if line == "" {
 			return ""
@@ -948,6 +948,8 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		return buildDetail(fmt.Sprintf("⏳ **%s** - running", name))
 	case types.StepStatusAwaitingApproval:
 		return buildDetail(fmt.Sprintf("⏸️ **%s** - awaiting approval", name))
+	case types.StepStatusAwaitingRetry:
+		return buildDetail(fmt.Sprintf("⏸️ **%s** - awaiting agent retry", name))
 	case types.StepStatusFixing:
 		return buildDetail(fmt.Sprintf("🔄 **%s** - auto-fixing", name))
 	case types.StepStatusFixReview:
@@ -1064,7 +1066,7 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 
 		src := finalFindings
 		if src == nil && !hasUnreadableFinal {
-			stepRounds := rounds[sr.ID]
+			stepRounds := renderableRounds(rounds[sr.ID])
 			if len(stepRounds) > 0 {
 				last := stepRounds[len(stepRounds)-1]
 				if last.FindingsJSON != nil {
@@ -1107,6 +1109,16 @@ func riskEmoji(level string) string {
 	default:
 		return "ℹ️"
 	}
+}
+
+func renderableRounds(rounds []*db.StepRound) []*db.StepRound {
+	filtered := make([]*db.StepRound, 0, len(rounds))
+	for _, round := range rounds {
+		if !round.IsAgentRetry() {
+			filtered = append(filtered, round)
+		}
+	}
+	return filtered
 }
 
 func roundsHaveFindings(rounds []*db.StepRound) bool {
@@ -1374,6 +1386,8 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyF
 		b.WriteString("Step is currently running.\n\n")
 	case types.StepStatusAwaitingApproval:
 		b.WriteString("Waiting for user approval.\n\n")
+	case types.StepStatusAwaitingRetry:
+		b.WriteString("Waiting for an explicit retry after a transient agent/provider failure.\n\n")
 	case types.StepStatusFixing:
 		b.WriteString("Agent is currently applying fixes.\n\n")
 	case types.StepStatusFixReview:

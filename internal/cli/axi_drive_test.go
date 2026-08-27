@@ -465,6 +465,21 @@ func TestGateAutoResolutionStopsAtAwaitingTriage(t *testing.T) {
 	}
 }
 
+func TestGateAutoResolutionBoundsTransientRetry(t *testing.T) {
+	gate := stepView{Name: "test", Status: string(types.StepStatusAwaitingRetry)}
+	if !gateAllowsAutoResolution(gate) {
+		t.Fatal("first transient park should permit one --yes retry")
+	}
+	action, ids := gateResolution(gate, false)
+	if action != types.ActionRetry || ids != nil {
+		t.Fatalf("resolution = %s, %v; want retry, nil", action, ids)
+	}
+	gate.AgentAutoRetries = 1
+	if gateAllowsAutoResolution(gate) {
+		t.Fatal("second transient park must require an explicit retry")
+	}
+}
+
 func TestRenderDriveResult_ChecksPassed(t *testing.T) {
 	run := &ipc.RunInfo{
 		ID:      "run-1",

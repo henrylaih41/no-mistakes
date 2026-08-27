@@ -145,6 +145,9 @@ func stepFindingStats(step *StepResult, rounds []*StepRound) StepStats {
 	reported := make(map[types.Finding]bool)
 	var current []types.Finding
 	for _, round := range rounds {
+		if round.IsAgentRetry() {
+			continue
+		}
 		items := findingItems(round.FindingsJSON)
 		for _, item := range items {
 			reported[findingStatsKey(item)] = true

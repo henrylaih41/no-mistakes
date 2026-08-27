@@ -134,6 +134,7 @@ const (
 	StepStatusPending          StepStatus = "pending"
 	StepStatusRunning          StepStatus = "running"
 	StepStatusAwaitingApproval StepStatus = "awaiting_approval"
+	StepStatusAwaitingRetry    StepStatus = "awaiting_agent_retry"
 	StepStatusFixing           StepStatus = "fixing"
 	StepStatusFixReview        StepStatus = "fix_review"
 	StepStatusAwaitingTriage   StepStatus = "awaiting_triage"
@@ -148,6 +149,7 @@ type ApprovalAction string
 const (
 	ActionApprove ApprovalAction = "approve"
 	ActionFix     ApprovalAction = "fix"
+	ActionRetry   ApprovalAction = "retry"
 	ActionSkip    ApprovalAction = "skip"
 	ActionAbort   ApprovalAction = "abort"
 )

@@ -166,6 +166,18 @@ func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, 
 	return nil
 }
 
+// ParkStep records a non-findings gate reason without completing the step.
+func (d *DB) ParkStep(id string, status types.StepStatus, errMsg string, durationMS int64) error {
+	_, err := d.sql.Exec(
+		`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = NULL, last_activity_at = ?, last_activity = ? WHERE id = ?`,
+		status, errMsg, durationMS, now(), fmt.Sprintf("status: %s", status), id,
+	)
+	if err != nil {
+		return fmt.Errorf("park step: %w", err)
+	}
+	return nil
+}
+
 // StartStep marks a step as running with a started_at timestamp.
 func (d *DB) StartStep(id string) error {
 	return d.StartStepWithAutoFixLimit(id, 0)

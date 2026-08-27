@@ -160,6 +160,7 @@ type RespondParams struct {
 	Instructions      map[string]string    `json:"instructions,omitempty"`
 	AddedFindings     []types.Finding      `json:"added_findings,omitempty"`
 	FixOverrideReason string               `json:"fix_override_reason,omitempty"`
+	AutoRetry         bool                 `json:"auto_retry,omitempty"`
 }
 
 // CancelRunParams cancels an active pipeline run.
@@ -292,6 +293,7 @@ type StepResultInfo struct {
 	FindingsJSON     *string          `json:"findings_json,omitempty"`
 	ReportedFindings int              `json:"reported_findings,omitempty"`
 	FixedFindings    int              `json:"fixed_findings,omitempty"`
+	AgentAutoRetries int              `json:"agent_auto_retries,omitempty"`
 	// FixSummaries holds one entry per fix round the pipeline ran for this
 	// step, in round order: the agent's one-line fix summary, or "" when the
 	// round recorded none. Agent surfaces use it to report applied fixes.

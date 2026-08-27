@@ -81,6 +81,8 @@ type stepView struct {
 	Status           string
 	DurationMS       int64
 	FindingsJSON     string
+	Error            string
+	AgentAutoRetries int
 	FixSummaries     []string
 	StartedAt        *int64
 	LastActivityAt   *int64
@@ -135,6 +137,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 			FixRoundCount:    s.FixRoundCount,
 			AutoFixLimit:     s.AutoFixLimit,
 			PendingFixSource: s.PendingFixSource,
+			AgentAutoRetries: s.AgentAutoRetries,
 		}
 		if s.LastActivity != nil {
 			sv.LastActivity = *s.LastActivity
@@ -144,6 +147,9 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		}
 		if s.FindingsJSON != nil {
 			sv.FindingsJSON = *s.FindingsJSON
+		}
+		if s.Error != nil {
+			sv.Error = *s.Error
 		}
 		rv.Steps = append(rv.Steps, sv)
 	}
@@ -182,6 +188,9 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 		if s.FindingsJSON != nil {
 			sv.FindingsJSON = *s.FindingsJSON
 		}
+		if s.Error != nil {
+			sv.Error = *s.Error
+		}
 		rv.Steps = append(rv.Steps, sv)
 	}
 	return rv
@@ -191,7 +200,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 // At most one step awaits at a time, so the first match is the active gate.
 func (rv runView) awaitingStep() (stepView, bool) {
 	for _, s := range rv.Steps {
-		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview) || s.Status == string(types.StepStatusAwaitingTriage) {
+		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusAwaitingRetry) || s.Status == string(types.StepStatusFixReview) || s.Status == string(types.StepStatusAwaitingTriage) {
 			return s, true
 		}
 	}
@@ -440,6 +449,13 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 // gateFields renders the active approval gate: the awaiting step, its findings
 // table, and the next-step commands an agent can run to clear it.
 func gateFields(gate stepView) []toon.Field {
+	if gate.Status == string(types.StepStatusAwaitingRetry) {
+		return gateFieldsWithHelp(gate, []string{
+			"Run `no-mistakes axi respond --action retry` to retry this agent step without creating a review fix round",
+			fmt.Sprintf("Run `%s` to read the full step log", axiLogsFullCommand(gate.Name, "")),
+			"A long-running call is working, not stalled; the run never advances past this gate on its own.",
+		})
+	}
 	help := []string{
 		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
 	}
@@ -469,6 +485,16 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 	gfields := []toon.Field{
 		{Key: "step", Value: gate.Name},
 		{Key: "status", Value: gate.Status},
+	}
+	if gate.Status == string(types.StepStatusAwaitingRetry) {
+		if gate.Error != "" {
+			gfields = append(gfields, toon.Field{Key: "reason", Value: gate.Error})
+		}
+		gfields = append(gfields, toon.Field{Key: "auto_retries", Value: gate.AgentAutoRetries})
+		return []toon.Field{
+			{Key: "gate", Value: toon.NewObject(gfields...)},
+			{Key: "help", Value: help},
+		}
 	}
 	if parsed.Summary != "" {
 		gfields = append(gfields, toon.Field{Key: "summary", Value: truncate(parsed.Summary, maxGateSummary)})

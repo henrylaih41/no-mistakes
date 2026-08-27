@@ -220,6 +220,7 @@ func TestRespondParams(t *testing.T) {
 		Action:            types.ActionApprove,
 		FindingIDs:        []string{"review-1", "review-2"},
 		FixOverrideReason: "master triage: merge-blocking",
+		AutoRetry:         true,
 	}
 	data, _ := json.Marshal(params)
 	var got RespondParams
@@ -240,6 +241,9 @@ func TestRespondParams(t *testing.T) {
 	}
 	if got.FixOverrideReason != "master triage: merge-blocking" {
 		t.Errorf("fix_override_reason = %q, want persisted reason", got.FixOverrideReason)
+	}
+	if !got.AutoRetry {
+		t.Error("auto_retry = false, want true")
 	}
 }
 

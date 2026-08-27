@@ -244,6 +244,46 @@ func TestRunWithRetry_RetriesTransientThenSucceeds(t *testing.T) {
 	}
 }
 
+func TestRunWithRetry_ExhaustedTransientReturnsTypedError(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	transientErr := errors.New("503 service unavailable")
+	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 1, classifyTransient, nil, func() (*Result, error) {
+		return nil, transientErr
+	})
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	var transient *TransientError
+	if !errors.As(err, &transient) {
+		t.Fatalf("expected TransientError, got %T %[1]v", err)
+	}
+	if transient.Agent != "claude" || transient.Label != "http 503" {
+		t.Fatalf("TransientError = %+v, want claude/http 503", transient)
+	}
+	if !errors.Is(err, transientErr) {
+		t.Fatalf("TransientError should wrap original error, got %v", err)
+	}
+}
+
+func TestClaudeRetryClassifier_EmptyStderrExitOne(t *testing.T) {
+	label, ok := claudeRetryClassifier(errors.New("claude exited: exit status 1: "))
+	if !ok || label != "empty-stderr exit-1" {
+		t.Fatalf("classification = %q, %v; want empty-stderr exit-1, true", label, ok)
+	}
+}
+
+func TestRunWithRetry_MissingStructuredOutputDoesNotBecomeParkable(t *testing.T) {
+	defer withFastBackoff(t)()
+	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 1, claudeRetryClassifier, nil, func() (*Result, error) {
+		return nil, errNoStructuredOutput
+	})
+	var transient *TransientError
+	if errors.As(err, &transient) {
+		t.Fatalf("missing structured output must stay a normal step error, got %+v", transient)
+	}
+}
+
 func TestRunWithRetry_EmitsRetryLifecycleWhenConfigured(t *testing.T) {
 	defer withFastBackoff(t)()
 

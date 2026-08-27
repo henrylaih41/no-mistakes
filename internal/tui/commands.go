@@ -106,6 +106,13 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if step.Status == types.StepStatusAwaitingTriage {
 		return nil
 	}
+	if step.Status == types.StepStatusAwaitingRetry {
+		if step.AgentAutoRetries > 0 || m.yoloRetried[step.StepName] {
+			return nil
+		}
+		m.yoloRetried[step.StepName] = true
+		return m.respondCmd(types.ActionRetry, true)
+	}
 	if !m.approvalReady(step) {
 		return nil
 	}
@@ -118,7 +125,8 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	return m.respondCmd(types.ActionApprove)
 }
 
-func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
+func (m Model) respondCmd(action types.ApprovalAction, autoRetryValue ...bool) tea.Cmd {
+	autoRetry := len(autoRetryValue) > 0 && autoRetryValue[0]
 	step := awaitingStep(m.steps)
 	if step == nil {
 		return nil
@@ -135,9 +143,10 @@ func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
 	}
 	return func() tea.Msg {
 		params := &ipc.RespondParams{
-			RunID:  m.runID,
-			Step:   step.StepName,
-			Action: action,
+			RunID:     m.runID,
+			Step:      step.StepName,
+			Action:    action,
+			AutoRetry: autoRetry && action == types.ActionRetry,
 		}
 		if action == types.ActionFix {
 			ids := m.selectedFindingIDs(step.StepName)

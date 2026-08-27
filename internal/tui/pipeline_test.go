@@ -359,6 +359,13 @@ func TestAwaitingStep(t *testing.T) {
 	if got == nil || got.StepName != types.StepLint {
 		t.Error("expected lint step in awaiting_triage")
 	}
+
+	run.Steps[2].Status = types.StepStatusCompleted
+	run.Steps[3].Status = types.StepStatusAwaitingRetry
+	got = awaitingStep(run.Steps)
+	if got == nil || got.StepName != types.StepPush {
+		t.Error("expected push step in awaiting_agent_retry")
+	}
 }
 
 func TestModel_ApplyEvent_StepStarted(t *testing.T) {

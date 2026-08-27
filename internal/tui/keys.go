@@ -273,6 +273,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.respondCmd(types.ActionFix)
 	case "s":
 		return m, m.respondCmd(types.ActionSkip)
+	case "t":
+		return m, m.respondCmd(types.ActionRetry)
 	case "o":
 		if m.run != nil && m.run.PRURL != nil && *m.run.PRURL != "" {
 			return m, openBrowserCmd(*m.run.PRURL)
