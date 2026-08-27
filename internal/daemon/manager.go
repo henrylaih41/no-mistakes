@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/designcontext"
 	"github.com/kunchenguid/no-mistakes/internal/eval"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
@@ -710,7 +711,7 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
+	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.DesignContextPaths)
 }
 
 // HandleRerun creates a new run for the latest recoverable head on a branch:
@@ -719,7 +720,7 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 // selected run. Otherwise an authoritative intent is inherited byte-for-byte;
 // runs without one infer intent afresh. When no prior run exists, axi run may
 // bootstrap the first run by supplying the exact gate head it just pushed.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID, expectedHead string, skipSteps []types.StepName, intent string) (string, error) {
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID, expectedHead string, skipSteps []types.StepName, intent string, designContextPaths []string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -765,7 +766,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		if expectedHead == "" || expectedHead != gateHead {
 			return "", fmt.Errorf("no previous run for branch %s", branch)
 		}
-		return m.startRun(ctx, repo, branch, gateHead, git.ZeroSHA, "bootstrap", skipSteps, intent)
+		return m.startRun(ctx, repo, branch, gateHead, git.ZeroSHA, "bootstrap", skipSteps, intent, designContextPaths)
 	}
 	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
 	if err != nil {
@@ -800,7 +801,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		}
 	}
 
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource)
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, designContextPaths)
 }
 
 func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run) (string, error) {
@@ -861,14 +862,14 @@ func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) e
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string) (string, error) {
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent)
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string, designContextPaths []string) (string, error) {
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, designContextPaths)
 }
 
 // startRunWithIntentSource is the common run-creation path. source is empty
 // when no intent is supplied, RunIntentSourceAgent for a new explicit
 // override, and RunIntentSourceRerun for inherited explicit intent.
-func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source string) (string, error) {
+func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source string, designContextPaths []string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1039,6 +1040,24 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		slog.Info("repo commands/agent loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	designCtx, err := designcontext.Materialize(wtDir, designContextPaths, cfg.DesignContext.Files)
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("load design context: %s", err))
+		trackStartFailure("materialize_design_context")
+		return "", fmt.Errorf("load design context: %w", err)
+	}
+	if rawDesignContext, err := types.MarshalDesignContextJSON(designCtx); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("materialize_design_context")
+		return "", err
+	} else if rawDesignContext != "" {
+		if err := m.db.UpdateRunDesignContext(run.ID, rawDesignContext); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("materialize_design_context")
+			return "", err
+		}
+		run.DesignContextJSON = &rawDesignContext
+	}
 	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("evidence_root")

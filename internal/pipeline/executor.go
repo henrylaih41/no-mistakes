@@ -811,6 +811,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		ciReadyNoCI = declaredNoCI
 		e.emitCIReadinessEvent(run, repo, ready, declaredNoCI)
 	}
+	designContext := types.DesignContext{}
+	if run != nil && run.DesignContextJSON != nil {
+		parsed, err := types.ParseDesignContextJSON(*run.DesignContextJSON)
+		if err != nil {
+			return false, "", fmt.Errorf("parse run design context: %w", err)
+		}
+		designContext = parsed
+	}
 	sctx := &StepContext{
 		Ctx:              ctx,
 		Run:              run,
@@ -822,6 +830,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		DB:               e.db,
 		StepResultID:     sr.ID,
 		UserIntent:       userIntent,
+		DesignContext:    designContext,
 		IntentSource:     userIntentSource,
 		Sessions:         e.sessions,
 		Shared:           e.shared,

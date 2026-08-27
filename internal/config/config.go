@@ -244,7 +244,8 @@ type RepoConfig struct {
 	// assertGateTrustedConfigReadable): a contributor's pushed branch must not be
 	// able to turn it off (or on). Default false; a plain bool so a missing key
 	// or a YAML/JSON null is falsy and preserves current loading.
-	DisableProjectSettings bool `yaml:"disable_project_settings"`
+	DisableProjectSettings bool             `yaml:"disable_project_settings"`
+	DesignContext          DesignContextRaw `yaml:"design_context"`
 	// NoCI declares that this repository intentionally has no CI. When true and
 	// the forge reports zero checks, the CI monitor treats that empty result as
 	// all-checks-passed. It is a readiness boundary honored ONLY from the trusted
@@ -264,6 +265,13 @@ type DocumentRaw struct {
 	// placement policy with the repository's ownership map or extra
 	// placement rules.
 	Instructions string `yaml:"instructions"`
+}
+
+// DesignContextRaw is the YAML representation of per-run design-context file
+// selectors. Repo selectors are prompt context, not process selection; the
+// daemon validates and jails them to the worktree before reading.
+type DesignContextRaw struct {
+	Files []string `yaml:"files"`
 }
 
 // ReviewRaw is the YAML representation of review-step settings.
@@ -394,20 +402,21 @@ func RenderedInstructions(instructions string) string {
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent                  agentList   `yaml:"agent"`
-		Commands               Commands    `yaml:"commands"`
-		IgnorePatterns         []string    `yaml:"ignore_patterns"`
-		AllowRepoCommands      bool        `yaml:"allow_repo_commands"`
-		AutoFix                AutoFixRaw  `yaml:"auto_fix"`
-		CI                     CIRaw       `yaml:"ci"`
-		Commit                 CommitRaw   `yaml:"commit"`
-		Intent                 IntentRaw   `yaml:"intent"`
-		Test                   TestRaw     `yaml:"test"`
-		PR                     PRRaw       `yaml:"pr"`
-		Document               DocumentRaw `yaml:"document"`
-		Review                 ReviewRaw   `yaml:"review"`
-		DisableProjectSettings bool        `yaml:"disable_project_settings"`
-		NoCI                   bool        `yaml:"no_ci"`
+		Agent                  agentList        `yaml:"agent"`
+		Commands               Commands         `yaml:"commands"`
+		IgnorePatterns         []string         `yaml:"ignore_patterns"`
+		AllowRepoCommands      bool             `yaml:"allow_repo_commands"`
+		AutoFix                AutoFixRaw       `yaml:"auto_fix"`
+		CI                     CIRaw            `yaml:"ci"`
+		Commit                 CommitRaw        `yaml:"commit"`
+		Intent                 IntentRaw        `yaml:"intent"`
+		Test                   TestRaw          `yaml:"test"`
+		PR                     PRRaw            `yaml:"pr"`
+		Document               DocumentRaw      `yaml:"document"`
+		Review                 ReviewRaw        `yaml:"review"`
+		DisableProjectSettings bool             `yaml:"disable_project_settings"`
+		DesignContext          DesignContextRaw `yaml:"design_context"`
+		NoCI                   bool             `yaml:"no_ci"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -427,6 +436,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Document = raw.Document
 	c.Review = raw.Review
 	c.DisableProjectSettings = raw.DisableProjectSettings
+	c.DesignContext = raw.DesignContext
 	c.NoCI = raw.NoCI
 	return nil
 }
@@ -507,6 +517,7 @@ type Config struct {
 	Intent                Intent
 	Test                  Test
 	Document              Document
+	DesignContext         DesignContext
 	Review                Review
 	PR                    PR
 	ForgeProfiles         ForgeProfiles
@@ -531,6 +542,11 @@ type PR struct {
 // policy in the document prompt.
 type Document struct {
 	Instructions string
+}
+
+// DesignContext is the resolved design-context config.
+type DesignContext struct {
+	Files []string
 }
 
 // Review is the resolved review-step config. PathInstructions come from the
@@ -2092,9 +2108,10 @@ func validatePathInstructionGlob(pattern string) error {
 // branch - this blocks the supply-chain vector for repos that ship
 // .no-mistakes.yaml only on feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, commit, intent, test) are
-// always taken from the pushed copy, matching prior behavior, since they cannot
-// run arbitrary shell, select a process, or spend the maintainer's CI minutes.
+// Non-executing fields (ignore patterns, auto-fix, commit, intent, test,
+// design_context) are always taken from the pushed copy, matching prior
+// behavior, since they cannot run arbitrary shell, select a process, or spend
+// the maintainer's CI minutes.
 // The single exception inside test is evidence.branch, which names a git ref
 // the daemon pushes to and is therefore trusted-only.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
@@ -2507,6 +2524,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:         intent,
 		Test:           test,
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
+		DesignContext:  resolveDesignContext(repo.DesignContext),
 		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
 		PR:             PR{BaseBranch: strings.TrimSpace(repo.PR.BaseBranch)},
 		ForgeProfiles:  global.ForgeProfiles,
@@ -2525,6 +2543,16 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	}
 
 	return cfg
+}
+
+func resolveDesignContext(raw DesignContextRaw) DesignContext {
+	files := make([]string, 0, len(raw.Files))
+	for _, file := range raw.Files {
+		if trimmed := strings.TrimSpace(file); trimmed != "" {
+			files = append(files, trimmed)
+		}
+	}
+	return DesignContext{Files: files}
 }
 
 // EnableEvalProvenance pins the exact configuration this run reviews under so

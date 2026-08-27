@@ -71,11 +71,15 @@ type Run struct {
 	IntentSource    *string
 	IntentSessionID *string
 	IntentScore     *float64
-	CreatedAt       int64
-	UpdatedAt       int64
+	// DesignContextJSON is the immutable materialized design context for this
+	// run, encoded as types.DesignContext JSON. Steps parse this copy instead
+	// of rereading mutable files during later rounds.
+	DesignContextJSON *string
+	CreatedAt         int64
+	UpdatedAt         int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, design_context_json, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -86,7 +90,7 @@ func scanRun(row interface {
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive, &r.TerminalHeadVerifiedAt,
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
-		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
+		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore, &r.DesignContextJSON,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 }
@@ -608,6 +612,15 @@ func (d *DB) UpdateRunHeadSHA(id, headSHA string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run head sha: %w", err)
+	}
+	return nil
+}
+
+// UpdateRunDesignContext persists the materialized design context for a run.
+func (d *DB) UpdateRunDesignContext(id, raw string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET design_context_json = ?, updated_at = ? WHERE id = ?`, nullableString(strings.TrimSpace(raw)), now(), id)
+	if err != nil {
+		return fmt.Errorf("update run design context: %w", err)
 	}
 	return nil
 }

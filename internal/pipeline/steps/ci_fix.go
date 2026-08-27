@@ -104,6 +104,7 @@ CI logs:
 %s`, logOutput)
 	}
 	prompt += userIntentPromptSection(sctx)
+	prompt += designContextPromptSection(sctx)
 	prompt += executionContextPromptSection(sctx.WorkDir)
 	prompt = testguidance.LateRepairPrompt(string(s.Name()), prompt)
 

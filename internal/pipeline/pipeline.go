@@ -46,6 +46,10 @@ type StepContext struct {
 	// explicit `--intent` is the author's own goal statement, while an
 	// inferred summary comes from a local agent transcript.
 	UserIntent string
+	// DesignContext is the immutable design contract materialized at run start.
+	// Reviewers and fixers use it to check implementation against agreed
+	// decisions without rereading mutable files.
+	DesignContext types.DesignContext
 	// IntentSource records the provenance of UserIntent so steps can weigh
 	// its authority. db.RunIntentSourceAgent ("agent") means the driving
 	// agent supplied it explicitly via `axi run --intent`; db.RunIntentSourceRerun

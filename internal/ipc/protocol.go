@@ -67,12 +67,13 @@ func (e *RPCError) Error() string { return e.Message }
 // intent from local transcripts.
 type PushReceivedParams struct {
 	// Gate is the absolute path to the gate bare repo.
-	Gate      string           `json:"gate"`
-	Ref       string           `json:"ref"`
-	Old       string           `json:"old"`
-	New       string           `json:"new"`
-	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
-	Intent    string           `json:"intent,omitempty"`
+	Gate               string           `json:"gate"`
+	Ref                string           `json:"ref"`
+	Old                string           `json:"old"`
+	New                string           `json:"new"`
+	SkipSteps          []types.StepName `json:"skip_steps,omitempty"`
+	Intent             string           `json:"intent,omitempty"`
+	DesignContextPaths []string         `json:"design_context_paths,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.
@@ -125,11 +126,12 @@ type GetActiveRunParams struct {
 // the daemon inherits authoritative intent from the selected prior run or
 // leaves the new run to perform fresh inference.
 type RerunParams struct {
-	RepoID        string           `json:"repo_id"`
-	Branch        string           `json:"branch"`
-	PreviousRunID string           `json:"previous_run_id,omitempty"`
-	SkipSteps     []types.StepName `json:"skip_steps,omitempty"`
-	Intent        string           `json:"intent,omitempty"`
+	RepoID             string           `json:"repo_id"`
+	Branch             string           `json:"branch"`
+	PreviousRunID      string           `json:"previous_run_id,omitempty"`
+	SkipSteps          []types.StepName `json:"skip_steps,omitempty"`
+	Intent             string           `json:"intent,omitempty"`
+	DesignContextPaths []string         `json:"design_context_paths,omitempty"`
 	// ExpectedHeadSHA, when set, permits bootstrapping the FIRST run for a branch
 	// the gate already mirrors but has never run: HandleRerun starts a fresh run
 	// only when this matches the current gate head. `axi run` sets it to the head

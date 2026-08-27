@@ -37,8 +37,9 @@ CREATE TABLE IF NOT EXISTS runs (
     terminal_head_verified_at INTEGER,
     error                   TEXT,
     awaiting_agent_since INTEGER,
-    parked_ms            INTEGER,
-    created_at           INTEGER NOT NULL,
+	parked_ms            INTEGER,
+	design_context_json  TEXT,
+	created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
 
@@ -179,6 +180,7 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN intent_score REAL`,
 	`ALTER TABLE runs ADD COLUMN awaiting_agent_since INTEGER`,
 	`ALTER TABLE runs ADD COLUMN parked_ms INTEGER`,
+	`ALTER TABLE runs ADD COLUMN design_context_json TEXT`,
 	// The CI step's per-check rerun budget. It is durable because a run
 	// recovered after a daemon restart would otherwise get a fresh budget and
 	// could issue reruns beyond the documented limit; the reservation is
