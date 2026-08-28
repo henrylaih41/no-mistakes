@@ -161,12 +161,13 @@ When yolo mode is on, the footer changes from `y yolo` to `y end yolo`.
 | `Ctrl+d` / `Ctrl+u` | Half-page down / up |
 | `n` / `p` | Next / previous finding |
 
-### Actions (when a step is awaiting approval)
+### Actions (when a step is parked)
 
 | Key | Action |
 |---|---|
 | `a` | Approve - continue to next step |
 | `f` | Fix - send selected findings to agent for fixing |
+| `t` | Retry - rerun a step parked at `awaiting_agent_retry` |
 | `s` | Skip - skip this step and continue |
 | `x` | Abort - press twice to confirm (first press shows warning) |
 | `o` | Open PR URL in browser (when available) |
@@ -214,7 +215,9 @@ Press `e` to add or edit extra guidance for the current finding. Press `+` to ad
 
 Press `y` to toggle yolo mode when you want paused approval gates to resolve automatically.
 Yolo fixes gates with `auto-fix`, `ask-master`, and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
-It approves gates with no findings or only `action: no-op` findings as-is, and fixes each step at most once so unresolved findings do not loop forever.
+It approves gates with no findings or only `action: no-op` findings as-is, fixes each step at most once, and retries one `awaiting_agent_retry` transient per step. A second consecutive transient remains parked for `t retry`, and yolo always stops at `awaiting_triage`.
+
+An `awaiting_triage` Review gate disables ordinary `f fix`. You can approve or skip after inspecting the evidence, or use the attributed [`axi respond --fix-override`](/no-mistakes/reference/cli/#no-mistakes-axi-respond) path after Master triage when the configured fix-round cap caused the park. A review-verdict-evidence diagnostic is not selectable source-fix work.
 
 ## Outcome banner
 

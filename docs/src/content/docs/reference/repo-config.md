@@ -8,12 +8,12 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, and `test.evidence.branch` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.max_fix_rounds`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, and `test.evidence.branch` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`) are still read from the pushed branch, except `test.evidence.branch`, which names a git ref the daemon pushes to.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `design_context`) are still read from the pushed branch, except `test.evidence.branch`, which names a git ref the daemon pushes to.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -41,6 +41,8 @@ document:
 # Optional extra review guidance, scoped to the paths a change touches.
 # Read only from the trusted default branch.
 review:
+  # Optional persisted Review fix-round cap. Zero means unlimited.
+  max_fix_rounds: 3
   path_instructions:
     - path: "internal/scm/**"
       instructions: |
@@ -48,6 +50,12 @@ review:
     - path: "docs/**"
       instructions: |
         Prose changes only. Do not request test coverage.
+
+# Optional design contracts copied into each new run from the pushed branch.
+design_context:
+  files:
+    - "docs/decisions/*.md"
+    - "docs/architecture.md"
 
 # For orchestration repos whose project instructions would misidentify gate agents.
 # Read only from the trusted default branch. Defaults to false.
@@ -309,6 +317,37 @@ These checks run on whichever copy of the file is parsed, including the pushed b
 #### Trust
 
 Like `document.instructions`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of [`allow_repo_commands`](#allow_repo_commands): a value present only on a pushed branch is ignored, so a contributor cannot inject instructions into the review that gates them.
+
+### review.max_fix_rounds
+
+Overrides the global Review fix-round cap for this repository.
+
+| | |
+|---|---|
+| Type | `int` |
+| Default | Inherits from global config (`0`, unlimited, by default) |
+| Range | `0` or greater |
+| Trust | Read only from the trusted default branch |
+
+This field shares the full cap, triage, and attributed-override behavior documented by the [global field](/no-mistakes/reference/global-config/#reviewmax_fix_rounds). It stays trusted-default-branch-only even when `allow_repo_commands: true`, so a pushed branch cannot raise or remove its own review bound.
+
+### design_context.files
+
+Repository design notes, ADRs, or issue agreements to treat as a design contract for each new run.
+
+| | |
+|---|---|
+| Type | `string[]` |
+| Default | Empty |
+| Trust | Read from the pushed branch |
+
+Each entry is a repository-relative, forward-slash glob. It must be non-empty, match at least one regular UTF-8 file, and remain inside the run worktree after symlinks are resolved. Absolute or home-relative paths, Windows volume syntax, backslashes, colons, and `..` path components are rejected. Matches are sorted, and files that resolve to the same canonical path are included once.
+
+At run start, no-mistakes copies the selected text into the run record once. Later edits to the source files do not change that run; a rerun or another fresh run materializes its own copy. Explicit [`axi run --design-context`](/no-mistakes/reference/cli/#no-mistakes-axi-run) files are considered first, followed by these repo-config matches.
+
+The materialized context is bounded to 64 files, 64 KiB of source text per file, and 256 KiB total. An oversized included file is truncated with a marker; files after either aggregate limit are omitted. Prompt assembly treats every file body as untrusted data, strips adversarial control text, redacts recognizable secrets, and neutralizes design-context fence markers while preserving the materialized run copy.
+
+The [pipeline step reference](/no-mistakes/reference/pipeline-steps/#design-context) owns which agent phases receive the context.
 
 ### Command process lifetime
 

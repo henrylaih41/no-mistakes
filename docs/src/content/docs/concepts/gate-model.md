@@ -163,9 +163,9 @@ branch, marking the remaining steps as skipped.
 3. If blocking findings remain, or any finding has `action: ask-master` or `action: ask-user`, pause and wait for the owning authority
 4. `action: no-op` findings are informational only; the gate owner can approve, fix selected findings, skip, or cancel the run when the step pauses
 
-While the executor is paused at an approval or fix-review gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
+While the executor is paused at an `awaiting_approval`, `awaiting_agent_retry`, `fix_review`, or `awaiting_triage` gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
 That timestamp is observability only and does not alter approval behavior.
-When the wait ends, it atomically clears the marker and adds the elapsed wall time to the run's local parked-time total, so a crash cannot leave that time undercounted.
+Gate entry atomically publishes the step status and run marker. When the wait ends, one transaction moves the step, clears the marker, and adds the elapsed wall time to the run's local parked-time total; a failed transition rolls back instead of exposing a torn gate. Status readers likewise read the run and its steps from one database snapshot.
 While a step is running or fixing, the executor also records the latest meaningful step activity from log lines and native subprocess lifecycle events.
 AXI renders that activity in `active_steps`, including a quiet prefix when no activity has arrived for longer than the configured `step_quiet_warning`.
 
@@ -175,7 +175,7 @@ Communication between the CLI and daemon uses JSON-RPC 2.0 over the Unix socket.
 
 ### Database
 
-SQLite at `~/.no-mistakes/state.sqlite` tracks repos, runs, step results, step rounds, derived intent summaries, local agent invocation performance, and the minimum session metadata needed to resume review-loop roles.
+SQLite at `~/.no-mistakes/state.sqlite` tracks repos, runs, immutable per-run design context, step results, step rounds, derived intent summaries, local agent invocation performance, and the minimum session metadata needed to resume review-loop roles.
 Step rounds record each execution attempt (initial, auto-fix) with its own findings and duration, plus selected finding IDs, whether the selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and the one-line fix summary for fix rounds.
 Step results also store the last active timestamp, last activity text, native agent PID while a subprocess is active, and the effective auto-fix limit used by AXI status.
 That merged payload can include per-finding user notes and user-authored findings from the TUI or AXI interface.

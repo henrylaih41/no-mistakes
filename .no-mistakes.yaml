@@ -12,8 +12,8 @@ commands:
   format: "gofmt -w ."
 
 # Pin review auto-fix to the product default so this repo does not inherit an
-# operator's global override. Review findings park for a human decision; other
-# steps keep their configured behavior.
+# operator's global override. Review findings park for the owning authority;
+# other steps keep their configured behavior.
 auto_fix:
   review: 0
 

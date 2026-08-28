@@ -101,7 +101,7 @@ $ no-mistakes
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and initialize with `no-mistakes init --fork-url <your-fork-url>`.
 
-From the TUI you act on each **finding**: **auto-fix** ones are applied for you (or approve to let them), **ask-user** ones are a judgement call you approve, fix, or skip.
+The TUI makes each finding's authority explicit: **auto-fix** for a bounded correction whose outcome is already known, **ask-master** for gate-owner implementation judgment, and **ask-user** for a product or guarantee choice only you can make.
 Once every check is green, the gate forwards your branch to the configured push target and opens the PR for you, so there is no manual `git push origin` and no hand-written PR body.
 Prefer to let your coding agent drive the same flow headlessly?
 Use `/no-mistakes` (see below).
@@ -112,7 +112,7 @@ Every change runs through the same pipeline. Pick the entry point that fits how 
 
 - **`git push no-mistakes`** - the explicit Git path. Push a committed branch to the gate remote instead of `origin`.
 - **`no-mistakes`** - the TUI. Run it after making changes (no commit needed) and a wizard walks you through creating a branch, committing, and pushing through the gate, then attaches to the run. `no-mistakes -y` does all of that automatically.
-- **`/no-mistakes`** - the agent skill. Tell the coding agent to do a task and gate it with `/no-mistakes <task>`, or use bare `/no-mistakes` to gate existing committed work. It runs the pipeline, has the pipeline apply safe fixes, and stops to ask you about anything that needs a human call.
+- **`/no-mistakes`** - the agent skill. Tell the coding agent to do a task and gate it with `/no-mistakes <task>`, or use bare `/no-mistakes` to gate existing committed work. It runs the pipeline, has the pipeline apply safe fixes, and stops only for a user-owned product or guarantee choice.
 
 `no-mistakes init` installs the `/no-mistakes` skill for Claude Code and other agents. Under the hood the skill drives `no-mistakes axi`, a non-interactive TOON interface to the same approval flow.
 

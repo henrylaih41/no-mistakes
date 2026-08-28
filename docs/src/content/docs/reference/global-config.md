@@ -65,6 +65,9 @@ forge_profiles:
   gitlab-work:
     glab_config_dir: ~/.config/glab-work
 
+review:
+  max_fix_rounds: 0
+
 auto_fix:
   rebase: 3
   review: 0
@@ -518,6 +521,20 @@ Each run records the directory it was created in, so editing, adding, or removin
 The key is matched against the checkout path recorded at `init`. After moving a checkout, re-run `no-mistakes init` from the new path and update the key; a key that matches no registered repository is reported in the daemon log at startup and otherwise does nothing.
 
 `no-mistakes init --worktree-root <dir>` prints the exact entry to add for the checkout you are initializing. The global config is hand-maintained, so init never rewrites it for you.
+
+### review.max_fix_rounds
+
+Caps the number of persisted Review fix rounds in one run. Both automatic and explicitly requested finding-fix rounds count; retrying an exhausted transient agent invocation does not.
+
+| | |
+|---|---|
+| Type | `int` |
+| Default | `0` (unlimited) |
+| Range | `0` or greater |
+
+When a rereview is clean, Review completes even if the cap has been consumed. When findings remain after the cap, Review parks at `awaiting_triage` instead of starting another fix round. AXI `--yes` and TUI yolo stop there.
+
+After Master triage, `no-mistakes axi respond --action fix --fix-override --override-reason "<reason>" --findings <ids>` authorizes exactly one additional round and stores the reason on the round that triggered it. Residual findings park for triage again. The per-repo [`review.max_fix_rounds`](/no-mistakes/reference/repo-config/#reviewmax_fix_rounds) overrides this value from the trusted default-branch config.
 
 ### auto_fix
 

@@ -74,7 +74,7 @@ If the complete findings JSON is malformed or unreadable, the gate also parks in
 Action names identify decision authority, not severity. A severe or user-visible defect remains `auto-fix` when current authoritative evidence establishes one bounded correction. For a user-visible correction, the finding must name the still-current intent criterion, design clause, contract, invariant, or test that fixes the outcome; evidence removed or changed by the diff does not count. When the approved outcome is known but the implementation needs non-local judgment, use `ask-master`. Reserve `ask-user` for choices with at least two materially different outcomes that authoritative evidence does not settle and that change behavior or an agreed correctness, security, durability, performance, scalability, compatibility, or cost guarantee. An `ask-user` finding states the exact choice, viable options, consequence of each, and a recommendation. Uncertainty about **how** to fix routes to Master; uncertainty about **what** the product should do routes to the user.
 
 Agents driving AXI resolve `ask-master` under documented gate-owner authority and bring only the concise unresolved choice, options, consequences, and recommendation for `ask-user` findings to the user. If no Master role exists, `ask-master` falls back to the user.
-In the TUI, yolo mode is an explicit override that auto-resolves paused steps by treating `auto-fix`, `ask-master`, and `ask-user` findings as consent to run one fix round.
+In the TUI, yolo mode is an explicit override that auto-resolves ordinary findings gates by treating `auto-fix`, `ask-master`, and `ask-user` findings as consent to run one fix round.
 Steps with only `no-op` findings are approved as-is.
 
 The `review`, `test`, and configured-command `lint` steps use this shared model directly. The `document` step also uses the same `action` field, but unresolved documentation findings pause for approval because the initial document pass already attempted the documentation updates it could make safely.
@@ -94,8 +94,10 @@ When the pipeline pauses for approval, you can manually trigger a fix from the T
 The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and the shared [finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history).
 The current step's part of that history also includes one-line summaries from earlier fix commits.
 
-After a user-triggered fix, the step re-runs and pauses again to show you the results (`fix_review` status). You can then approve, fix again, skip, or abort.
+After a user-triggered fix, the step re-runs and pauses again to show you the results (`fix_review` status). You can then approve, fix again, skip, or abort while that step still permits another round.
 Yolo and AXI `--yes` approve that fix review automatically after their one fix round, so a finding that remains after the fix does not trigger an unbounded fix loop.
+
+Review has a separate persisted [`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds) ceiling that can bound manual and automatic rounds together. When residual Review findings reach it, the step parks at `awaiting_triage`; unattended modes stop, and one more round requires an explicit Master-triage reason through AXI.
 
 ## Fix commits
 

@@ -10,7 +10,7 @@ intent → rebase → review → test → document → lint → push → pr → 
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
-In the TUI, yolo mode is an explicit override that auto-resolves paused steps: `auto-fix`, `ask-master`, and `ask-user` findings are fixed once with every finding selected, fix-review gates are approved, and gates with only `no-op` findings are approved as-is.
+In the TUI, yolo mode is an explicit override that auto-resolves ordinary paused steps: `auto-fix`, `ask-master`, and `ask-user` findings are fixed once with every finding selected, fix-review gates are approved, gates with only `no-op` findings are approved as-is, and one exhausted transient agent invocation per step is retried. It stops at `awaiting_triage` and after a second consecutive transient park.
 Every pipeline agent invocation is prompt-steered to keep intentional writes inside the run worktree and avoid mutating system state outside it.
 This is a soft boundary, not OS-level sandbox enforcement.
 The steering still allows requested test evidence under the run's managed evidence directory, plus incidental temp or cache writes from normal development tools.
@@ -26,11 +26,17 @@ Review flags every newly added violation and requires same-pattern tests encount
 
 ## Finding decision history
 
-When a human resolves a findings gate with Approve, Skip, or Abort without selecting a fix, no-mistakes records that the round's findings were declined. A gate with no findings records no decision. When the human selects only some findings to fix, the unselected complement is recorded as declined; findings merely left out by automatic filtering remain undecided.
+When an authority resolves a findings gate with Approve, Skip, or Abort without selecting a fix, no-mistakes records that the round's findings were declined. A gate with no findings records no decision. When the authority selects only some findings to fix, the unselected complement is recorded as declined; findings merely left out by automatic filtering remain undecided.
 
 Review, Test, Document, and Lint agent prompts receive a sanitized history containing the current step's earlier rounds, decisions from other steps in the same run, and a bounded window of decisions from earlier runs on the same branch. A recorded decision takes precedence over conflicting user-intent wording, and later decisions about the same concern supersede earlier ones. Completing Review does not clear branch decisions.
 
 This context is advisory and fails open. It tells agents not to implement or re-report a declined finding unless the current code introduces a materially different problem, but it does not block a step or commit and is not a reversion detector. Rebase and CI fix prompts do not receive this decision history.
+
+## Design context
+
+A new run can materialize design notes, ADRs, or issue agreements from repeatable [`axi run --design-context`](/no-mistakes/reference/cli/#no-mistakes-axi-run) files and the pushed branch's [`design_context.files`](/no-mistakes/reference/repo-config/#design_contextfiles) selectors. The run stores one immutable copy at startup, so later file edits cannot change the contract midway through a fix loop.
+
+The context is appended to Rebase conflict repair, Review and Review-fix, Test evidence and repair, Document, Lint assessment and repair, and CI repair prompts. Agents are told to check the implementation against it and flag deviations instead of reopening settled decisions. File bodies remain untrusted data: they cannot override the step prompt or no-mistakes rules, and any challenge to the contract must cite the source file and passage.
 
 ## Intent
 
@@ -98,7 +104,7 @@ AI code review of your diff.
 - Agent returns findings with severity (`error`, `warning`, `info`), file location, description, and an `action` (`no-op`, `auto-fix`, `ask-master`, `ask-user`)
 - Also returns a `risk_level` (`low`, `medium`, `high`) and `risk_rationale`
 - Runs every review turn - the initial review and every full rereview - as a fresh, session-free invocation, so the rereview that certifies a fix round never resumes the session whose findings prescribed those fixes; the rereview prompt additionally reframes fix-round changes as pipeline-authored code to review under the same adversarial standard as the author's changes, with prior findings, fix summaries, and same-round tests treated as claims rather than evidence
-- Accepts a review verdict only when the adapter reports productive model/tool activity and the turn meets a bounded, workload-scaled wall-time floor; an invalid verdict gets one fresh cold retry, then parks at `awaiting_triage` with a diagnostic finding that cannot enter the source-fix loop
+- For adapters that provide review-verdict evidence, accepts a verdict only when reported model/tool activity proves more than one bare model response, the turn meets a bounded workload-scaled wall-time floor, and the result is not a deferred placeholder; an invalid verdict gets one fresh cold retry, then parks at `awaiting_triage` with a reserved diagnostic finding that cannot enter the source-fix loop
 - When a review-step fixer round commits and its re-review does not complete, persists that branch's uncertified commit range (lint and document fixer commits do not); the next run's initial review of that range receives the same pipeline-authored provenance framing so the replacement reviewer is not cold. A later rebase remaps the persisted SHAs onto the rewritten head. The range is cleared only after a completed review whose approved head equals or descends from the range tip; parked, failed, skipped, and aborted reviews leave it in place
 - With the default `session_reuse: true`, Claude, Codex, Grok, Pi, and Antigravity reuse one durable fixer session across review-fix turns; a resume failure retries the same fix turn in a fresh fixer session, and unsupported agents run cold
 - Bounds its agent turns with [`review_agent_timeout`](/no-mistakes/reference/global-config/#review_agent_timeout): a round's optional fix turn and its rereview turn share one budget, each later auto-fix round starts a fresh one, and an expired budget cancels the agent and fails the step with a timeout diagnostic rather than leaving the run active indefinitely
@@ -110,6 +116,8 @@ AI code review of your diff.
 The fixer applies all selected fixes before running one focused verification limited to the changed area, and it is instructed not to run the complete repository test or lint suite during the fix round.
 The dedicated Test and Lint steps after review remain the authoritative gates, although their coverage may be focused when commands are unconfigured.
 Follow-up review passes use the history to avoid re-reporting user-ignored findings unless the code now has a materially different problem.
+
+[`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds) can separately cap the total persisted Review fix rounds, including manual ones. A clean rereview still completes after the cap; residual findings park at `awaiting_triage`. AXI `--yes` and TUI yolo stop there, and only an explicit, attributed Master-triage override can authorize one more fix round.
 
 **Default auto-fix limit:** `0`.
 
@@ -325,13 +333,16 @@ Each step progresses through these statuses:
 | `running` | Currently executing |
 | `fixing` | Agent is auto-fixing issues |
 | `awaiting_approval` | Paused, waiting for the finding's owning authority |
+| `awaiting_agent_retry` | Bounded in-process retries exhausted for a transient agent/provider failure; waiting for an explicit retry |
 | `fix_review` | Paused after a fix cycle, showing results for review |
+| `awaiting_triage` | Review automation stopped at a fix-round cap or an untrusted verdict; waiting for triage |
 | `completed` | Finished successfully |
 | `skipped` | Pre-skipped for the run, skipped by the user, or skipped automatically by the pipeline |
 | `failed` | Step failed; the step log includes the returned error message so command stderr and provider errors are visible in the per-step log, not only in the daemon log |
 
-When a non-terminal run has a step in `awaiting_approval` or `fix_review`, AXI run objects also expose `awaiting_agent: parked <duration>` as a run-level observability signal.
+When a non-terminal run has a step in `awaiting_approval`, `awaiting_agent_retry`, `fix_review`, or `awaiting_triage`, AXI run objects also expose `awaiting_agent: parked <duration>` as a run-level observability signal.
 The signal clears as soon as the approval wait ends, including `axi respond` and cancellation, and does not change how gates resolve.
+At `awaiting_agent_retry`, `axi respond --action retry` reruns the same step without selecting findings and without consuming a Review fix round. AXI `--yes` and TUI yolo may do this automatically once per step; that budget is persisted, so another consecutive transient failure stays parked for an explicit decision.
 When a step is `running` or `fixing`, AXI run objects expose an `active_steps` table with active duration, latest activity, native subprocess PID when present, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
 If the latest activity is older than `step_quiet_warning`, AXI prefixes it with `quiet` to make possible wedges visible without changing the run state.
 Step logs also record native subprocess start, exit, and retry lifecycle lines plus explicit auto-fix and user-fix round markers.

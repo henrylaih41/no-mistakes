@@ -101,7 +101,7 @@ $ no-mistakes
 
 如果是 GitHub fork 贡献，让 `origin` 指向父仓库，并用 `no-mistakes init --fork-url <your-fork-url>` 初始化。
 
-在 TUI 里你逐条处理 **finding**：**auto-fix** 类自动替你应用（或由你 approve 放行），**ask-user** 类需要你判断，由你 approve、fix 或 skip。
+TUI 会明确标出每条 finding 的决定权限：**auto-fix** 表示结果已确定、边界清楚的修复，**ask-master** 交由网关负责人作实现判断，**ask-user** 才需要你决定产品行为或保证。
 每项检查变绿后，网关会把你的分支转发到配置的推送目标并替你开好 PR，不用手动 `git push origin`，也不用手写 PR 正文。
 想让编码 agent 无人值守地走完同一套流程？
 用 `/no-mistakes`（见下文）。
@@ -112,7 +112,7 @@ $ no-mistakes
 
 - **`git push no-mistakes`** —— 显式的 Git 路径。把已提交的分支推给网关 remote，而不是 `origin`。
 - **`no-mistakes`** —— TUI。改完之后运行它（无需先提交），向导会带你建分支、提交、推过网关，然后挂到这次运行上。`no-mistakes -y` 会把这一切自动做完。
-- **`/no-mistakes`** —— agent skill。用 `/no-mistakes <task>` 让编码 agent 完成一个任务再过网关，或用裸 `/no-mistakes` 为已提交的工作过网关。它跑完流水线、让流水线应用安全的修复，并在任何需要人来拍板的地方停下来问你。
+- **`/no-mistakes`** —— agent skill。用 `/no-mistakes <task>` 让编码 agent 完成一个任务再过网关，或用裸 `/no-mistakes` 为已提交的工作过网关。它跑完流水线、让流水线应用安全的修复，只在真正属于用户的产品行为或保证选择上停下来询问你。
 
 `no-mistakes init` 会为 Claude Code 及其他 agent 安装 `/no-mistakes` skill。底层上这个 skill 驱动的是 `no-mistakes axi` —— 同一套审批流程的非交互式 TOON 接口。
 

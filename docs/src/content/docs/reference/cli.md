@@ -99,18 +99,21 @@ An active run on another branch does not block starting validation for the curre
 ```sh
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
+no-mistakes axi run --intent "the user's goal" --design-context docs/architecture.md
 no-mistakes axi run --intent "the user's goal" --yes
 ```
 
-| Flag          | Type     | Default | Description                                                      |
-| ------------- | -------- | ------- | ---------------------------------------------------------------- |
-| `--intent`    | `string` | (none)  | What the user set out to accomplish; required to start a new run |
-| `-y`, `--yes` | `bool`   | `false` | Auto-resolve readable gates until a decision point or outcome    |
-| `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
+| Flag               | Type       | Default | Description                                                          |
+| ------------------ | ---------- | ------- | -------------------------------------------------------------------- |
+| `--intent`         | `string`   | (none)  | What the user set out to accomplish; required to start a new run     |
+| `--design-context` | `string[]` | (none)  | Design-context text file to materialize for this run; repeatable     |
+| `-y`, `--yes`      | `bool`     | `false` | Auto-resolve readable gates until a decision point or outcome        |
+| `--skip`           | `string`   | (none)  | Comma-separated pipeline steps to skip                               |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
 Err on the side of completeness: include the goal, important decisions and tradeoffs, constraints or approaches ruled in or out, and explicit requests that might otherwise look surprising in the diff.
+`--design-context` supplies design notes, ADRs, or issue agreements that reviewers and fixers must check the change against. Relative paths resolve from the invoking working directory, `~/` is expanded, explicit files may live outside the repository, and the flag can be repeated. The files must be regular UTF-8 text files and are copied into the new run once; reattaching to an active run keeps its already-materialized context and does not replace it. The repo-config [`design_context.files`](/no-mistakes/reference/repo-config/#design_contextfiles) field owns the shared size limits, immutable-copy behavior, and prompt safety contract.
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 `axi run` starts a run even when there are no new commits to push, including the first run for a branch the gate already mirrors but has never validated — for example a push whose hook notification was dropped while the daemon was down — rather than failing with `no previous run for branch`.
 Reattaching to an in-flight run does not require `--intent`.
@@ -122,6 +125,7 @@ Starting a fresh run also requires a runnable effective pipeline agent.
 If the configured native agent or ACP runner is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
 With `--yes`, `axi run` treats `action: auto-fix`, `action: ask-master`, and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
+If an agent invocation exhausts its bounded transient provider/runtime retries, `--yes` retries that parked step once. That automatic retry is persisted per step; another consecutive transient failure remains at `awaiting_agent_retry` for an explicit decision. `--yes` never crosses an `awaiting_triage` Review gate.
 If a parked gate's findings JSON cannot be parsed, AXI renders `findings_unreadable` with a command for the full step log and `--yes` stops without fixing or approving that gate. The same fail-closed rule applies to `fix_review` and to a gate that `--yes` already tried to fix.
 Without `--yes`, `ask-master` routes to the documented gate owner for implementation judgment; if none exists it falls back to the user. `ask-user` routes only the concise unresolved choice, options, consequences, and recommendation to the user.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking findings plus `ask-master` and `ask-user` review findings park for a decision unless configuration explicitly opts back into review auto-fix.
@@ -143,17 +147,25 @@ Answer the current approval gate and continue until the next gate, CI-ready deci
 no-mistakes axi respond --action approve
 no-mistakes axi respond --action fix --findings F1,F2 --instructions "optional guidance"
 no-mistakes axi respond --action fix --add-finding '{"description":"...","action":"auto-fix"}'
+no-mistakes axi respond --action retry
+no-mistakes axi respond --action fix --fix-override --override-reason "master triage ruling" --findings F1
 no-mistakes axi respond --action skip
 ```
 
-| Flag             | Type     | Default       | Description                                                          |
-| ---------------- | -------- | ------------- | -------------------------------------------------------------------- |
-| `--action`       | `string` | (none)        | `approve`, `fix`, or `skip`; required                                |
-| `--step`         | `string` | awaiting step | Step to respond to                                                   |
-| `--findings`     | `string` | (none)        | Comma-separated finding IDs for `--action fix`                       |
-| `--instructions` | `string` | (none)        | Guidance applied to selected findings                                |
-| `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
-| `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve readable subsequent gates until a decision point or outcome |
+| Flag                | Type     | Default       | Description                                                               |
+| ------------------- | -------- | ------------- | ------------------------------------------------------------------------- |
+| `--action`          | `string` | (none)        | `approve`, `fix`, `retry`, or `skip`; required                            |
+| `--step`            | `string` | awaiting step | Step to respond to                                                        |
+| `--findings`        | `string` | (none)        | Comma-separated finding IDs for `--action fix`                            |
+| `--instructions`    | `string` | (none)        | Guidance applied to selected findings                                     |
+| `--add-finding`     | `string` | (none)        | JSON finding object to add and fix                                        |
+| `--fix-override`    | `bool`   | `false`       | Allow one more Review fix round after the configured cap                  |
+| `--override-reason` | `string` | (none)        | Master triage ruling required by `--fix-override`                         |
+| `-y`, `--yes`       | `bool`   | `false`       | Auto-resolve readable subsequent gates until a decision point or outcome  |
+
+`--action retry` is valid only at `awaiting_agent_retry`. It retries the same agent step without selecting findings or creating a Review fix round, and it cannot be combined with findings, fix instructions, user-added findings, or `--fix-override`.
+
+An `awaiting_triage` Review gate caused by [`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds) accepts another fix only with `--fix-override`, a non-empty `--override-reason`, and the findings to fix. The reason is persisted for attribution and authorizes one additional round. A verdict-evidence triage item is diagnostic and cannot be selected for source-fix work; inspect the gate's `triage` field and log before approving or skipping it.
 
 After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix`, `ask-master`, and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when the CI monitor reports readiness but the PR still needs a human merge.
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome.
@@ -181,8 +193,9 @@ no-mistakes axi status --run <id>
 | ------- | -------- | ------------------ | ------------------------- |
 | `--run` | `string` | current-branch run | Inspect a specific run ID |
 
-When the resolved run is parked at an `awaiting_approval` or `fix_review` gate, its top-level `run:` or `other_branch_run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
+When the resolved run is parked at an `awaiting_approval`, `awaiting_agent_retry`, `fix_review`, or `awaiting_triage` gate, its top-level `run:` or `other_branch_run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
 The field disappears after that run's gate is answered, on cancel, and on terminal outcomes; use it to distinguish a run waiting for the driving agent from one actively running, fixing, or watching CI.
+An `awaiting_agent_retry` gate reports its transient failure `reason` and the persisted automatic-retry count, with no findings table. An `awaiting_triage` Review gate reports why ordinary automation stopped and offers an attributed override only when the fix-round cap caused the park.
 Status offers branch-scoped `axi respond` commands only for the current branch's implicitly resolved run. An explicitly selected gate stays inspection-only even when its branch matches, because a newer active run on that branch could receive the bare response command instead; the gate remains visible and its log commands retain `--run <id>`.
 When the resolved run has a `running` or `fixing` step, the run object includes `active_steps`.
 Each row reports how long the step has been active, the latest meaningful log or native-agent lifecycle activity, the native agent PID if one is currently running, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
