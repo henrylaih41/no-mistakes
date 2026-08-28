@@ -8,10 +8,11 @@ import (
 )
 
 type fallbackTestAgent struct {
-	name      string
-	run       func() (*Result, error)
-	calls     int
-	resumable bool
+	name                         string
+	run                          func() (*Result, error)
+	calls                        int
+	resumable                    bool
+	reportsReviewVerdictEvidence bool
 }
 
 func (a *fallbackTestAgent) Name() string { return a.name }
@@ -24,6 +25,10 @@ func (a *fallbackTestAgent) Run(context.Context, RunOpts) (*Result, error) {
 func (a *fallbackTestAgent) Close() error { return nil }
 
 func (a *fallbackTestAgent) SupportsSessionResume() bool { return a.resumable }
+
+func (a *fallbackTestAgent) ReportsReviewVerdictEvidence(string) bool {
+	return a.reportsReviewVerdictEvidence
+}
 
 func TestFallbackAgentFallsBackOnLaunchFailure(t *testing.T) {
 	first := &fallbackTestAgent{
@@ -113,6 +118,46 @@ func TestFallbackAgent_ForwardsSessionCapability(t *testing.T) {
 	second := &fallbackTestAgent{name: "claude", resumable: true, run: func() (*Result, error) { return &Result{}, nil }}
 	if !SupportsSessionResume(NewFallback([]Agent{WithSteering(first, "/evidence"), WithSteering(second, "/evidence")})) {
 		t.Fatal("fallback's primary resumable agent must retain session support")
+	}
+}
+
+func TestFallbackAgent_ReportsSelectedProvidersReviewVerdictEvidenceCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  *fallbackTestAgent
+		second *fallbackTestAgent
+		want   bool
+	}{
+		{
+			name: "instrumented fallback selected",
+			first: &fallbackTestAgent{name: "copilot", run: func() (*Result, error) {
+				return nil, errors.New("copilot start: executable not found")
+			}},
+			second: &fallbackTestAgent{name: "codex", reportsReviewVerdictEvidence: true, run: func() (*Result, error) {
+				return &Result{Text: "ok"}, nil
+			}},
+			want: true,
+		},
+		{
+			name: "uninstrumented fallback selected",
+			first: &fallbackTestAgent{name: "codex", reportsReviewVerdictEvidence: true, run: func() (*Result, error) {
+				return nil, errors.New("codex start: executable not found")
+			}},
+			second: &fallbackTestAgent{name: "copilot", run: func() (*Result, error) {
+				return &Result{Text: "ok"}, nil
+			}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fallback := NewFallback([]Agent{tc.first, tc.second})
+			result, err := fallback.Run(context.Background(), RunOpts{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ReportsReviewVerdictEvidence(fallback, result.Provider); got != tc.want {
+				t.Fatalf("provider %q capability = %v, want %v", result.Provider, got, tc.want)
+			}
+		})
 	}
 }
 

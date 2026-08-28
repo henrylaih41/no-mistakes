@@ -358,10 +358,7 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	if _, err := database.InsertReviewStepRound(stepResult.ID, 1, "initial", &findings, nil, "1111111111111111111111111111111111111111", 25); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+	if _, err := database.EnterApprovalGate(context.Background(), run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 25, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.UpsertRunAgentSession(run.ID, string(SessionRoleReviewer), "fake", "reviewer-session"); err != nil {
@@ -462,10 +459,7 @@ func TestExecutor_ResumePromotesDurableReviewedCandidateOnApproval(t *testing.T)
 	if _, err := database.InsertReviewStepRound(stepResult.ID, 1, "initial", &findings, nil, reviewedHead, 10); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 10); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+	if _, err := database.EnterApprovalGate(context.Background(), run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 10, nil); err != nil {
 		t.Fatal(err)
 	}
 	run, err = database.GetRun(run.ID)

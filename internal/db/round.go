@@ -72,6 +72,7 @@ type StepRound struct {
 type StepRoundStats struct {
 	TotalRounds        int
 	FixRounds          int
+	AgentAutoRetries   int
 	LatestRound        int
 	LatestTrigger      string
 	LatestSelection    string
@@ -143,6 +144,9 @@ func (d *DB) StepRoundStats(stepResultID string) (StepRoundStats, error) {
 			stats.FixRounds++
 			stats.LatestFixRound = stats.FixRounds
 			stats.LatestFixRoundAt = r.CreatedAt
+		}
+		if r.Trigger == RoundTriggerAgentAutoRetry {
+			stats.AgentAutoRetries++
 		}
 	}
 	if latestSelectedRound == stats.LatestRound {
@@ -321,20 +325,6 @@ func (d *DB) CountStepFixRounds(stepResultID string) (int, error) {
 	count := 0
 	for _, round := range rounds {
 		if round.IsFixRound() {
-			count++
-		}
-	}
-	return count, nil
-}
-
-func (d *DB) CountStepAgentAutoRetries(stepResultID string) (int, error) {
-	rounds, err := d.GetRoundsByStep(stepResultID)
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, round := range rounds {
-		if round.Trigger == RoundTriggerAgentAutoRetry {
 			count++
 		}
 	}

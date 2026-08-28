@@ -84,34 +84,42 @@ func TestCaptureCreatesPortableReviewCaseWithoutRecordingRemoteURL(t *testing.T)
 }
 
 func TestCaptureRejectsReviewRoundBeforeGateDecision(t *testing.T) {
-	ctx := context.Background()
-	p, sourceDB, run, _, reviewRound := setupCapturedRun(t, ctx)
-	defer sourceDB.Close()
-	if err := sourceDB.SetStepRoundSelection(reviewRound.ID, nil, ""); err != nil {
-		t.Fatal(err)
-	}
-	steps, err := sourceDB.GetStepsByRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sourceDB.UpdateStepStatus(steps[0].ID, types.StepStatusAwaitingApproval); err != nil {
-		t.Fatal(err)
-	}
+	for _, status := range []types.StepStatus{
+		types.StepStatusAwaitingApproval,
+		types.StepStatusFixReview,
+		types.StepStatusAwaitingTriage,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			ctx := context.Background()
+			p, sourceDB, run, _, reviewRound := setupCapturedRun(t, ctx)
+			defer sourceDB.Close()
+			if err := sourceDB.SetStepRoundSelection(reviewRound.ID, nil, ""); err != nil {
+				t.Fatal(err)
+			}
+			steps, err := sourceDB.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sourceDB.UpdateStepStatus(steps[0].ID, status); err != nil {
+				t.Fatal(err)
+			}
 
-	store, err := Open(p.EvalDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if _, err := Capture(ctx, store, p, sourceDB, run.ID); err == nil || !strings.Contains(err.Error(), "no recorded gate decision") {
-		t.Fatalf("capture error = %v, want missing gate decision", err)
-	}
-	cases, err := store.ListCases("all")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cases) != 0 {
-		t.Fatalf("premature capture registered %d cases", len(cases))
+			store, err := Open(p.EvalDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if _, err := Capture(ctx, store, p, sourceDB, run.ID); err == nil || !strings.Contains(err.Error(), "no recorded gate decision") {
+				t.Fatalf("capture error = %v, want missing gate decision", err)
+			}
+			cases, err := store.ListCases("all")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cases) != 0 {
+				t.Fatalf("premature capture registered %d cases", len(cases))
+			}
+		})
 	}
 }
 

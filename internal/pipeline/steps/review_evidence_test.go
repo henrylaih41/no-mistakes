@@ -91,13 +91,10 @@ func TestParseReviewFindingsCannotMintGateAuthority(t *testing.T) {
 func TestReviewStepRetriesInvalidVerdictOnceThenParksAtTriage(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
-		name:                   "evidence-probe",
-		preserveReviewEvidence: true,
+		name:                         "evidence-probe",
+		reportsReviewVerdictEvidence: true,
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{
-				Output:  json.RawMessage(`{"findings":[],"summary":"clean","risk_level":"low"}`),
-				Metrics: &agent.InvocationMetrics{ModelRoundtrips: 1},
-			}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"clean","risk_level":"low"}`)}, nil
 		},
 	}
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -120,12 +117,30 @@ func TestReviewStepRetriesInvalidVerdictOnceThenParksAtTriage(t *testing.T) {
 	}
 }
 
+func TestReviewStepDoesNotRequireEvidenceFromUninstrumentedAdapter(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "uninstrumented",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"clean","risk_level":"low"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 || outcome.NeedsApproval || outcome.NeedsTriage {
+		t.Fatalf("calls=%d outcome=%+v, want one accepted review", len(ag.calls), outcome)
+	}
+}
+
 func TestReviewStepAcceptsValidColdRetry(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	calls := 0
 	ag := &mockAgent{
-		name:                   "evidence-probe",
-		preserveReviewEvidence: true,
+		name:                         "evidence-probe",
+		reportsReviewVerdictEvidence: true,
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 			calls++
 			metrics := &agent.InvocationMetrics{ModelRoundtrips: 1}
@@ -149,8 +164,8 @@ func TestReviewStepParksAtTriageWhenColdRetryErrors(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	calls := 0
 	ag := &mockAgent{
-		name:                   "evidence-probe",
-		preserveReviewEvidence: true,
+		name:                         "evidence-probe",
+		reportsReviewVerdictEvidence: true,
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 			calls++
 			if calls == 2 {

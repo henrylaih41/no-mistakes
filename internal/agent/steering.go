@@ -58,6 +58,10 @@ func (s steeredAgent) ReportsAgentAttempts() bool {
 	return ReportsAgentAttempts(s.Agent)
 }
 
+func (s steeredAgent) ReportsReviewVerdictEvidence(provider string) bool {
+	return ReportsReviewVerdictEvidence(s.Agent, provider)
+}
+
 func (s steeredAgent) NeutralizesGateInstructions() bool {
 	return NeutralizesGateInstructions(s.Agent)
 }

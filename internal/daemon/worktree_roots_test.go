@@ -840,7 +840,11 @@ func TestPrepareRecoveredRun_LocatesThePlacementItsRunRecorded(t *testing.T) {
 	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+	step, err := d.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.EnterApprovalGate(context.Background(), run.ID, step.ID, types.StepStatusAwaitingApproval, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -888,7 +892,11 @@ func TestPrepareRecoveredRun_UnrecordedRunKeepsItsDefaultPlacement(t *testing.T)
 	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+	step, err := d.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.EnterApprovalGate(context.Background(), run.ID, step.ID, types.StepStatusAwaitingApproval, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 

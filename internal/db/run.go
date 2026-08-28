@@ -717,19 +717,6 @@ func (d *DB) UpdateRunIntent(id string, intent RunIntent) error {
 	return nil
 }
 
-// SetRunAwaitingAgent marks a run as parked awaiting the driving agent,
-// stamping awaiting_agent_since with the current time. Called by the executor
-// when a step enters a gate (awaiting_approval / fix_review). This is a pollable
-// observability signal only; it does not change gate resolution.
-func (d *DB) SetRunAwaitingAgent(id string) error {
-	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = ?, updated_at = ? WHERE id = ?`, ts, ts, id)
-	if err != nil {
-		return fmt.Errorf("set run awaiting agent: %w", err)
-	}
-	return nil
-}
-
 // ClearRunAwaitingAgent clears the awaiting-agent marker on a run. Called by the
 // executor the moment the agent responds (or the approval wait is cancelled) and
 // the run resumes, so awaiting_agent_since is non-nil exactly while a gate is
@@ -751,22 +738,6 @@ func (d *DB) AddRunParkedDuration(id string, ms int64) error {
 	_, err := d.sql.Exec(`UPDATE runs SET parked_ms = COALESCE(parked_ms, 0) + ?, updated_at = ? WHERE id = ?`, ms, now(), id)
 	if err != nil {
 		return fmt.Errorf("add run parked duration: %w", err)
-	}
-	return nil
-}
-
-func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
-	if ms < 0 {
-		ms = 0
-	}
-	_, err := d.sql.Exec(
-		`UPDATE runs SET awaiting_agent_since = NULL,
-			parked_ms = COALESCE(parked_ms, 0) + CASE WHEN awaiting_agent_since IS NOT NULL THEN ? ELSE 0 END,
-			updated_at = ? WHERE id = ?`,
-		ms, now(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("complete run awaiting agent: %w", err)
 	}
 	return nil
 }

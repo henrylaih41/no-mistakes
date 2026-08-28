@@ -83,6 +83,10 @@ func TestBodyDocumentsAxiGateGuidance(t *testing.T) {
 		"findings JSON is unreadable",
 		"blocking findings plus `ask-master` and `ask-user` review findings park for a decision",
 		"`auto_fix.review > 0`",
+		"`awaiting_agent_retry`",
+		"no-mistakes axi respond --action retry",
+		"`awaiting_triage`",
+		"--fix-override --override-reason",
 	} {
 		if !strings.Contains(md, want) {
 			t.Errorf("body should document AXI gate guidance: missing %q", want)

@@ -202,12 +202,12 @@ func (e *Executor) respondWithMetadata(step types.StepName, action types.Approva
 			return fmt.Errorf("--action retry does not accept findings or fix instructions")
 		}
 		if autoRetry {
-			count, err := e.db.CountStepAgentAutoRetries(e.waitingStepResultID)
+			stats, err := e.db.StepRoundStats(e.waitingStepResultID)
 			if err != nil {
 				e.mu.Unlock()
 				return fmt.Errorf("count agent auto retries for %q: %w", step, err)
 			}
-			if count >= 1 {
+			if stats.AgentAutoRetries >= 1 {
 				e.mu.Unlock()
 				return fmt.Errorf("agent transient auto-retry already consumed for %q; parked for manual retry", step)
 			}
@@ -1486,6 +1486,10 @@ func (a *gateStepBoundaryAgent) ReportsAgentAttempts() bool {
 	return agent.ReportsAgentAttempts(a.inner)
 }
 
+func (a *gateStepBoundaryAgent) ReportsReviewVerdictEvidence(provider string) bool {
+	return agent.ReportsReviewVerdictEvidence(a.inner, provider)
+}
+
 func (a *gateStepBoundaryAgent) NeutralizesGateInstructions() bool {
 	return agent.NeutralizesGateInstructions(a.inner)
 }
@@ -1528,6 +1532,10 @@ func (a *lifecycleAgent) SupportsSessionProvider(provider string) bool {
 
 func (a *lifecycleAgent) ReportsAgentAttempts() bool {
 	return agent.ReportsAgentAttempts(a.inner)
+}
+
+func (a *lifecycleAgent) ReportsReviewVerdictEvidence(provider string) bool {
+	return agent.ReportsReviewVerdictEvidence(a.inner, provider)
 }
 
 const (

@@ -18,7 +18,7 @@ const (
 )
 
 // minimumReviewVerdictDuration is a bounded sanity floor, not a latency
-// prediction. Activity evidence remains mandatory after the floor is met.
+// prediction. Instrumented adapters must also report activity evidence.
 func minimumReviewVerdictDuration(workload *agent.InvocationWorkload) time.Duration {
 	floor := reviewVerdictBaseDuration
 	if workload != nil {
@@ -31,6 +31,17 @@ func minimumReviewVerdictDuration(workload *agent.InvocationWorkload) time.Durat
 
 func validateReviewVerdictEvidence(result *agent.Result, elapsed time.Duration, workload *agent.InvocationWorkload) error {
 	return validateReviewVerdictEvidenceAtFloor(result, elapsed, minimumReviewVerdictDuration(workload))
+}
+
+func validateReportedReviewVerdictEvidence(a agent.Agent, result *agent.Result, elapsed, floor time.Duration) error {
+	provider := ""
+	if result != nil {
+		provider = result.Provider
+	}
+	if !agent.ReportsReviewVerdictEvidence(a, provider) {
+		return nil
+	}
+	return validateReviewVerdictEvidenceAtFloor(result, elapsed, floor)
 }
 
 // validateReviewVerdictEvidenceAtFloor rejects syntactically successful

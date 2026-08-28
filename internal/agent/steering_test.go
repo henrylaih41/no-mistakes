@@ -10,11 +10,12 @@ import (
 
 // recordingAgent captures the RunOpts it was invoked with.
 type recordingAgent struct {
-	name      string
-	gotOpts   RunOpts
-	runCalls  int
-	closed    bool
-	resumable bool
+	name                         string
+	gotOpts                      RunOpts
+	runCalls                     int
+	closed                       bool
+	resumable                    bool
+	reportsReviewVerdictEvidence bool
 }
 
 func (r *recordingAgent) Name() string { return r.name }
@@ -31,6 +32,10 @@ func (r *recordingAgent) Close() error {
 }
 
 func (r *recordingAgent) SupportsSessionResume() bool { return r.resumable }
+
+func (r *recordingAgent) ReportsReviewVerdictEvidence(string) bool {
+	return r.reportsReviewVerdictEvidence
+}
 
 func TestWithSteering_PrependsPreamble(t *testing.T) {
 	inner := &recordingAgent{name: "claude"}
@@ -89,6 +94,13 @@ func TestWithSteering_ForwardsSessionCapability(t *testing.T) {
 	steered := WithSteering(&recordingAgent{name: "codex", resumable: true}, t.TempDir())
 	if !SupportsSessionResume(steered) {
 		t.Fatal("steered resumable agent must remain resumable")
+	}
+}
+
+func TestWithSteering_ForwardsReviewVerdictEvidenceCapability(t *testing.T) {
+	steered := WithSteering(&recordingAgent{name: "codex", reportsReviewVerdictEvidence: true}, t.TempDir())
+	if !ReportsReviewVerdictEvidence(steered, "codex") {
+		t.Fatal("steered instrumented agent must retain review-verdict evidence support")
 	}
 }
 

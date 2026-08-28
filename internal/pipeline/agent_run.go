@@ -138,6 +138,10 @@ func (a *timeoutAgent) ReportsAgentAttempts() bool {
 	return agent.ReportsAgentAttempts(a.inner)
 }
 
+func (a *timeoutAgent) ReportsReviewVerdictEvidence(provider string) bool {
+	return agent.ReportsReviewVerdictEvidence(a.inner, provider)
+}
+
 func (a *timeoutAgent) NeutralizesGateInstructions() bool {
 	return agent.NeutralizesGateInstructions(a.inner)
 }

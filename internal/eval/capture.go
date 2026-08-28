@@ -179,7 +179,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		}
 		decision := decisionForRound(round, reviewStep)
 		labels := goldFromRound(round, decision, runPRState(run))
-		if !labels.HasGold() && (reviewStep.Status == types.StepStatusAwaitingApproval || reviewStep.Status == types.StepStatusFixReview) {
+		if !labels.HasGold() && (reviewStep.Status == types.StepStatusAwaitingApproval || reviewStep.Status == types.StepStatusFixReview || reviewStep.Status == types.StepStatusAwaitingTriage) {
 			return nil, fmt.Errorf("%w: review round %q has no recorded gate decision", ErrNoCapturableReview, round.ID)
 		}
 		reviewedSHA := run.HeadSHA

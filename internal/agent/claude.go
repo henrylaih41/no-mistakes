@@ -43,6 +43,8 @@ func (a *claudeAgent) SupportsSessionResume() bool { return true }
 
 func (a *claudeAgent) ReportsAgentAttempts() bool { return true }
 
+func (a *claudeAgent) ReportsReviewVerdictEvidence(string) bool { return true }
+
 // NeutralizesGateInstructions reports whether claude is currently launched with
 // the target repo's project-level settings/memory suppressed. It is meaningful
 // only under the opt-out (disableProjectSettings): the gate only consults it

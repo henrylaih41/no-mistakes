@@ -130,6 +130,20 @@ func ReportsAgentAttempts(a Agent) bool {
 	return ok && r.ReportsAgentAttempts()
 }
 
+// ReviewVerdictEvidenceReporter is the optional adapter capability for
+// reporting the activity metrics used to validate a source-review verdict.
+// Provider identifies the concrete adapter selected by a fallback wrapper.
+type ReviewVerdictEvidenceReporter interface {
+	ReportsReviewVerdictEvidence(provider string) bool
+}
+
+// ReportsReviewVerdictEvidence reports whether a (possibly wrapped) agent
+// promises activity metrics for the concrete provider that produced a result.
+func ReportsReviewVerdictEvidence(a Agent, provider string) bool {
+	r, ok := a.(ReviewVerdictEvidenceReporter)
+	return ok && r.ReportsReviewVerdictEvidence(provider)
+}
+
 // GateInstructionNeutralizer is the optional adapter capability that reports the
 // adapter neutralizes the target repository's project agent-instruction files
 // (AGENTS.md/CLAUDE.md) for this invocation, so they cannot install a governing

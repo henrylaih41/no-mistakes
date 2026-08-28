@@ -229,10 +229,7 @@ func TestExecutor_ResumeFatalReconcileErrorFailsRun(t *testing.T) {
 	if _, err := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 10); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 10); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+	if _, err := database.EnterApprovalGate(context.Background(), run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 10, nil); err != nil {
 		t.Fatal(err)
 	}
 	run, err = database.GetRun(run.ID)

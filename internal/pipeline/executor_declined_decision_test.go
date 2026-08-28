@@ -134,10 +134,7 @@ func TestExecutor_RecoveredGateResolutionsWithoutASelectionRecordTheDecline(t *t
 			if _, err := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 25); err != nil {
 				t.Fatal(err)
 			}
-			if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
-				t.Fatal(err)
-			}
-			if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+			if _, err := database.EnterApprovalGate(context.Background(), run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 25, nil); err != nil {
 				t.Fatal(err)
 			}
 			run, err = database.GetRun(run.ID)

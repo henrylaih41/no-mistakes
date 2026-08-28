@@ -46,6 +46,8 @@ func (a *grokAgent) SupportsSessionResume() bool { return true }
 
 func (a *grokAgent) ReportsAgentAttempts() bool { return true }
 
+func (a *grokAgent) ReportsReviewVerdictEvidence(string) bool { return true }
+
 // NeutralizesGateInstructions deliberately fails closed. Grok's complete
 // system-prompt replacement is useful defense in depth, but the installed CLI
 // still discovers native project instructions and .grok project surfaces.

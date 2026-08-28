@@ -1359,9 +1359,7 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 		info.RoundCount = rounds.TotalRounds
 		info.FixRoundCount = rounds.FixRounds
 		info.PendingFixSource = rounds.PendingFixSource
-	}
-	if retries, err := d.CountStepAgentAutoRetries(s.ID); err == nil {
-		info.AgentAutoRetries = retries
+		info.AgentAutoRetries = rounds.AgentAutoRetries
 	}
 	return info
 }

@@ -535,10 +535,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	if _, err := d.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, headSHA, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+	if _, err := d.EnterApprovalGate(context.Background(), run.ID, step.ID, types.StepStatusAwaitingApproval, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.UpsertRunAgentSession(run.ID, string(pipeline.SessionRoleReviewer), "codex", "legacy-reviewer-session"); err != nil {
@@ -683,10 +680,7 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 			if _, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1); err != nil {
 				t.Fatal(err)
 			}
-			if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
-				t.Fatal(err)
-			}
-			if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+			if _, err := d.EnterApprovalGate(context.Background(), run.ID, step.ID, types.StepStatusAwaitingApproval, 1, nil); err != nil {
 				t.Fatal(err)
 			}
 

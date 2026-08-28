@@ -42,6 +42,35 @@ func TestNew_KnownAgents(t *testing.T) {
 	}
 }
 
+func TestReviewVerdictEvidenceCapabilityMatchesInstrumentedAdapters(t *testing.T) {
+	tests := []struct {
+		name types.AgentName
+		want bool
+	}{
+		{name: types.AgentClaude, want: true},
+		{name: types.AgentCodex, want: true},
+		{name: types.AgentGrok, want: true},
+		{name: types.AgentOpenCode, want: true},
+		{name: types.AgentAntigravity, want: true},
+		{name: types.AgentCopilot},
+		{name: types.AgentPi},
+		{name: types.AgentCursor},
+		{name: types.AgentName("acp:custom")},
+		{name: types.AgentRovoDev},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.name), func(t *testing.T) {
+			ag, err := New(tt.name, string(tt.name), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ReportsReviewVerdictEvidence(ag, ""); got != tt.want {
+				t.Fatalf("ReportsReviewVerdictEvidence() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNew_ACPAgent(t *testing.T) {
 	a, err := New("acp:gemini", "acpx", nil)
 	if err != nil {

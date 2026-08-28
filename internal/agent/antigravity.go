@@ -27,6 +27,8 @@ func (a *antigravityAgent) Name() string { return "antigravity" }
 
 func (a *antigravityAgent) ReportsAgentAttempts() bool { return true }
 
+func (a *antigravityAgent) ReportsReviewVerdictEvidence(string) bool { return true }
+
 // SupportsSessionResume reports antigravity's durable-session capability:
 // stream-json events carry the conversation identity, and
 // `--conversation <id>` reopens that conversation headless.

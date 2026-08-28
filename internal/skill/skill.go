@@ -154,8 +154,8 @@ Run the pipeline and decide on its findings as they come up:
    return; on a ` + "`gate:`" + `, respond; loop until an ` + "`outcome:`" + `. Never idle-wait
    for the run to move forward by itself.
    When that status output includes ` + "`awaiting_agent: parked <duration>`" + ` under the run,
-   the run is parked at an approval or fix-review gate and waiting for you to
-   send ` + "`axi respond`" + `. The field is observability only: it does not change
+   the run is parked at an approval, fix-review, transient agent retry, or triage gate and waiting
+   for you to send ` + "`axi respond`" + `. The field is observability only: it does not change
    gate resolution, auto-resume the run, or make ` + "`--yes`" + ` the default.
    While a step is actively ` + "`running`" + ` or ` + "`fixing`" + `, ` + "`axi status`" + ` may include
    ` + "`active_steps`" + ` with ` + "`active_for`" + `, ` + "`last_activity`" + `, a native ` + "`agent_pid`" + ` when
@@ -165,6 +165,9 @@ Run the pipeline and decide on its findings as they come up:
    longer than ` + "`step_quiet_warning`" + `. Treat that as a liveness clue, not as
    permission to cancel, rerun, or edit the worktree yourself.
 2. If the output contains a ` + "`gate:`" + ` object, the pipeline is waiting on you.
+   If the gate status is ` + "`awaiting_agent_retry`" + `, it has no findings to
+   fix; use ` + "`no-mistakes axi respond --action retry`" + ` to retry that same
+   agent step, or escalate if repeated provider failures need human scheduling.
    Read its ` + "`findings`" + ` table. Each finding has an ` + "`id`" + `, ` + "`severity`" + `,
    ` + "`file`" + `, ` + "`description`" + `, and an ` + "`action`" + ` that tells you how the
    pipeline classified it:
@@ -183,6 +186,19 @@ Run the pipeline and decide on its findings as they come up:
    or global ` + "`auto_fix.review > 0`" + ` override re-enables it), so blocking findings plus ` + "`ask-master`" + ` and ` + "`ask-user`" + ` review findings park for a decision
    rather than being silently self-fixed. (Other steps such as test and lint may auto-fix within the
    pipeline and re-run before they ever gate.)
+   If review reaches ` + "`review.max_fix_rounds`" + `, it parks as ` + "`awaiting_triage`" + `:
+   report the residual findings to master triage instead of sending another
+   normal fix. Use ` + "`--fix-override --override-reason \"<master triage reason>\"`" + `
+   only after master rules a residual merge-blocking; that reason is persisted
+   on the triggering round. ` + "`--yes`" + ` stops at ` + "`awaiting_triage`" + ` and never
+   supplies the override implicitly.
+   If a step reaches ` + "`awaiting_agent_retry`" + `, the agent invocation exhausted
+   bounded retries for a transient provider/runtime failure. Respond with
+   ` + "`no-mistakes axi respond --action retry`" + ` to retry that same step; this is
+   not a finding fix and does not count as a review fix round. Under ` + "`--yes`" + `,
+   no-mistakes auto-retries this parked transient at most once per step, with
+   that auto retry persisted on the run; a second consecutive transient remains
+   parked for an explicit retry decision.
 
    Choose one response:
    ` + "```sh" + `
@@ -191,6 +207,12 @@ Run the pipeline and decide on its findings as they come up:
 
    # have the pipeline fix specific findings, then continue
    no-mistakes axi respond --action fix --findings <id1,id2> --instructions "<optional guidance>"
+
+   # retry a parked transient agent/provider failure without creating a fix round
+   no-mistakes axi respond --action retry
+
+   # allow one more review fix round after awaiting_triage, only with master triage
+   no-mistakes axi respond --action fix --fix-override --override-reason "<master triage reason>" --findings <id1,id2>
 
    # skip this step
    no-mistakes axi respond --action skip
@@ -207,11 +229,14 @@ Run the pipeline and decide on its findings as they come up:
 
     Each ` + "`respond`" + ` blocks until the next ` + "`gate:`" + `, ` + "`checks-passed`" + ` decision point, or final outcome.
 
-    Two extra flags are available on ` + "`respond`" + ` when you need them:
+    Three extra flags are available on ` + "`respond`" + ` when you need them:
     - ` + "`--add-finding '<json>'`" + ` (with ` + "`--action fix`" + `) folds a finding you
       spotted yourself - one the pipeline did not surface - into the fix round,
       as a JSON finding object. Use it for a problem you noticed that is not in
       the gate's own ` + "`findings`" + ` table.
+    - ` + "`--fix-override --override-reason '<reason>'`" + ` (with ` + "`--action fix`" + `)
+      allows exactly one more review fix round after ` + "`awaiting_triage`" + `. The
+      reason must be the master triage ruling and is persisted for attribution.
     - ` + "`--step <name>`" + ` responds to a specific step instead of the one currently
       awaiting approval. You rarely need this; omit it to answer the active gate.
 3. Repeat step 2 until the output has an ` + "`outcome:`" + ` instead of a ` + "`gate:`" + `. The
@@ -326,7 +351,7 @@ no-mistakes axi abort --run <id>   # cancel a specific run by id (works outside 
 
 - Output is TOON: ` + "`key: value`" + ` pairs, ` + "`name[N]{cols}:`" + ` tables, and ` + "`help[N]:`" + ` hints.
 - ` + "`axi status`" + ` is scoped to your current branch when ` + "`--run`" + ` is omitted: with a known current branch, an implicitly resolved ` + "`run:`" + ` is this branch's. A run under ` + "`other_branch_run:`" + ` is one you named with ` + "`--run <id>`" + ` that belongs to another branch - never read its status or outcome as your own work. An explicit ` + "`--run <id>`" + ` rendered under ` + "`run:`" + ` while the current branch is unknown (detached ` + "`HEAD`" + ` or a branch-lookup failure) encodes no branch relationship. In a successful status response, no run object at all means this branch has no run yet, whatever the recent-runs table lists; an ` + "`error:`" + ` response proves nothing about run ownership, so act on the error instead of concluding the branch is idle.
-- A non-terminal run object may include ` + "`awaiting_agent: parked <duration>`" + ` immediately after ` + "`status`" + `; that means the run is parked at a gate. Only an implicitly resolved current-branch gate offers ` + "`axi respond`" + `; an explicit ` + "`--run <id>`" + ` status is inspection-only even when its branch matches, because the branch may have a newer active run. Follow the response's ` + "`help`" + `.
+- A non-terminal run object may include ` + "`awaiting_agent: parked <duration>`" + ` immediately after ` + "`status`" + `; that means the run is parked at an ` + "`awaiting_approval`" + `, ` + "`awaiting_agent_retry`" + `, ` + "`fix_review`" + `, or ` + "`awaiting_triage`" + ` gate awaiting your ` + "`axi respond`" + `. Only an implicitly resolved current-branch gate offers ` + "`axi respond`" + `; an explicit ` + "`--run <id>`" + ` status is inspection-only even when its branch matches, because the branch may have a newer active run. Follow the response's ` + "`help`" + `.
 - A run object with a ` + "`running`" + ` or ` + "`fixing`" + ` step may include an ` + "`active_steps`" + ` table. Use it to see the active duration, latest activity, native agent PID, and current execution or fix round.
 - The ` + "`help`" + ` list at the bottom of most responses tells you the next commands to run.
 - Errors are printed as ` + "`error: ...`" + ` on stdout with a ` + "`help`" + ` list; act on the suggestion.

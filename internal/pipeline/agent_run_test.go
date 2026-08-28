@@ -20,6 +20,10 @@ type hangingAgent struct {
 	lastCtx context.Context
 }
 
+type reviewEvidenceAgent struct{ hangingAgent }
+
+func (a *reviewEvidenceAgent) ReportsReviewVerdictEvidence(string) bool { return true }
+
 func (h *hangingAgent) Name() string { return h.name }
 
 func (h *hangingAgent) Close() error { return nil }
@@ -31,6 +35,17 @@ func (h *hangingAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Resu
 		return h.runFn(ctx, opts)
 	}
 	return &agent.Result{Text: "ok"}, nil
+}
+
+func TestPipelineAgentDecoratorsForwardReviewVerdictEvidenceCapability(t *testing.T) {
+	base := &reviewEvidenceAgent{hangingAgent: hangingAgent{name: "codex"}}
+	var wrapped agent.Agent = &timeoutAgent{inner: base, timeout: time.Second}
+	wrapped = &gateStepBoundaryAgent{inner: wrapped, phase: types.StepReview}
+	wrapped = &lifecycleAgent{inner: wrapped}
+	wrapped = &perfRecordingAgent{inner: wrapped}
+	if !agent.ReportsReviewVerdictEvidence(wrapped, "codex") {
+		t.Fatal("pipeline decorators hid review-verdict evidence support")
+	}
 }
 
 func TestRunAgent_HangingAgentFailsAfterTimeout(t *testing.T) {

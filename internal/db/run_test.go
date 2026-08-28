@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
@@ -149,48 +150,6 @@ func TestRunCIReadinessStoresNoCIDeclaration(t *testing.T) {
 	}
 }
 
-func TestRunAwaitingAgentSetAndClear(t *testing.T) {
-	d := openTestDB(t)
-	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
-	if err != nil {
-		t.Fatalf("insert run: %v", err)
-	}
-
-	// A fresh run is not parked.
-	if run.AwaitingAgentSince != nil {
-		t.Fatalf("new run AwaitingAgentSince = %v, want nil", *run.AwaitingAgentSince)
-	}
-
-	// Entering a gate stamps the marker with a recent timestamp.
-	before := now()
-	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
-		t.Fatalf("set awaiting agent: %v", err)
-	}
-	got, err := d.GetRun(run.ID)
-	if err != nil {
-		t.Fatalf("get run: %v", err)
-	}
-	if got.AwaitingAgentSince == nil {
-		t.Fatal("AwaitingAgentSince = nil after SetRunAwaitingAgent, want a timestamp")
-	}
-	if *got.AwaitingAgentSince < before {
-		t.Errorf("AwaitingAgentSince = %d, want >= %d", *got.AwaitingAgentSince, before)
-	}
-
-	// Responding clears the marker.
-	if err := d.ClearRunAwaitingAgent(run.ID); err != nil {
-		t.Fatalf("clear awaiting agent: %v", err)
-	}
-	got, err = d.GetRun(run.ID)
-	if err != nil {
-		t.Fatalf("get run after clear: %v", err)
-	}
-	if got.AwaitingAgentSince != nil {
-		t.Errorf("AwaitingAgentSince = %d after clear, want nil", *got.AwaitingAgentSince)
-	}
-}
-
 func TestRecoverStaleRunsClearsAwaitingAgent(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
@@ -198,8 +157,9 @@ func TestRecoverStaleRunsClearsAwaitingAgent(t *testing.T) {
 	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
-	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
-		t.Fatalf("set awaiting agent: %v", err)
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if _, err := d.EnterApprovalGate(context.Background(), run.ID, step.ID, types.StepStatusAwaitingApproval, 0, nil); err != nil {
+		t.Fatalf("enter approval gate: %v", err)
 	}
 
 	// Crash recovery must fail the run and drop the parked marker so a dead run
@@ -639,14 +599,14 @@ func TestUpdateRunPRStateFinalizesActiveTerminalOutcomes(t *testing.T) {
 			if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 				t.Fatal(err)
 			}
-			if err := d.SetRunAwaitingAgent(run.ID); err != nil {
-				t.Fatal(err)
-			}
 			if err := d.SetRunPushActive(run.ID, true); err != nil {
 				t.Fatal(err)
 			}
 			ci, _ := d.InsertStepResult(run.ID, types.StepCI)
 			if err := d.StartStep(ci.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.EnterApprovalGate(context.Background(), run.ID, ci.ID, types.StepStatusAwaitingApproval, 0, nil); err != nil {
 				t.Fatal(err)
 			}
 
@@ -662,7 +622,7 @@ func TestUpdateRunPRStateFinalizesActiveTerminalOutcomes(t *testing.T) {
 				t.Fatalf("terminal PR run retained active markers: awaiting=%v push_active=%t", got.AwaitingAgentSince, got.PushActive)
 			}
 			parkedMS := got.ParkedMS
-			if err := d.CompleteRunAwaitingAgent(run.ID, 1234); err != nil {
+			if err := d.ExitReconciledApprovalGate(context.Background(), run.ID, ci.ID, types.StepStatusCompleted, 1234, nil); err != nil {
 				t.Fatal(err)
 			}
 			got, _ = d.GetRun(run.ID)
@@ -761,7 +721,7 @@ func TestReconcileTerminalPRRunsFinalizesLegacyActiveRows(t *testing.T) {
 			if err := d.StartStep(ci.ID); err != nil {
 				t.Fatal(err)
 			}
-			if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+			if _, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = ? WHERE id = ?`, now(), run.ID); err != nil {
 				t.Fatal(err)
 			}
 			// Simulate a row written by an older daemon after it observed a terminal

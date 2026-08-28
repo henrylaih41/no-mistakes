@@ -40,9 +40,6 @@ func (m *sessionMockAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 	m.calls = append(m.calls, opts)
 
 	result := m.respond(opts)
-	if result != nil && opts.Purpose == "review" && result.Metrics == nil {
-		result.Metrics = &agent.InvocationMetrics{ModelRoundtrips: 2}
-	}
 	if opts.Session != nil {
 		if opts.Session.ID != "" {
 			result.SessionID = opts.Session.ID

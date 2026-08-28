@@ -104,10 +104,8 @@ func TestExecutor_ResumeRestoresAgentRetryGate(t *testing.T) {
 	if err := database.StartStep(stepResult.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.ParkStep(stepResult.ID, types.StepStatusAwaitingRetry, "503 after retries", 25); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+	reason := "503 after retries"
+	if _, err := database.EnterApprovalGate(context.Background(), run.ID, stepResult.ID, types.StepStatusAwaitingRetry, 25, &reason); err != nil {
 		t.Fatal(err)
 	}
 	run, err = database.GetRun(run.ID)
@@ -185,8 +183,8 @@ func TestExecutor_AgentAutoRetryIsBoundedButManualRetryRemainsAvailable(t *testi
 		t.Fatal(err)
 	}
 	steps, _ := database.GetStepsByRun(run.ID)
-	auto, err := database.CountStepAgentAutoRetries(steps[0].ID)
-	if err != nil || auto != 1 {
-		t.Fatalf("auto retries = %d, %v; want 1", auto, err)
+	stats, err := database.StepRoundStats(steps[0].ID)
+	if err != nil || stats.AgentAutoRetries != 1 {
+		t.Fatalf("auto retries = %d, %v; want 1", stats.AgentAutoRetries, err)
 	}
 }

@@ -36,6 +36,8 @@ func (a *codexAgent) SupportsSessionResume() bool { return true }
 
 func (a *codexAgent) ReportsAgentAttempts() bool { return true }
 
+func (a *codexAgent) ReportsReviewVerdictEvidence(string) bool { return true }
+
 // NeutralizesGateInstructions reports whether codex is currently launched with
 // the target repo's project-level settings/instructions suppressed. It is
 // meaningful only under the opt-out (disableProjectSettings): the gate only

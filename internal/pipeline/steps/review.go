@@ -38,7 +38,7 @@ func (s *ReviewStep) runVerifiedReview(ctx context.Context, sctx *pipeline.StepC
 	if err != nil {
 		return nil, nil, err
 	}
-	initialEvidenceErr := validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	initialEvidenceErr := validateReportedReviewVerdictEvidence(sctx.Agent, result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
 	if initialEvidenceErr == nil {
 		return result, nil, nil
 	}
@@ -59,7 +59,7 @@ func (s *ReviewStep) runVerifiedReview(ctx context.Context, sctx *pipeline.StepC
 			reason:   fmt.Errorf("initial verdict: %v; cold retry failed: %w", initialEvidenceErr, err),
 		}, nil
 	}
-	retryEvidenceErr := validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	retryEvidenceErr := validateReportedReviewVerdictEvidence(sctx.Agent, result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
 	if retryEvidenceErr != nil {
 		return nil, &reviewVerdictFailure{
 			reviewer: reviewer,

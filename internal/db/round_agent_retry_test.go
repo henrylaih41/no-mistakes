@@ -17,9 +17,9 @@ func TestAgentRetryAttributionDoesNotCountAsFixRound(t *testing.T) {
 	if _, err := d.InsertStepRound(step.ID, 2, RoundTriggerAgentManualRetry, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	auto, err := d.CountStepAgentAutoRetries(step.ID)
-	if err != nil || auto != 1 {
-		t.Fatalf("auto retries = %d, %v; want 1", auto, err)
+	stats, err := d.StepRoundStats(step.ID)
+	if err != nil || stats.AgentAutoRetries != 1 {
+		t.Fatalf("auto retries = %d, %v; want 1", stats.AgentAutoRetries, err)
 	}
 	fixes, err := d.CountStepFixRounds(step.ID)
 	if err != nil || fixes != 0 {

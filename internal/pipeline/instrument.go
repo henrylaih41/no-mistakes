@@ -42,6 +42,10 @@ func (a *perfRecordingAgent) SupportsSessionProvider(provider string) bool {
 	return agent.SupportsSessionProvider(a.inner, provider)
 }
 
+func (a *perfRecordingAgent) ReportsReviewVerdictEvidence(provider string) bool {
+	return agent.ReportsReviewVerdictEvidence(a.inner, provider)
+}
+
 func (a *perfRecordingAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	attempts := 0
 	previous := opts.OnAttempt

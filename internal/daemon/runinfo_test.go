@@ -68,10 +68,16 @@ func TestStepToInfoIncludesFixSummaries(t *testing.T) {
 	if _, err := d.InsertStepRound(step.ID, 2, "auto_fix", nil, &sum, 100); err != nil {
 		t.Fatalf("insert round 2: %v", err)
 	}
+	if _, err := d.InsertStepRound(step.ID, 3, db.RoundTriggerAgentAutoRetry, nil, nil, 0); err != nil {
+		t.Fatalf("insert retry round: %v", err)
+	}
 
 	info := stepToInfo(d, step)
 	if len(info.FixSummaries) != 1 || info.FixSummaries[0] != sum {
 		t.Errorf("fix summaries = %v, want [%q]", info.FixSummaries, sum)
+	}
+	if info.AgentAutoRetries != 1 {
+		t.Errorf("agent auto retries = %d, want 1", info.AgentAutoRetries)
 	}
 }
 
