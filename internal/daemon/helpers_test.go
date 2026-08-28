@@ -109,14 +109,7 @@ func startTestDaemon(t *testing.T) (*paths.Paths, *db.DB) {
 		errCh <- RunWithResources(p, d)
 	}()
 
-	// Wait for socket to appear.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(p.Socket()); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitForDaemonReady(t, p)
 
 	t.Cleanup(func() {
 		// Ensure daemon stops.
@@ -216,13 +209,7 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 		errCh <- RunWithOptions(p, d, sf)
 	}()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(p.Socket()); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitForDaemonReady(t, p)
 
 	t.Cleanup(func() {
 		client, err := ipc.Dial(p.Socket())

@@ -374,7 +374,10 @@ func startTestDaemon(t *testing.T, p *paths.Paths, d *db.DB) {
 		errCh <- daemon.RunWithResources(p, d)
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
+	// Cold startup includes bounded recovery work, and production allows it up
+	// to 45 seconds. Do not fail a healthy in-process daemon before that same
+	// readiness budget expires.
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if alive, _ := daemon.IsRunning(p); alive {
 			break
