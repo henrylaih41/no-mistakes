@@ -8,12 +8,12 @@ It is not runner-free.
 Every validation run requires a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`.
 The default `agent: auto` setting picks the first supported native agent or ACP alias available on your system.
 
-The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
-Those jobs run in the daemon's disposable worktree through the configured pipeline agent.
+The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become one of the configured agents that performs review, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
+Those jobs run in the daemon's disposable worktree. The effective pipeline agent handles them by default; an optional global [`review.agent`](/no-mistakes/reference/global-config/#reviewagent) can handle only the initial review and full rereviews.
 A validation-step agent inspects, fixes, and returns only its assigned phase; delivery requirements in user intent remain acceptance context, but the outer executor alone performs the other validation, push, PR, and CI phases.
 If that step attempts pipeline control, no-mistakes returns `error.code: nested_gate_context`; the agent must return control to the outer executor, while read-only `no-mistakes axi status`, `no-mistakes axi logs`, help, and `no-mistakes doctor` remain available.
 
-The agent is responsible for the parts of the gate that benefit from judgment:
+The configured agents are responsible for the parts of the gate that benefit from judgment:
 code review, evidence-oriented test validation, test or lint detection when you
 have not configured explicit commands, auto-fixing, and setup-wizard suggestions
 when you leave prompts blank.
@@ -29,6 +29,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
+- Configure global [`review.agent`](/no-mistakes/reference/global-config/#reviewagent) when full review turns should use a different agent while fixes and the rest of the pipeline stay on the effective pipeline agent.
 - Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice; leave `commands.test` empty for agent-selected smallest relevant checks. Do not configure a complete-suite walk as local Test - remote CI owns broad regression.
 
 That last point matters: the agent helps fill in gaps, but explicit repo
@@ -54,8 +55,8 @@ That directory is always outside the worktree and is reaped by no-mistakes on a 
 
 ## Runner requirements
 
-A complete gate never degrades silently when its configured pipeline agent is unavailable.
-The daemon resolves the effective agent before creating pipeline step records, and the run fails immediately with setup guidance if the configured binary cannot run.
+A complete gate never degrades silently when its effective pipeline agent or configured dedicated reviewer is unavailable.
+The daemon resolves both before creating pipeline step records, and the run fails immediately with setup guidance if either configured binary cannot run.
 This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
 
 | Surface or capability | Works without a runnable pipeline agent? | Behavior |
@@ -88,7 +89,7 @@ acpx_path: C:\path\to\acpx.exe
 ```
 
 Run `no-mistakes doctor` afterward and look for a successful `gate validation` line.
-Doctor checks the global agent configuration; each run performs the authoritative check again after applying any trusted repository-level agent override.
+Doctor checks the global pipeline-agent and dedicated-reviewer configuration; each run performs the authoritative check again after applying any trusted repository-level pipeline-agent override.
 If the calling environment exposes neither a supported native CLI nor a working ACP target, it can still inspect and respond to existing AXI state, but it cannot start an honest validation gate by itself.
 
 ## Setting the agent
@@ -192,7 +193,7 @@ The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command an
 When the daemon is running through a managed service, its `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories; on Windows it reuses the current process environment.
 If native agent discovery does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and set an explicit override; [Environment the daemon sees](/no-mistakes/reference/environment/#environment-the-daemon-sees) owns the full resolution story.
 
-Six global config fields tune resolution and invocation, and the [Global Config Reference](/no-mistakes/reference/global-config/) owns each one:
+Seven global config fields tune resolution and invocation, and the [Global Config Reference](/no-mistakes/reference/global-config/) owns each one:
 
 - [`agent_path_override`](/no-mistakes/reference/global-config/#agent_path_override) - custom binary paths per native agent, plus the default native binary-name table.
 - [`agent_config`](/no-mistakes/reference/global-config/#agent_config) - model and reasoning effort per agent in one common spelling, mapped down to each harness's own mechanism, with the full per-harness mapping table and the precedence rule against raw flags.
@@ -200,6 +201,7 @@ Six global config fields tune resolution and invocation, and the [Global Config 
 - [`acpx_path`](/no-mistakes/reference/global-config/#acpx_path) - the bridge binary path for explicit ACP targets and first-class ACP aliases.
 - [`acp_registry_overrides`](/no-mistakes/reference/global-config/#acp_registry_overrides) - raw ACP target commands, including replacements for alias defaults such as `cursor-agent acp`, plus their availability-probing rules.
 - [`agent`](/no-mistakes/reference/global-config/#agent) - the `auto` resolution order and ordered fallback-list semantics.
+- [`review.agent`](/no-mistakes/reference/global-config/#reviewagent) - optional review/rereview-only agent selection; the field reference owns its role boundary and fail-closed resolution.
 
 ## Review session reuse
 

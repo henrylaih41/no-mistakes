@@ -89,7 +89,7 @@ AI code review of your diff.
 
 - Diffs the base commit against head
 - Filters out files matching `ignore_patterns` from the repo config
-- Sends the filtered diff to the agent with structured review instructions and a structured output schema
+- Sends the filtered diff with structured review instructions and a structured output schema to global [`review.agent`](/no-mistakes/reference/global-config/#reviewagent) when configured, otherwise to the effective pipeline agent; review-fix turns always stay with the pipeline agent
 - Appends the [`review.path_instructions`](/no-mistakes/reference/repo-config/#reviewpath_instructions) blocks whose glob matches at least one changed file, in configured order, each labelled with its own `path` and the files it matched so a scoped rule cannot read as a repository-wide instruction; a change that matches nothing, or a repo with none configured, gets the prompt unchanged
 - Selects those blocks against the complete changed-file list rather than the `ignore_patterns`-filtered one, so a pushed-branch ignore entry cannot suppress a trusted rule, and reads them from the trusted default-branch config copy regardless of `allow_repo_commands`
 - Logs which of those rules it applied and which matched no changed path
