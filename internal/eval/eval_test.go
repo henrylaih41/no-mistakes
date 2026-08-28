@@ -341,7 +341,7 @@ func TestReplayPinsCandidateModelAndEffortOnTheHarness(t *testing.T) {
 // inheriting the capturing machine's own model or effort: the candidate is the
 // only thing that may decide what the harness runs as.
 func TestCaptureStripsEveryHarnessPinFromThePinnedConfig(t *testing.T) {
-	pinned := []byte("agent: codex\nagent_args_override:\n  codex:\n    - -m\n    - gpt-5.4\nagent_config:\n  codex:\n    model: gpt-5.4\n    effort: high\nlog_level: warn\n")
+	pinned := []byte("agent: codex\nagent_args_override:\n  codex:\n    - -m\n    - gpt-5.4\nagent_config:\n  codex:\n    model: gpt-5.4\n    effort: high\nreview:\n  agent: claude\n  max_fix_rounds: 2\nlog_level: warn\n")
 	neutral, err := agentNeutralGlobalConfig(pinned)
 	if err != nil {
 		t.Fatal(err)
@@ -360,6 +360,12 @@ func TestCaptureStripsEveryHarnessPinFromThePinnedConfig(t *testing.T) {
 	}
 	if cfg.AgentConfig != nil {
 		t.Fatalf("neutral config resolves an agent profile: %#v", cfg.AgentConfig)
+	}
+	if cfg.Review.Agent != "" {
+		t.Fatalf("neutral config resolves review agent %q", cfg.Review.Agent)
+	}
+	if cfg.Review.MaxFixRounds == nil || *cfg.Review.MaxFixRounds != 2 {
+		t.Fatalf("neutral config lost review max_fix_rounds: %#v", cfg.Review.MaxFixRounds)
 	}
 }
 

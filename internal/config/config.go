@@ -292,11 +292,12 @@ type ReviewRaw struct {
 	// Agent selects a dedicated review/rereview agent. Empty keeps the pipeline
 	// agent. This process-selection field is global-only.
 	Agent types.AgentName `yaml:"agent"`
-	// Reviewers and MaxParallel are parse-only compatibility fields for the old
-	// panel configuration. Exactly one legacy reviewer maps to Agent; fan-out is
-	// intentionally not implemented in this lineage.
+	// Reviewers, MaxParallel, and FailOpen are parse-only compatibility fields
+	// for the old panel configuration. Exactly one legacy reviewer maps to Agent;
+	// fan-out is intentionally not implemented in this lineage.
 	Reviewers   []LegacyReviewerSpec `yaml:"reviewers"`
 	MaxParallel *int                 `yaml:"max_parallel"`
+	FailOpen    *bool                `yaml:"fail_open"`
 	// MaxFixRounds caps persisted review fix attempts. Zero or nil is unlimited.
 	MaxFixRounds *int `yaml:"max_fix_rounds"`
 	// PathInstructions scope extra review guidance to the paths a change
@@ -2076,8 +2077,8 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := validateReviewRaw(cfg.Review); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
-	if cfg.Review.Agent != "" || len(cfg.Review.Reviewers) > 0 || cfg.Review.MaxParallel != nil {
-		return nil, fmt.Errorf("parse repo config: review.agent, review.reviewers, and review.max_parallel are global-only")
+	if cfg.Review.Agent != "" {
+		return nil, fmt.Errorf("parse repo config: review.agent is global-only")
 	}
 	if err := validateTestRaw(cfg.Test); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
@@ -2133,6 +2134,9 @@ func validateReviewRaw(review ReviewRaw) error {
 	}
 	if review.MaxParallel != nil && *review.MaxParallel < 0 {
 		return fmt.Errorf("review.max_parallel must be >= 0, got %d", *review.MaxParallel)
+	}
+	if review.FailOpen != nil && *review.FailOpen {
+		return fmt.Errorf("review.fail_open must be false; dropping failed reviewers is not supported on this lineage")
 	}
 	if review.MaxFixRounds != nil && *review.MaxFixRounds < 0 {
 		return fmt.Errorf("review.max_fix_rounds must be >= 0, got %d", *review.MaxFixRounds)

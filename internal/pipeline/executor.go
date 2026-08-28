@@ -969,33 +969,27 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
-	stepAgent := e.agent
-	if stepAgent != nil {
+	decorateAgent := func(inner agent.Agent) agent.Agent {
+		if inner == nil {
+			return nil
+		}
 		// Innermost: default-by-construction invocation deadline so a step
 		// that calls Agent.Run directly cannot hang the run.
-		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config)}
-		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
-		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
-		stepAgent = &perfRecordingAgent{
-			inner:    stepAgent,
+		inner = &timeoutAgent{inner: inner, timeout: AgentTimeout(e.config)}
+		inner = &gateStepBoundaryAgent{inner: inner, phase: stepName}
+		inner = &lifecycleAgent{inner: inner, onLifecycle: onAgentLifecycle}
+		return &perfRecordingAgent{
+			inner:    inner,
 			db:       e.db,
 			runID:    run.ID,
 			stepName: stepName,
 			round:    func() int { return roundNum + 1 },
 		}
 	}
+	stepAgent := decorateAgent(e.agent)
 	var reviewerAgent agent.Agent
-	if stepName == types.StepReview && e.reviewAgent != nil {
-		reviewerAgent = &timeoutAgent{inner: e.reviewAgent, timeout: AgentTimeout(e.config)}
-		reviewerAgent = &gateStepBoundaryAgent{inner: reviewerAgent, phase: stepName}
-		reviewerAgent = &lifecycleAgent{inner: reviewerAgent, onLifecycle: onAgentLifecycle}
-		reviewerAgent = &perfRecordingAgent{
-			inner:    reviewerAgent,
-			db:       e.db,
-			runID:    run.ID,
-			stepName: stepName,
-			round:    func() int { return roundNum + 1 },
-		}
+	if stepName == types.StepReview {
+		reviewerAgent = decorateAgent(e.reviewAgent)
 	}
 	ciReady := run.CIReadyAt != nil
 	ciReadyNoCI := run.CIReadyNoCI

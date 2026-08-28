@@ -36,6 +36,7 @@ review:
       args: [--model, claude-opus-5]
       path: /unused/legacy/claude
   max_parallel: 2
+  fail_open: false
 review_loop:
   enabled: false
   bot_login: old-bot
@@ -76,6 +77,11 @@ func TestLoadGlobalRejectsUnsupportedReviewCompatibilityShapes(t *testing.T) {
 			yaml:    "review_loop:\n  enabled: true\n",
 			wantErr: "review_loop.enabled must be false",
 		},
+		{
+			name:    "fail-open removed panel",
+			yaml:    "review:\n  fail_open: true\n",
+			wantErr: "review.fail_open must be false",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -88,15 +94,35 @@ func TestLoadGlobalRejectsUnsupportedReviewCompatibilityShapes(t *testing.T) {
 }
 
 func TestLoadRepoRejectsGlobalOnlyReviewAgent(t *testing.T) {
-	for _, yaml := range []string{
-		"review:\n  agent: claude\n",
-		"review:\n  reviewers:\n    - agent: claude\n",
-		"review:\n  max_parallel: 1\n",
-	} {
-		_, err := LoadRepoFromBytes([]byte(yaml))
-		if err == nil || !strings.Contains(err.Error(), "global-only") {
-			t.Fatalf("LoadRepoFromBytes(%q) error = %v, want global-only", yaml, err)
-		}
+	yaml := "review:\n  agent: claude\n"
+	_, err := LoadRepoFromBytes([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "global-only") {
+		t.Fatalf("LoadRepoFromBytes(%q) error = %v, want global-only", yaml, err)
+	}
+}
+
+func TestLoadRepoIgnoresLegacyReviewPanelCompatibilityFields(t *testing.T) {
+	repo, err := LoadRepoFromBytes([]byte(`review:
+  reviewers:
+    - agent: claude
+  max_parallel: 2
+  fail_open: false
+  max_fix_rounds: 3
+`))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes: %v", err)
+	}
+	global, err := LoadGlobalFromBytes([]byte("review:\n  agent: codex\n"))
+	if err != nil {
+		t.Fatalf("LoadGlobalFromBytes: %v", err)
+	}
+
+	merged := Merge(global, repo)
+	if merged.Review.Agent != types.AgentCodex {
+		t.Fatalf("review agent = %q, want global codex", merged.Review.Agent)
+	}
+	if merged.Review.MaxFixRounds != 3 {
+		t.Fatalf("review max fix rounds = %d, want repo value 3", merged.Review.MaxFixRounds)
 	}
 }
 
