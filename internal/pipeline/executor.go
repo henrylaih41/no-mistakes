@@ -46,13 +46,14 @@ type approvalResponse struct {
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
-	db     *db.DB
-	paths  *paths.Paths
-	config *config.Config
-	forge  *forgecontext.Context
-	agent  agent.Agent
-	steps  []Step
-	skips  map[types.StepName]bool
+	db          *db.DB
+	paths       *paths.Paths
+	config      *config.Config
+	forge       *forgecontext.Context
+	agent       agent.Agent
+	reviewAgent agent.Agent
+	steps       []Step
+	skips       map[types.StepName]bool
 
 	onEvent EventFunc
 
@@ -90,6 +91,12 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 // subprocess in this run. A nil context preserves ambient behavior.
 func (e *Executor) SetForgeContext(ctx *forgecontext.Context) {
 	e.forge = ctx
+}
+
+// SetReviewAgent installs an optional review/rereview-only agent. The
+// executor's pipeline agent remains the fixer and session owner.
+func (e *Executor) SetReviewAgent(ag agent.Agent) {
+	e.reviewAgent = ag
 }
 
 // SetSkippedSteps configures steps that should be marked skipped without running.
@@ -962,20 +969,27 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
-	stepAgent := e.agent
-	if stepAgent != nil {
+	decorateAgent := func(inner agent.Agent) agent.Agent {
+		if inner == nil {
+			return nil
+		}
 		// Innermost: default-by-construction invocation deadline so a step
 		// that calls Agent.Run directly cannot hang the run.
-		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config)}
-		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
-		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
-		stepAgent = &perfRecordingAgent{
-			inner:    stepAgent,
+		inner = &timeoutAgent{inner: inner, timeout: AgentTimeout(e.config)}
+		inner = &gateStepBoundaryAgent{inner: inner, phase: stepName}
+		inner = &lifecycleAgent{inner: inner, onLifecycle: onAgentLifecycle}
+		return &perfRecordingAgent{
+			inner:    inner,
 			db:       e.db,
 			runID:    run.ID,
 			stepName: stepName,
 			round:    func() int { return roundNum + 1 },
 		}
+	}
+	stepAgent := decorateAgent(e.agent)
+	var reviewerAgent agent.Agent
+	if stepName == types.StepReview {
+		reviewerAgent = decorateAgent(e.reviewAgent)
 	}
 	ciReady := run.CIReadyAt != nil
 	ciReadyNoCI := run.CIReadyNoCI
@@ -1002,6 +1016,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Repo:             repo,
 		WorkDir:          workDir,
 		Agent:            stepAgent,
+		Reviewer:         reviewerAgent,
 		Config:           e.config,
 		ForgeContext:     e.forge,
 		DB:               e.db,

@@ -37,26 +37,50 @@ func (sctx *StepContext) RunAgent(opts agent.RunOpts) (*agent.Result, error) {
 	if sctx != nil {
 		parent = sctx.Ctx
 	}
-	return sctx.runAgent(parent, opts, "")
+	return sctx.runAgentAs(parent, sctx.pipelineAgent(), opts, "")
 }
 
 // RunAgentContext is RunAgent with an explicit parent, used when a step has
 // already installed a more specific deadline (review round, Test invocation).
 func (sctx *StepContext) RunAgentContext(parent context.Context, opts agent.RunOpts) (*agent.Result, error) {
-	return sctx.runAgent(parent, opts, "")
+	return sctx.runAgentAs(parent, sctx.pipelineAgent(), opts, "")
+}
+
+// ReviewerAgent returns the dedicated reviewer when configured and otherwise
+// the pipeline agent. Review evidence checks must use this same identity.
+func (sctx *StepContext) ReviewerAgent() agent.Agent {
+	if sctx != nil && sctx.Reviewer != nil {
+		return sctx.Reviewer
+	}
+	if sctx == nil {
+		return nil
+	}
+	return sctx.Agent
+}
+
+// RunReviewerContext executes a cold review turn. It never enters the durable
+// fixer session, even when the dedicated reviewer and pipeline agent happen to
+// be the same family.
+func (sctx *StepContext) RunReviewerContext(parent context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	return sctx.runAgentAs(parent, sctx.ReviewerAgent(), opts, "")
 }
 
 // RunAgentSessionContext is RunAgentSession with an explicit parent so a
 // fixer turn can share a round budget (review) or a per-invocation wrap (Test).
 func (sctx *StepContext) RunAgentSessionContext(parent context.Context, role SessionRole, opts agent.RunOpts) (*agent.Result, error) {
-	return sctx.runAgent(parent, opts, role)
+	return sctx.runAgentAs(parent, sctx.pipelineAgent(), opts, role)
 }
 
-func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, sessionRole SessionRole) (*agent.Result, error) {
-	var ag agent.Agent
+func (sctx *StepContext) pipelineAgent() agent.Agent {
+	if sctx == nil {
+		return nil
+	}
+	return sctx.Agent
+}
+
+func (sctx *StepContext) runAgentAs(parent context.Context, ag agent.Agent, opts agent.RunOpts, sessionRole SessionRole) (*agent.Result, error) {
 	timeout := AgentTimeout(nil)
 	if sctx != nil {
-		ag = sctx.Agent
 		timeout = AgentTimeout(sctx.Config)
 	}
 	return invokeAgent(parent, timeout, func(ctx context.Context) (*agent.Result, error) {

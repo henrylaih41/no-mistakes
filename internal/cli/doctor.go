@@ -149,6 +149,9 @@ func newDoctorCmd() *cobra.Command {
 						if err := cfg.ResolveAgent(cmd.Context(), exec.LookPath); err != nil {
 							fail("gate validation", err.Error())
 							allOK = false
+						} else if err := cfg.ResolveReviewAgent(cmd.Context(), exec.LookPath); err != nil {
+							fail("gate validation", err.Error())
+							allOK = false
 						} else {
 							ok("gate validation", fmt.Sprintf("%s is runnable", cfg.Agent))
 						}

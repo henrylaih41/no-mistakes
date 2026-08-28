@@ -38,6 +38,68 @@ func (u *usageAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, 
 	return result, nil
 }
 
+type namedUsageAgent struct {
+	name      string
+	resumable bool
+}
+
+func (u *namedUsageAgent) Name() string                { return u.name }
+func (u *namedUsageAgent) Close() error                { return nil }
+func (u *namedUsageAgent) SupportsSessionResume() bool { return u.resumable }
+func (u *namedUsageAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	result := &agent.Result{Output: json.RawMessage(`{}`), Model: u.name + "-model"}
+	if opts.Session != nil {
+		if opts.Session.ID == "" {
+			result.SessionID = u.name + "-session"
+		} else {
+			result.SessionID = opts.Session.ID
+			result.Resumed = true
+		}
+	}
+	return result, nil
+}
+
+func TestExecutor_DedicatedReviewerRecordsReviewWhileFixerStaysPipelineAgent(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if _, err := sctx.RunReviewerContext(sctx.Ctx, agent.RunOpts{Purpose: "review"}); err != nil {
+				return nil, err
+			}
+			if _, err := sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{Purpose: "review-fix"}); err != nil {
+				return nil, err
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+	pipelineAgent := &namedUsageAgent{name: "codex", resumable: true}
+	reviewer := &namedUsageAgent{name: "claude"}
+	exec := NewExecutor(database, p, &config.Config{SessionReuse: true}, pipelineAgent, []Step{step}, nil)
+	exec.SetReviewAgent(reviewer)
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	rows, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("invocations = %d, want 2", len(rows))
+	}
+	byPurpose := map[string]db.AgentInvocation{}
+	for _, row := range rows {
+		byPurpose[row.Purpose] = row
+	}
+	if got := byPurpose["review"]; got.Agent != "claude" || got.SessionMode != db.InvocationModeCold {
+		t.Fatalf("review invocation = %+v, want claude/cold", got)
+	}
+	if got := byPurpose["review-fix"]; got.Agent != "codex" || got.SessionMode != db.InvocationModeStarted {
+		t.Fatalf("review-fix invocation = %+v, want codex/started", got)
+	}
+}
+
 type fallbackUsageAgent struct {
 	name   string
 	result *agent.Result

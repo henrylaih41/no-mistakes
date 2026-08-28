@@ -121,8 +121,8 @@ Reattachment accepts either the run's immutable submitted head or its current pi
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
 Reattaching to an in-flight run can proceed while the daemon is already running even if the global config file has become invalid, but starting a fresh run still requires valid global config.
-Starting a fresh run also requires a runnable effective pipeline agent.
-If the configured native agent or ACP runner is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
+Starting a fresh run also requires a runnable effective pipeline agent and, when configured, a runnable global [`review.agent`](/no-mistakes/reference/global-config/#reviewagent).
+If either configured native agent or ACP runner is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
 With `--yes`, `axi run` treats `action: auto-fix`, `action: ask-master`, and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 If an agent invocation exhausts its bounded transient provider/runtime retries, `--yes` retries that parked step once. That automatic retry is persisted per step; another consecutive transient failure remains at `awaiting_agent_retry` for an explicit decision. `--yes` never crosses an `awaiting_triage` Review gate.

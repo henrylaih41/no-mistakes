@@ -10,7 +10,7 @@ with sensible defaults for everything else.
 The goal is not to make you configure a mini CI system. The default path should
 work. Config exists for the parts that genuinely vary by machine or repo:
 
-- which agent or ordered fallback list you prefer
+- which pipeline agent or ordered fallback list you prefer, and whether full reviews use a dedicated agent
 - which test or lint commands are the canonical ones for this repo
 - which extra review rules apply to which paths
 - where test evidence artifacts should be stored
@@ -55,7 +55,7 @@ The rest of this page covers only the cross-cutting rules that involve both file
 ## Precedence
 
 - Repo config overrides global config field by field: repo `agent` replaces the global `agent` (including a full ordered fallback list), while `auto_fix`, `ci`, `commit`, `intent`, `review.max_fix_rounds`, and the repository-scoped `test.evidence` fields overlay individual fields and fall through to the global default for anything unset (`intent.disabled_readers` adds to the globally disabled readers instead of replacing them). Local evidence location and retention are machine-wide and remain global-only; the [Global Config Reference](/no-mistakes/reference/global-config/#testevidence) owns the exact boundary.
-- `agent_path_override`, `agent_config`, `agent_args_override`, `acpx_path`, `acp_registry_overrides`, `ci_timeout`, `daemon_connect_timeout`, `branch_sync_remote_timeout`, `step_quiet_warning`, `agent_timeout`, `review_agent_timeout`, `test_agent_timeout`, `log_level`, and `session_reuse` are global-only fields.
+- `review.agent`, `agent_path_override`, `agent_config`, `agent_args_override`, `acpx_path`, `acp_registry_overrides`, `ci_timeout`, `daemon_connect_timeout`, `branch_sync_remote_timeout`, `step_quiet_warning`, `agent_timeout`, `review_agent_timeout`, `test_agent_timeout`, `log_level`, and `session_reuse` are global-only fields.
 - `commands`, `ignore_patterns`, `design_context.files`, `document.instructions`, `review.path_instructions`, `allow_repo_commands`, and `disable_project_settings` are repo-only fields. By default, `commands` and `agent` are read from the trusted default branch; a trusted `allow_repo_commands: true` opt-in instead honors their pushed-branch values. The other gate-control fields, including `review.max_fix_rounds`, `review.path_instructions`, and the repo `ci` overlay, always come from the trusted default branch. `design_context.files` is non-executing pushed-branch context; the [Repo Config Reference](/no-mistakes/reference/repo-config/#design_contextfiles) owns its jail and materialization rules. See the same reference's security note for the complete boundary.
 - no-mistakes reloads global config while setting up each run, so edits made before starting a run apply to it. For repeatable profiles (for example fast versus deep Codex settings), use separately initialized `NM_HOME` roots; `NM_HOME` moves all no-mistakes state, not just config.
 
@@ -72,5 +72,5 @@ An empty `commands.format` runs no separate formatter, so configure it explicitl
 Either way, available user intent can trigger an evidence-oriented agent follow-up after a successful test baseline. Evidence stays in no-mistakes-managed local storage unless a supported provider publishes it to an orphan evidence branch through `test.evidence.store_in_repo`; the [Global Config Reference](/no-mistakes/reference/global-config/#testevidence) owns its location, cleanup, provider support, and fail-closed behavior.
 The [Repo Config Reference](/no-mistakes/reference/repo-config/) owns the exact per-command semantics (including that `commands.test` is targeted, not CI-parity), command process lifetime, and the `ignore_patterns` match rules.
 
-Before a new validation gate starts, its effective agent configuration must resolve to a runnable native agent or ACP runner; otherwise the gate fails before its first pipeline step, even when explicit commands are configured.
-Run `no-mistakes doctor` to check the global runner, and see [Choosing an Agent](/no-mistakes/guides/agents/) for how agent selection and fallback lists behave.
+Before a new validation gate starts, its effective pipeline agent and any configured dedicated reviewer must resolve to runnable native agents or ACP runners; otherwise the gate fails before its first pipeline step, even when explicit commands are configured.
+Run `no-mistakes doctor` to check the global runners. See [Choosing an Agent](/no-mistakes/guides/agents/) for how agent selection behaves and the [`review.agent` reference](/no-mistakes/reference/global-config/#reviewagent) for the dedicated review role.
