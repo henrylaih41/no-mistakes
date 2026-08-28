@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/designcontext"
+	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/lifecycle"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -35,8 +36,53 @@ func newDaemonCmd() *cobra.Command {
 	cmd.AddCommand(newDaemonRestartCmd())
 	cmd.AddCommand(newDaemonStatusCmd())
 	cmd.AddCommand(newDaemonRunCmd())
+	cmd.AddCommand(newDaemonAdmitPushCmd())
 	cmd.AddCommand(newDaemonNotifyPushCmd())
 
+	return cmd
+}
+
+func newDaemonAdmitPushCmd() *cobra.Command {
+	var gate string
+	cmd := &cobra.Command{
+		Use:    "admit-push",
+		Short:  "Authorize a managed gate ref update",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			gatePath, err := normalizeNotifyGatePath(gate)
+			if err != nil {
+				return err
+			}
+			p, err := paths.New()
+			if err != nil {
+				return err
+			}
+			client, err := ipc.Dial(p.Socket())
+			if err != nil {
+				return fmt.Errorf("connect to daemon: %w", err)
+			}
+			defer client.Close()
+			var result ipc.AdmitPushResult
+			if err := client.Call(ipc.MethodAdmitPush, &ipc.AdmitPushParams{Gate: gatePath}, &result); err != nil {
+				return err
+			}
+			if !result.Context.Nested {
+				return nil
+			}
+			return emitGateContextRefusal(cmd, gatecontext.Result{
+				Nested:           result.Context.Nested,
+				ManagedGit:       result.Context.ManagedGit,
+				AgentDescendant:  result.Context.AgentDescendant,
+				DaemonDescendant: result.Context.DaemonDescendant,
+				MarkerPresent:    result.Context.MarkerPresent,
+				RunID:            result.Context.RunID,
+				Phase:            result.Context.Phase,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&gate, "gate", "", "bare repo path that is about to receive a push")
+	_ = cmd.MarkFlagRequired("gate")
 	return cmd
 }
 
@@ -58,14 +104,6 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				return err
 			}
 			intent, err := parseIntentPushOptions(pushOptions)
-			if err != nil {
-				return err
-			}
-			route, err := parseRoutePushOption(pushOptions)
-			if err != nil {
-				return err
-			}
-			reviewLoopDisabled, err := parseReviewLoopPushOption(pushOptions)
 			if err != nil {
 				return err
 			}
@@ -97,9 +135,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				New:                newSHA,
 				SkipSteps:          skipSteps,
 				Intent:             intent,
-				Route:              route,
 				DesignContextPaths: designContextPaths,
-				ReviewLoopDisabled: reviewLoopDisabled,
 			}, &result)
 		},
 	}
@@ -189,80 +225,6 @@ func parseIntentPushOptions(options []string) (string, error) {
 		intent = string(decoded)
 	}
 	return intent, nil
-}
-
-// routePushOptionPrefix carries the name of a LOCAL route to apply to the push.
-// The value only SELECTS a route already stored in the gate database by name;
-// it can never supply a base or fork URL, so a pushed branch cannot redirect a
-// run's target.
-const routePushOptionPrefix = "no-mistakes.route="
-
-// parseRoutePushOption extracts the selected route name from the forwarded push
-// options. The last occurrence wins (mirroring parseIntentPushOptions). An
-// empty or malformed value is rejected so a bad selector fails fast at the push
-// boundary rather than silently selecting the default route. The named route's
-// existence is resolved later, at run creation.
-func parseRoutePushOption(options []string) (string, error) {
-	route := ""
-	for _, option := range options {
-		value, ok := strings.CutPrefix(option, routePushOptionPrefix)
-		if !ok {
-			continue
-		}
-		name := strings.TrimSpace(value)
-		if name == "" {
-			return "", fmt.Errorf("empty route name in push option %q", option)
-		}
-		if !validRouteName(name) {
-			return "", fmt.Errorf("invalid route name %q: use letters, digits, '.', '_' or '-' (must start with a letter or digit)", name)
-		}
-		route = name
-	}
-	return route, nil
-}
-
-const reviewLoopPushOptionPrefix = "no-mistakes.review-loop="
-
-// parseReviewLoopPushOption extracts the per-push review-loop override. It can
-// only disable the auxiliary Devin loop for one run; enabling or reconfiguring
-// the loop remains controlled by trust-gated config.
-func parseReviewLoopPushOption(options []string) (bool, error) {
-	disabled := false
-	for _, option := range options {
-		value, ok := strings.CutPrefix(option, reviewLoopPushOptionPrefix)
-		if !ok {
-			continue
-		}
-		if strings.TrimSpace(value) == "" {
-			return false, fmt.Errorf("empty review-loop value in push option %q (use no-mistakes.review-loop=off)", option)
-		}
-		parsed, err := parseReviewLoopValue(value)
-		if err != nil {
-			return false, fmt.Errorf("unsupported review-loop push option %q: only no-mistakes.review-loop=off is allowed", option)
-		}
-		if parsed {
-			disabled = true
-		}
-	}
-	return disabled, nil
-}
-
-func parseReviewLoopValue(value string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "":
-		return false, nil
-	case "off", "false", "disabled", "disable", "0":
-		return true, nil
-	default:
-		return false, fmt.Errorf("unsupported review-loop value %q", value)
-	}
-}
-
-func formatReviewLoopPushOption(disabled bool) string {
-	if !disabled {
-		return ""
-	}
-	return reviewLoopPushOptionPrefix + "off"
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {

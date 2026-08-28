@@ -4,23 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
-// runGrok matches the Grok Build headless contracts used by no-mistakes.
 func runGrok(args []string, scenario *Scenario) int {
 	started := time.Now()
-	if len(args) == 1 && (args[0] == "--version" || args[0] == "-v") {
-		fmt.Fprintln(os.Stdout, "grok fakeagent")
-		return 0
+	prompt, err := extractGrokPrompt(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fakeagent: grok prompt: %v\n", err)
+		return 1
 	}
-
-	prompt := valueAfterGrokArg(args, "-p", "--single")
 	logInvocation("grok", prompt, args)
-	if prompt == "" {
-		fmt.Fprintln(os.Stderr, "fakeagent: grok prompt missing (no -p found)")
-		return 2
-	}
 
 	action := scenario.Match(prompt)
 	if err := applyAction(action); err != nil {
@@ -28,62 +23,62 @@ func runGrok(args []string, scenario *Scenario) int {
 	}
 	waitForFakeReviewEvidence(started, prompt)
 
-	enc := json.NewEncoder(os.Stdout)
-	if valueAfterGrokArg(args, "--output-format") != "streaming-messages-json" {
-		if hasGrokArg(args, "--json-schema") {
-			_ = enc.Encode(map[string]any{
-				"text":             action.textOrDefault(),
-				"structuredOutput": json.RawMessage(action.structuredJSON()),
-			})
-		} else {
-			fmt.Fprintln(os.Stdout, action.textOrDefault())
-		}
-		return 0
+	sessionID := argAfter(args, "--resume")
+	if sessionID == "" {
+		sessionID = "fake-grok-session"
 	}
+	enc := json.NewEncoder(os.Stdout)
 	content := []any{map[string]any{"type": "text", "text": action.textOrDefault()}}
 	if isReviewPrompt(prompt) {
 		content = append([]any{map[string]any{"type": "tool_use", "name": "Read"}}, content...)
 	}
 	_ = enc.Encode(map[string]any{
-		"type":       "assistant",
-		"session_id": "fake-grok-session",
-		"model":      "fake-grok",
-		"message":    map[string]any{"model": "fake-grok", "content": content},
+		"type":       "system",
+		"subtype":    "init",
+		"session_id": sessionID,
+		"model":      "grok-default",
 	})
-	result := map[string]any{
-		"type":       "result",
-		"subtype":    "success",
-		"is_error":   false,
-		"result":     action.textOrDefault(),
-		"session_id": "fake-grok-session",
-		"usage": map[string]int{
-			"input_tokens":  100,
-			"output_tokens": 50,
+	_ = enc.Encode(map[string]any{
+		"type":       "assistant",
+		"session_id": sessionID,
+		"message": map[string]any{
+			"model":   "grok-default",
+			"content": content,
 		},
-	}
-	if hasGrokArg(args, "--json-schema") {
-		result["structured_output"] = json.RawMessage(action.structuredJSON())
-	}
-	_ = enc.Encode(result)
+	})
+	_ = enc.Encode(map[string]any{
+		"type":              "result",
+		"subtype":           "success",
+		"is_error":          false,
+		"result":            action.textOrDefault(),
+		"structured_output": json.RawMessage(action.structuredJSON()),
+		"session_id":        sessionID,
+		"usage": map[string]int{
+			"input_tokens":                100,
+			"output_tokens":               50,
+			"cache_read_input_tokens":     0,
+			"cache_creation_input_tokens": 0,
+		},
+	})
 	return 0
 }
 
-func valueAfterGrokArg(args []string, names ...string) string {
-	for i := 0; i+1 < len(args); i++ {
-		for _, name := range names {
-			if args[i] == name {
-				return args[i+1]
+func extractGrokPrompt(args []string) (string, error) {
+	path := argAfter(args, "--prompt-file")
+	if path == "" {
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "--prompt-file=") {
+				path = strings.TrimPrefix(arg, "--prompt-file=")
+				break
 			}
 		}
 	}
-	return ""
-}
-
-func hasGrokArg(args []string, name string) bool {
-	for _, arg := range args {
-		if arg == name {
-			return true
-		}
+	if path == "" {
+		return "", fmt.Errorf("missing --prompt-file")
 	}
-	return false
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	return string(data), nil
 }

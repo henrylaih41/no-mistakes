@@ -80,12 +80,11 @@ func TestRebaseStep_ForcePushSkipsOriginBranch(t *testing.T) {
 		t.Fatalf("feature.txt = %q, want %q; force push was not respected", got, "user-change\n")
 	}
 
-	// Should be rebased onto the base default branch
-	baseMain := baseTrackingRef("main")
-	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", baseMain)
-	baseMainSHA := gitCmd(t, dir, "rev-parse", baseMain)
-	if mergeBase != baseMainSHA {
-		t.Fatalf("merge-base = %s, want %s %s", mergeBase, baseMain, baseMainSHA)
+	// Should be rebased onto origin/main
+	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", "origin/main")
+	originMain := gitCmd(t, dir, "rev-parse", "origin/main")
+	if mergeBase != originMain {
+		t.Fatalf("merge-base = %s, want origin/main %s", mergeBase, originMain)
 	}
 }
 
@@ -320,18 +319,6 @@ func TestRebaseStep_NormalPushSyncsOriginBranch(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "extra.txt")); os.IsNotExist(err) {
 		t.Fatalf("expected extra.txt from origin/feature to be present after normal push sync (HEAD=%s, origin/feature=%s)", afterSHA, originFeatureSHA)
 	}
-}
-
-// isForcePush exercises the legacy non-route force-push detection (remote
-// "origin", localRef "origin/<branch>") that these tests assert. Production
-// code calls isForcePushAgainstRemote directly with the route-aware remote and
-// ref, so this thin wrapper lives in the test file rather than the package.
-func isForcePush(ctx context.Context, workDir, branch, baseSHA string) bool {
-	localRef := ""
-	if branch != "" {
-		localRef = "origin/" + branch
-	}
-	return isForcePushAgainstRemote(ctx, workDir, "origin", branch, localRef, baseSHA)
 }
 
 func TestIsForcePush_IgnoresMergeBaseLookupErrors(t *testing.T) {

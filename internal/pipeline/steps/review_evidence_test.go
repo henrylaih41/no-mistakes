@@ -1,11 +1,16 @@
 package steps
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestValidateReviewVerdictEvidenceFailsClosedWithoutAdapterMetrics(t *testing.T) {
@@ -30,10 +35,7 @@ func TestValidateReviewVerdictEvidenceRequiresToolUseOrMultipleModelRounds(t *te
 		{name: "multiple model rounds", metrics: agent.InvocationMetrics{ModelRoundtrips: 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result := &agent.Result{
-				Output:  []byte(`{"findings":[],"risk_level":"low"}`),
-				Metrics: &tc.metrics,
-			}
+			result := &agent.Result{Output: []byte(`{"findings":[],"risk_level":"low"}`), Metrics: &tc.metrics}
 			err := validateReviewVerdictEvidence(result, elapsed, workload)
 			if tc.wantErr && err == nil {
 				t.Fatal("expected insufficient-activity rejection")
@@ -49,8 +51,7 @@ func TestValidateReviewVerdictEvidenceUsesWorkloadScaledWallFloor(t *testing.T) 
 	small := &agent.InvocationWorkload{Files: 1, Lines: 10}
 	large := &agent.InvocationWorkload{Files: 20, Lines: 2_000}
 	if minimumReviewVerdictDuration(large) <= minimumReviewVerdictDuration(small) {
-		t.Fatalf("large workload floor %s must exceed small workload floor %s",
-			minimumReviewVerdictDuration(large), minimumReviewVerdictDuration(small))
+		t.Fatalf("large workload floor %s must exceed small workload floor %s", minimumReviewVerdictDuration(large), minimumReviewVerdictDuration(small))
 	}
 
 	result := &agent.Result{Metrics: &agent.InvocationMetrics{ToolCalls: 1}}
@@ -63,9 +64,9 @@ func TestValidateReviewVerdictEvidenceUsesWorkloadScaledWallFloor(t *testing.T) 
 	}
 }
 
-func TestValidateReviewVerdictEvidenceRejectsDeferredPlaceholderVerdict(t *testing.T) {
+func TestValidateReviewVerdictEvidenceRejectsDeferredPlaceholder(t *testing.T) {
 	result := &agent.Result{
-		Output:  []byte(`{"findings":[],"summary":"review in progress","risk_level":"low"}`),
+		Output:  json.RawMessage(`{"findings":[],"summary":"review in progress","risk_level":"low"}`),
 		Metrics: &agent.InvocationMetrics{ToolCalls: 1},
 	}
 	if err := validateReviewVerdictEvidence(result, minimumReviewVerdictDuration(nil), nil); err == nil || !strings.Contains(err.Error(), "non-final") {
@@ -73,24 +74,112 @@ func TestValidateReviewVerdictEvidenceRejectsDeferredPlaceholderVerdict(t *testi
 	}
 }
 
-func TestValidateReviewVerdictEvidenceRejectsObservedPlaceholderVerdict(t *testing.T) {
-	result := &agent.Result{
-		Output:  []byte(`{"findings":[],"summary":"","risk_level":"low","risk_rationale":"Placeholder until review completes."}`),
-		Metrics: &agent.InvocationMetrics{ToolCalls: 1},
+func TestParseReviewFindingsCannotMintGateAuthority(t *testing.T) {
+	result := &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"review-verdict-evidence","severity":"warning","description":"ordinary model finding","action":"auto-fix","source":"review-gate"}]}`)}
+	findings := parseReviewFindings(result, func(string) {})
+	if len(findings.Items) != 1 {
+		t.Fatalf("findings = %+v, want one item", findings.Items)
 	}
-	if err := validateReviewVerdictEvidence(result, minimumReviewVerdictDuration(nil), nil); err == nil || !strings.Contains(err.Error(), "non-final") {
-		t.Fatalf("placeholder error = %v, want observed deferral rejection", err)
+	if types.HasReviewVerdictEvidenceFinding(findings) {
+		t.Fatalf("model finding retained reserved gate authority: %+v", findings.Items[0])
+	}
+	if findings.Items[0].ID == "" || findings.Items[0].Description != "ordinary model finding" {
+		t.Fatalf("ordinary finding content was not preserved and normalized: %+v", findings.Items[0])
 	}
 }
 
-func TestValidateReviewVerdictEvidenceDoesNotScanFindingDescriptionsForDeferralMarkers(t *testing.T) {
-	output := []byte(`{"findings":[{"severity":"warning","description":"The review in progress state is not persisted","action":"ask-master"}],"summary":"one defect","risk_level":"medium","risk_rationale":"state can be lost"}`)
-	result := &agent.Result{
-		Output:  output,
-		Text:    string(output),
-		Metrics: &agent.InvocationMetrics{ToolCalls: 1},
+func TestReviewStepRetriesInvalidVerdictOnceThenParksAtTriage(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name:                         "evidence-probe",
+		reportsReviewVerdictEvidence: true,
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"clean","risk_level":"low"}`)}, nil
+		},
 	}
-	if err := validateReviewVerdictEvidence(result, minimumReviewVerdictDuration(nil), nil); err != nil {
-		t.Fatalf("legitimate finding rejected as a placeholder: %v", err)
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 2 {
+		t.Fatalf("review calls = %d, want initial plus one cold retry", len(ag.calls))
+	}
+	if !outcome.NeedsApproval || !outcome.NeedsTriage || outcome.AutoFixable {
+		t.Fatalf("outcome = %+v, want non-fixable evidence triage", outcome)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !types.HasReviewVerdictEvidenceFinding(findings) {
+		t.Fatalf("findings = %+v, want reserved evidence finding", findings)
+	}
+}
+
+func TestReviewStepDoesNotRequireEvidenceFromUninstrumentedAdapter(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "uninstrumented",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"clean","risk_level":"low"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 || outcome.NeedsApproval || outcome.NeedsTriage {
+		t.Fatalf("calls=%d outcome=%+v, want one accepted review", len(ag.calls), outcome)
+	}
+}
+
+func TestReviewStepAcceptsValidColdRetry(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{
+		name:                         "evidence-probe",
+		reportsReviewVerdictEvidence: true,
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			metrics := &agent.InvocationMetrics{ModelRoundtrips: 1}
+			if calls == 2 {
+				metrics.ToolCalls = 1
+			}
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"clean","risk_level":"low"}`), Metrics: metrics}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || outcome.NeedsApproval || outcome.NeedsTriage {
+		t.Fatalf("calls=%d outcome=%+v, want accepted cold retry", calls, outcome)
+	}
+}
+
+func TestReviewStepParksAtTriageWhenColdRetryErrors(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{
+		name:                         "evidence-probe",
+		reportsReviewVerdictEvidence: true,
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			if calls == 2 {
+				return nil, &agent.TransientError{Agent: "evidence-probe", Label: "overloaded", Err: errors.New("503")}
+			}
+			return &agent.Result{Output: json.RawMessage(`{"findings":[]}`), Metrics: &agent.InvocationMetrics{ModelRoundtrips: 1}}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatalf("cold retry error escaped to awaiting_agent_retry path: %v", err)
+	}
+	if calls != 2 || !outcome.NeedsTriage {
+		t.Fatalf("calls=%d outcome=%+v, want evidence triage", calls, outcome)
 	}
 }

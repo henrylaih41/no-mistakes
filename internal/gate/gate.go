@@ -10,11 +10,20 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/worktrees"
 )
+
+var ensureGateHooksPathIsolation = git.EnsureHooksPathIsolation
+
+var sweepRunWorktrees = procreap.SweepRunWorktrees
 
 // RemoteName is the name of the git remote that points to the local gate.
 const RemoteName = "no-mistakes"
@@ -46,6 +55,11 @@ func Init(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.Re
 // remains the parent repository used for PRs. When forkURL is empty, an
 // existing fork setting is preserved across idempotent refreshes.
 func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkURL string) (*db.Repo, bool, error) {
+	if classified, err := (gatecontext.Inspector{DB: d, Paths: p}).Inspect(ctx, gatecontext.Request{CWD: workDir, MarkerPresent: gatecontext.MarkerPresent()}); err != nil {
+		return nil, false, err
+	} else if classified.Nested {
+		return nil, false, fmt.Errorf("%s", gatecontext.RefusalMessage(classified))
+	}
 	forkURL = strings.TrimSpace(forkURL)
 
 	// Normalize worktrees back to the main repo root so one repo record works
@@ -80,13 +94,33 @@ func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkUR
 	}
 	upstreamURL, err := getOriginURL(ctx, absRoot, "origin")
 	if err != nil {
+		// A missing "origin" is a normal state for a fresh `git init` repo, so
+		// give an actionable message instead of leaking git plumbing. Only
+		// substitute it when origin is genuinely absent; any other git failure
+		// keeps its original error.
+		hasOrigin, listErr := git.HasRemote(ctx, absRoot, "origin")
+		if listErr == nil && !hasOrigin {
+			return nil, false, fmt.Errorf(
+				"no 'origin' remote in %s\n\n"+
+					"no-mistakes pushes your branch and opens a pull request, so it needs a remote to push to.\n"+
+					"Add one, then re-run:\n\n"+
+					"  git remote add origin <url>",
+				absRoot)
+		}
 		return nil, false, fmt.Errorf("get origin url: %w", err)
 	}
 	if forkURL != "" {
-		if err := validateForkRouting(upstreamURL, forkURL); err != nil {
+		if err := validateForkRouting(ctx, upstreamURL, forkURL); err != nil {
 			return nil, false, err
 		}
 	}
+
+	// Redact embedded credentials for everything that is persisted, logged, or
+	// surfaced to the user. The bare gate keeps the full credentialled URL on
+	// its "origin" remote via provisionGate below so worktrees carved from it
+	// can still authenticate pushes; the push step resolves that credential
+	// from the worktree at run time instead of trusting the DB copy.
+	redactedUpstreamURL := safeurl.Redact(upstreamURL)
 
 	id := repoID(absRoot)
 	if existing != nil {
@@ -113,9 +147,9 @@ func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkUR
 	if existing != nil {
 		var repo *db.Repo
 		if forkURL != "" {
-			repo, err = d.UpdateRepoMetadataWithFork(existing.ID, upstreamURL, forkURL, branch)
+			repo, err = d.UpdateRepoMetadataWithFork(existing.ID, redactedUpstreamURL, forkURL, branch)
 		} else {
-			repo, err = d.UpdateRepoMetadata(existing.ID, upstreamURL, branch)
+			repo, err = d.UpdateRepoMetadata(existing.ID, redactedUpstreamURL, branch)
 		}
 		if err != nil {
 			return nil, false, fmt.Errorf("update repo metadata: %w", err)
@@ -125,7 +159,7 @@ func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkUR
 	}
 
 	// Insert repo record with deterministic ID.
-	repo, err := d.InsertRepoWithIDAndFork(id, absRoot, upstreamURL, forkURL, branch)
+	repo, err := d.InsertRepoWithIDAndFork(id, absRoot, redactedUpstreamURL, forkURL, branch)
 	if err != nil {
 		// Rollback: remove remote and bare repo.
 		git.RemoveRemote(ctx, absRoot, RemoteName)
@@ -133,31 +167,13 @@ func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkUR
 		return nil, false, fmt.Errorf("insert repo: %w", err)
 	}
 
-	slog.Info("gate initialized", "repo_id", id, "path", absRoot, "upstream", upstreamURL)
+	slog.Info("gate initialized", "repo_id", id, "path", absRoot, "upstream", redactedUpstreamURL)
 	return repo, true, nil
 }
 
-// ValidateRoute validates a named local route's base and optional fork URL.
-// A route generalizes the single --fork-url setting into named targets: the
-// base is the PR base (upstream) URL and is required; the fork is the optional
-// branch push target and cross-repo PR head. When a fork is set, base+fork must
-// satisfy the same fork-routing rules as init's --fork-url (validateForkRouting).
-// A base with no fork carries no provider restriction, matching a plain init.
-func ValidateRoute(baseURL, forkURL string) error {
-	baseURL = strings.TrimSpace(baseURL)
-	forkURL = strings.TrimSpace(forkURL)
-	if baseURL == "" {
-		return fmt.Errorf("route base URL must not be empty")
-	}
-	if forkURL == "" {
-		return nil
-	}
-	return validateForkRouting(baseURL, forkURL)
-}
-
-func validateForkRouting(upstreamURL, forkURL string) error {
-	parentProvider := scm.DetectProvider(upstreamURL)
-	forkProvider := scm.DetectProvider(forkURL)
+func validateForkRouting(ctx context.Context, upstreamURL, forkURL string) error {
+	parentProvider := scm.DetectProviderContext(ctx, upstreamURL)
+	forkProvider := scm.DetectProviderContext(ctx, forkURL)
 	if parentProvider == scm.ProviderGitHub && forkProvider == scm.ProviderGitHub {
 		if github.RepoSlug(upstreamURL) == "" || github.RepoSlug(forkURL) == "" {
 			return fmt.Errorf("fork URL routing requires GitHub parent and fork remotes with owner/repo paths")
@@ -176,19 +192,25 @@ func provisionGate(ctx context.Context, bareDir, absRoot, upstreamURL, reposDir 
 	if err := git.InitBare(ctx, bareDir); err != nil {
 		return fmt.Errorf("create bare repo: %w", err)
 	}
-	if _, err := git.Run(ctx, bareDir, "config", "receive.advertisePushOptions", "true"); err != nil {
+	if _, err := git.RunBare(ctx, bareDir, "config", "receive.advertisePushOptions", "true"); err != nil {
 		return fmt.Errorf("enable push options: %w", err)
 	}
 
-	if _, err := git.RefreshManagedPostReceiveHook(bareDir); err != nil {
-		return fmt.Errorf("install hook: %w", err)
+	if err := git.RefreshManagedGateHooks(bareDir); err != nil {
+		return fmt.Errorf("install hooks: %w", err)
 	}
 
 	// Pin core.hookspath in the bare's per-worktree config so subprocess
 	// writes to shared local config (e.g. husky during pnpm install) can't
 	// disable the gate hook. See git.IsolateHooksPath for details.
-	if err := git.IsolateHooksPath(ctx, bareDir); err != nil {
+	isolated, err := ensureGateHooksPathIsolation(ctx, bareDir)
+	if err != nil {
 		return fmt.Errorf("isolate hooks path: %w", err)
+	}
+	if isolated {
+		if err := git.MarkGateConfigCurrent(bareDir); err != nil {
+			return fmt.Errorf("stamp gate config: %w", err)
+		}
 	}
 
 	// Record upstream as origin on the gate repo so gh can resolve repository
@@ -265,6 +287,11 @@ func reattachRelocatedRepo(ctx context.Context, d *db.DB, p *paths.Paths, absRoo
 // It removes the remote, deletes the bare repo and worktrees,
 // and deletes the repo record from the database.
 func Eject(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.Repo, error) {
+	if classified, err := (gatecontext.Inspector{DB: d, Paths: p}).Inspect(ctx, gatecontext.Request{CWD: workDir, MarkerPresent: gatecontext.MarkerPresent()}); err != nil {
+		return nil, err
+	} else if classified.Nested {
+		return nil, fmt.Errorf("%s", gatecontext.RefusalMessage(classified))
+	}
 	// Normalize worktrees back to the main repo root so eject works no matter
 	// which checkout the user runs it from.
 	gitRoot, err := git.FindMainRepoRoot(workDir)
@@ -289,9 +316,10 @@ func Eject(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.R
 	bareDir := p.RepoDir(repo.ID)
 	os.RemoveAll(bareDir)
 
-	// Delete worktrees for this repo.
-	repoWtDir := filepath.Join(p.WorktreesDir(), repo.ID)
-	os.RemoveAll(repoWtDir)
+	// Delete worktrees for this repo. This happens before the repo record is
+	// deleted, because in a configured root the run rows are what identify
+	// which directories are ours to remove.
+	removeRepoWorktrees(d, p, repo)
 
 	// Delete repo record (cascades to runs + steps).
 	if err := d.DeleteRepo(repo.ID); err != nil {
@@ -300,4 +328,82 @@ func Eject(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.R
 
 	slog.Info("gate ejected", "repo_id", repo.ID, "path", absRoot)
 	return repo, nil
+}
+
+// removeRepoWorktrees deletes the ejected repository's run worktrees.
+//
+// Under the default placement no-mistakes owns <NM_HOME>/worktrees/<repoID>
+// outright, so the whole directory goes. Everything a run recorded outside it
+// is removed one directory at a time (see worktree_roots and
+// internal/worktrees): such a directory sits in a directory of the operator's
+// own - it holds the toolchain configuration the runs were placed there to
+// inherit - so eject removes exactly what this repository's own run rows
+// recorded, and touches nothing else: not the root, not the operator's files,
+// and not a neighbouring directory that merely looks like a run. Reading the
+// recorded placement rather than deriving it is also what reaches a run left in
+// a root the operator has since reconfigured away.
+//
+// Every one of those directories is swept before any of them is removed - both
+// halves, in the one process snapshot that costs (see
+// procreap.SweepRunWorktrees). Which half a run landed in says nothing about
+// whether it leaked a process that escaped its group, and a default-placement
+// directory removed without a sweep leaves that process burning CPU on a deleted
+// cwd until some later daemon startup happens to sweep the tree by shape - which
+// is the cost this sweep exists to eliminate, not to defer.
+//
+// The sweep also has to precede the deletion of the repository record: the
+// cascade takes the run rows with it, and outside the default tree those rows are
+// the only thing that can name the directory. Sweeping afterwards would be
+// sweeping a directory nothing knows about.
+//
+// Failures are logged rather than fatal: an eject that cannot delete a leftover
+// worktree must still finish removing the gate.
+func removeRepoWorktrees(d *db.DB, p *paths.Paths, repo *db.Repo) {
+	defaultDir := filepath.Join(p.WorktreesDir(), repo.ID)
+
+	runs, err := d.GetRunsByRepo(repo.ID)
+	if err != nil {
+		slog.Warn("failed to list runs while removing worktrees during eject", "repo_id", repo.ID, "error", err)
+		os.RemoveAll(defaultDir)
+		return
+	}
+	var recorded []string
+	var sweepable []procreap.Worktree
+	for _, run := range runs {
+		path := worktrees.RecordedDir(p, run.WorktreePath(), repo.ID, run.ID)
+		if !worktrees.Contains(defaultDir, path) {
+			// Everything in the default tree goes with the directory we own
+			// outright, so only the rest is removed one path at a time.
+			recorded = append(recorded, path)
+		}
+		if reachableRunWorktree(path, run.Status) {
+			sweepable = append(sweepable, procreap.Worktree{Dir: path, RepoID: repo.ID, RunID: run.ID})
+		}
+	}
+	sweepRunWorktrees(p.WorktreesDir(), sweepable, "eject")
+
+	os.RemoveAll(defaultDir)
+	for _, path := range recorded {
+		if err := os.RemoveAll(path); err != nil {
+			slog.Warn("failed to remove run worktree during eject", "path", path, "error", err)
+		}
+	}
+}
+
+// reachableRunWorktree reports whether a recorded placement can still have
+// anything standing in it, which is the same bound daemon startup applies to the
+// same set (see leftoverRecordedRunWorktrees and db.ActiveRunWorktreesOutside):
+// a directory that is still on disk, or the worktree of a run that never
+// reached a terminal state and may therefore have lost its directory while a
+// process it leaked kept holding it.
+//
+// A terminal run whose directory is already gone is not in reach: its removal
+// swept it, and eject would otherwise pay a full sweep for every run this
+// repository has ever had - run rows are never pruned, so that set grows without
+// bound while the work it does is empty.
+func reachableRunWorktree(dir string, status types.RunStatus) bool {
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return true
+	}
+	return status == types.RunPending || status == types.RunRunning
 }

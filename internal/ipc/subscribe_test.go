@@ -37,16 +37,18 @@ func TestSubscribeMalformedEvent(t *testing.T) {
 	srv := startServer(t, sock)
 
 	// Stream handler sends one valid event, one malformed JSON, one valid event.
-	srv.HandleStream(ipc.MethodSubscribe, func(_ context.Context, _ json.RawMessage, send func(interface{}) error) error {
-		s1 := "first"
-		if err := send(ipc.Event{Type: ipc.EventRunUpdated, RunID: "r1", Status: &s1}); err != nil {
-			return err
-		}
-		// Send raw malformed JSON by encoding a special string that the encoder wraps.
-		// We need to write raw bytes — use send with a type that produces invalid Event JSON.
-		// Actually, the send function calls encoder.Encode which always produces valid JSON.
-		// So we need to write directly to the connection. Instead, we'll test this via a raw socket.
-		return nil
+	srv.HandleStream(ipc.MethodSubscribe, func(_ context.Context, _ json.RawMessage) (ipc.StreamFunc, error) {
+		return func(send func(interface{}) error) error {
+			s1 := "first"
+			if err := send(ipc.Event{Type: ipc.EventRunUpdated, RunID: "r1", Status: &s1}); err != nil {
+				return err
+			}
+			// Send raw malformed JSON by encoding a special string that the encoder wraps.
+			// We need to write raw bytes - use send with a type that produces invalid Event JSON.
+			// Actually, the send function calls encoder.Encode which always produces valid JSON.
+			// So we need to write directly to the connection. Instead, we'll test this via a raw socket.
+			return nil
+		}, nil
 	})
 
 	// This approach won't work for malformed events since send always produces valid JSON.
@@ -150,23 +152,25 @@ func TestSubscribeClient(t *testing.T) {
 	srv := startServer(t, sock)
 
 	// Set up a stream handler that sends 3 events.
-	srv.HandleStream(ipc.MethodSubscribe, func(_ context.Context, raw json.RawMessage, send func(interface{}) error) error {
+	srv.HandleStream(ipc.MethodSubscribe, func(_ context.Context, raw json.RawMessage) (ipc.StreamFunc, error) {
 		var p ipc.SubscribeParams
 		if err := json.Unmarshal(raw, &p); err != nil {
-			return err
+			return nil, err
 		}
-		for i := 0; i < 3; i++ {
-			status := fmt.Sprintf("event-%d", i)
-			event := ipc.Event{
-				Type:   ipc.EventRunUpdated,
-				RunID:  p.RunID,
-				Status: &status,
+		return func(send func(interface{}) error) error {
+			for i := 0; i < 3; i++ {
+				status := fmt.Sprintf("event-%d", i)
+				event := ipc.Event{
+					Type:   ipc.EventRunUpdated,
+					RunID:  p.RunID,
+					Status: &status,
+				}
+				if err := send(event); err != nil {
+					return err
+				}
 			}
-			if err := send(event); err != nil {
-				return err
-			}
-		}
-		return nil // handler returns → connection closes → channel closes
+			return nil // handler returns → connection closes → channel closes
+		}, nil
 	})
 
 	ch, cancel, err := ipc.Subscribe(sock, &ipc.SubscribeParams{RunID: "run123"})
@@ -191,5 +195,122 @@ func TestSubscribeClient(t *testing.T) {
 		if event.Status == nil || *event.Status != wantStatus {
 			t.Errorf("event %d: status=%v, want %q", i, event.Status, wantStatus)
 		}
+	}
+}
+
+// The subscription transport frames one JSON document per line and caps a line
+// at 1 MiB. A frame past that limit does not merely fail to parse: it ends the
+// whole stream, so every event after it - including the run's terminal frame -
+// is never seen.
+//
+// This is why the fix-review working-tree diff is served by an on-demand RPC
+// instead of being attached to a step_completed event: the diff was the only
+// unbounded event payload, and a large change would take the subscription down
+// with it. This test is the standing guard on that reasoning - if a future
+// change puts an unbounded payload back on the stream, the hazard is here.
+func TestSubscribeOversizedFrameEndsTheStreamAndHidesLaterEvents(t *testing.T) {
+	sock := socketPath(t)
+	os.Remove(sock)
+	ln := rawListen(t, sock)
+	defer ln.Close()
+
+	oversized := strings.Repeat("d", 1024*1024+64)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		scanner := bufio.NewScanner(conn)
+		if !scanner.Scan() {
+			return
+		}
+		var req ipc.Request
+		json.Unmarshal(scanner.Bytes(), &req)
+		enc := json.NewEncoder(conn)
+		okResp := ipc.Response{JSONRPC: "2.0", ID: req.ID}
+		okResult, _ := json.Marshal(map[string]bool{"ok": true})
+		okResp.Result = okResult
+		enc.Encode(okResp)
+
+		enc.Encode(ipc.Event{Type: ipc.EventLogChunk, RunID: "r1", Content: &oversized})
+		terminal := "failed"
+		enc.Encode(ipc.Event{Type: ipc.EventRunCompleted, RunID: "r1", Status: &terminal})
+	}()
+
+	ch, cancel, err := ipc.Subscribe(sock, &ipc.SubscribeParams{RunID: "r1"})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer cancel()
+
+	var events []ipc.Event
+	for event := range ch {
+		events = append(events, event)
+	}
+	for _, e := range events {
+		if e.Type == ipc.EventRunCompleted {
+			t.Fatal("terminal frame survived an oversized frame; the transport limit no longer applies and this guard needs revisiting")
+		}
+	}
+}
+
+// Frames that stay within the limit deliver normally, including the terminal
+// one. Gate events must stay in this regime.
+func TestSubscribeBoundedFramesDeliverThroughTerminalEvent(t *testing.T) {
+	sock := socketPath(t)
+	os.Remove(sock)
+	ln := rawListen(t, sock)
+	defer ln.Close()
+
+	findings := strings.Repeat("f", 64*1024)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		scanner := bufio.NewScanner(conn)
+		if !scanner.Scan() {
+			return
+		}
+		var req ipc.Request
+		json.Unmarshal(scanner.Bytes(), &req)
+		enc := json.NewEncoder(conn)
+		okResp := ipc.Response{JSONRPC: "2.0", ID: req.ID}
+		okResult, _ := json.Marshal(map[string]bool{"ok": true})
+		okResp.Result = okResult
+		enc.Encode(okResp)
+
+		gate := "fix_review"
+		enc.Encode(ipc.Event{Type: ipc.EventStepCompleted, RunID: "r1", Status: &gate, Findings: &findings, StateRev: 4})
+		enc.Encode(ipc.Event{Type: ipc.EventStreamGap, RunID: "r1", StateRev: 9})
+		terminal := "failed"
+		enc.Encode(ipc.Event{Type: ipc.EventRunCompleted, RunID: "r1", Status: &terminal, StateRev: 10})
+	}()
+
+	ch, cancel, err := ipc.Subscribe(sock, &ipc.SubscribeParams{RunID: "r1"})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer cancel()
+
+	var types_ []ipc.EventType
+	var lastRev int64
+	for event := range ch {
+		types_ = append(types_, event.Type)
+		lastRev = event.StateRev
+	}
+	want := []ipc.EventType{ipc.EventStepCompleted, ipc.EventStreamGap, ipc.EventRunCompleted}
+	if len(types_) != len(want) {
+		t.Fatalf("frames = %v, want %v", types_, want)
+	}
+	for i := range want {
+		if types_[i] != want[i] {
+			t.Fatalf("frames = %v, want %v", types_, want)
+		}
+	}
+	if lastRev != 10 {
+		t.Fatalf("terminal StateRev = %d, want 10", lastRev)
 	}
 }

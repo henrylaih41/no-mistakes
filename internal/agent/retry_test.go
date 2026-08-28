@@ -65,6 +65,21 @@ func TestClassifyTransient_Positive(t *testing.T) {
 			errMsg:  `Post "https://api.anthropic.com": net/http: TLS handshake timeout`,
 			wantSub: "tls",
 		},
+		{
+			name:    "prose turn ending",
+			errMsg:  `antigravity output parse: ended its turn with prose instead of the required JSON object`,
+			wantSub: "prose",
+		},
+		{
+			name:    "agy permission declaration",
+			errMsg:  `antigravity reported error: declaring permissions: cortex tool view_file: failed`,
+			wantSub: "permission",
+		},
+		{
+			name:    "invalid tool call",
+			errMsg:  `antigravity reported error: invalid tool call error (invalid_args)`,
+			wantSub: "tool call",
+		},
 	}
 
 	for _, tc := range cases {
@@ -105,12 +120,45 @@ func TestClassifyTransient_Negative(t *testing.T) {
 			name:   "schema validation",
 			errMsg: `JSON output missing required field "summary"`,
 		},
+		{
+			name:   "free usage limit",
+			errMsg: `API rate limit reached with HTTP 429: FreeUsageLimit exceeded`,
+		},
+		{
+			name:   "quota exhausted",
+			errMsg: `provider error: quota_exhausted`,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if label, ok := classifyTransient(errors.New(tc.errMsg)); ok {
 				t.Errorf("expected non-transient for %q, got %q", tc.errMsg, label)
+			}
+		})
+	}
+}
+
+func TestRunWithRetry_DoesNotRetryQuotaExhaustion(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	for _, message := range []string{
+		"API rate limit reached with HTTP 429: FreeUsageLimit exceeded",
+		"API request failed with HTTP 429: insufficient_quota",
+		"API request failed with HTTP 429: You exceeded your current quota",
+	} {
+		t.Run(message, func(t *testing.T) {
+			calls := 0
+			quotaErr := errors.New(message)
+			_, err := runWithRetry(context.Background(), "antigravity", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+				calls++
+				return nil, quotaErr
+			})
+			if !errors.Is(err, quotaErr) {
+				t.Fatalf("expected quota error to propagate, got %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("expected one call for quota exhaustion, got %d", calls)
 			}
 		})
 	}
@@ -193,6 +241,46 @@ func TestRunWithRetry_RetriesTransientThenSucceeds(t *testing.T) {
 		if !strings.Contains(strings.ToLower(c), "transient") || !strings.Contains(strings.ToLower(c), "overloaded") {
 			t.Errorf("chunk[%d]=%q should mention 'transient' and the classification label", i, c)
 		}
+	}
+}
+
+func TestRunWithRetry_ExhaustedTransientReturnsTypedError(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	transientErr := errors.New("503 service unavailable")
+	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 1, classifyTransient, nil, func() (*Result, error) {
+		return nil, transientErr
+	})
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	var transient *TransientError
+	if !errors.As(err, &transient) {
+		t.Fatalf("expected TransientError, got %T %[1]v", err)
+	}
+	if transient.Agent != "claude" || transient.Label != "http 503" {
+		t.Fatalf("TransientError = %+v, want claude/http 503", transient)
+	}
+	if !errors.Is(err, transientErr) {
+		t.Fatalf("TransientError should wrap original error, got %v", err)
+	}
+}
+
+func TestClaudeRetryClassifier_EmptyStderrExitOne(t *testing.T) {
+	label, ok := claudeRetryClassifier(errors.New("claude exited: exit status 1: "))
+	if !ok || label != "empty-stderr exit-1" {
+		t.Fatalf("classification = %q, %v; want empty-stderr exit-1, true", label, ok)
+	}
+}
+
+func TestRunWithRetry_MissingStructuredOutputDoesNotBecomeParkable(t *testing.T) {
+	defer withFastBackoff(t)()
+	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 1, claudeRetryClassifier, nil, func() (*Result, error) {
+		return nil, errNoStructuredOutput
+	})
+	var transient *TransientError
+	if errors.As(err, &transient) {
+		t.Fatalf("missing structured output must stay a normal step error, got %+v", transient)
 	}
 }
 
@@ -294,31 +382,6 @@ func TestRunWithRetry_ExhaustsRetries(t *testing.T) {
 	}
 }
 
-func TestRunWithRetry_ExhaustedTransientReturnsTypedError(t *testing.T) {
-	defer withFastBackoff(t)()
-
-	transientErr := errors.New("503 service unavailable")
-	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 1, classifyTransient, nil, func() (*Result, error) {
-		return nil, transientErr
-	})
-	if err == nil {
-		t.Fatal("expected error after exhausting retries")
-	}
-	var transient *TransientError
-	if !errors.As(err, &transient) {
-		t.Fatalf("expected TransientError, got %T %[1]v", err)
-	}
-	if transient.Agent != "claude" {
-		t.Fatalf("TransientError.Agent = %q, want claude", transient.Agent)
-	}
-	if transient.Label != "http 503" {
-		t.Fatalf("TransientError.Label = %q, want http 503", transient.Label)
-	}
-	if !errors.Is(err, transientErr) {
-		t.Fatalf("TransientError should wrap original error, got %v", err)
-	}
-}
-
 func TestRunWithRetry_RespectsContextCancellation(t *testing.T) {
 	// Use a real backoff that would normally take ~1s, but cancel ctx
 	// before the first sleep finishes to confirm short-circuit.
@@ -358,16 +421,6 @@ func TestRunWithRetry_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
-func TestClaudeRetryClassifier_EmptyStderrExitOne(t *testing.T) {
-	label, ok := claudeRetryClassifier(errors.New("claude exited: exit status 1: "))
-	if !ok {
-		t.Fatal("expected empty-stderr exit-1 to classify as transient")
-	}
-	if label != "empty-stderr exit-1" {
-		t.Fatalf("label = %q, want empty-stderr exit-1", label)
-	}
-}
-
 func TestRunWithRetry_CombinedClassifierForClaude(t *testing.T) {
 	defer withFastBackoff(t)()
 
@@ -385,10 +438,6 @@ func TestRunWithRetry_CombinedClassifierForClaude(t *testing.T) {
 	}
 	if !errors.Is(err, errNoStructuredOutput) {
 		t.Errorf("expected errNoStructuredOutput to surface as final error, got %v", err)
-	}
-	var transient *TransientError
-	if errors.As(err, &transient) {
-		t.Fatalf("errNoStructuredOutput should not become a TransientError park, got %+v", transient)
 	}
 }
 

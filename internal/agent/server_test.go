@@ -3,11 +3,16 @@ package agent
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
 
 // TestStartServerWithPort_DetectsEarlyExit verifies that when the spawned
@@ -21,18 +26,55 @@ func TestStartServerWithPort_DetectsEarlyExit(t *testing.T) {
 	}
 
 	start := time.Now()
-	srv, err := startServerWithPort(context.Background(), "test", bin, nil, t.TempDir(), "/healthcheck", 1)
+	srv, err := startServerWithPort(context.Background(), "test", bin, nil, t.TempDir(), "/healthcheck", 1, runenv.Overlay{})
 	elapsed := time.Since(start)
 
 	if err == nil {
 		srv.shutdown()
 		t.Fatal("expected error when server exits before becoming healthy")
 	}
-	if !strings.Contains(err.Error(), "exit") {
-		t.Errorf("error should mention early exit, got: %v", err)
+	if !strings.Contains(err.Error(), "exit") || !strings.Contains(err.Error(), "status 0") {
+		t.Errorf("error should mention the early clean exit status, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "%!") {
+		t.Errorf("error contains an invalid formatting diagnostic: %v", err)
 	}
 	if elapsed > 5*time.Second {
 		t.Errorf("should fail fast on early exit, waited %v", elapsed)
+	}
+}
+
+func TestStartServerWithPortAppliesForgeEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "env.txt")
+	name := "fake-server"
+	script := "#!/bin/sh\nprintf 'config:%s token:%s\\n' \"$GLAB_CONFIG_DIR\" \"${GITLAB_TOKEN:+set}\" > \"$CAPTURE_FILE\"\nexit 1\n"
+	if runtime.GOOS == "windows" {
+		name += ".cmd"
+		script = "@echo off\r\nset TOKENSTATE=\r\nif defined GITLAB_TOKEN set TOKENSTATE=set\r\necho config:%GLAB_CONFIG_DIR% token:%TOKENSTATE%>\"%CAPTURE_FILE%\"\r\nexit /b 1\r\n"
+	}
+	bin := filepath.Join(dir, name)
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITLAB_TOKEN", "ambient-must-not-leak")
+
+	_, err := startServerWithPort(context.Background(), "test", bin, nil, dir, "/healthcheck", 1, runenv.Overlay{
+		Set: map[string]string{
+			"CAPTURE_FILE":    capture,
+			"GLAB_CONFIG_DIR": "/profiles/work",
+		},
+		Unset: []string{"GITLAB_TOKEN"},
+	})
+	if err == nil {
+		t.Fatal("expected fake server to exit")
+	}
+	data, readErr := os.ReadFile(capture)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := strings.TrimSpace(string(data)); got != "config:/profiles/work token:" {
+		t.Fatalf("managed server environment = %q", got)
 	}
 }
 
@@ -115,6 +157,52 @@ func TestSetManagedServerOutput_RoutesSubprocessOutput(t *testing.T) {
 	}
 }
 
+func TestManagedServerOutputIsSeparatedFromLifecycleFailureSummary(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+
+	var managedOutput bytes.Buffer
+	SetManagedServerOutput(&managedOutput)
+	t.Cleanup(func() { SetManagedServerOutput(nil) })
+	var lifecycle bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&lifecycle, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	_, err = startServerWithPort(
+		context.Background(),
+		"opencode",
+		sh,
+		[]string{"-c", "echo verbose-managed-output; echo managed-failure 1>&2; exit 17"},
+		t.TempDir(),
+		"/healthcheck",
+		1,
+		runenv.Overlay{},
+	)
+	if err == nil {
+		t.Fatal("expected managed server startup failure")
+	}
+	for _, want := range []string{"verbose-managed-output", "managed-failure"} {
+		if !strings.Contains(managedOutput.String(), want) {
+			t.Errorf("managed output missing %q: %s", want, managedOutput.String())
+		}
+		if strings.Contains(lifecycle.String(), want) {
+			t.Errorf("lifecycle log leaked raw managed output %q: %s", want, lifecycle.String())
+		}
+	}
+	for _, want := range []string{
+		"managed agent server started",
+		"managed agent server exited",
+		"managed agent server startup failed",
+	} {
+		if !strings.Contains(lifecycle.String(), want) {
+			t.Errorf("lifecycle log missing %q: %s", want, lifecycle.String())
+		}
+	}
+}
+
 func TestSetManagedServerOutput_NilResetsToDefault(t *testing.T) {
 	SetManagedServerOutput(&bytes.Buffer{})
 	SetManagedServerOutput(nil)
@@ -136,7 +224,7 @@ func TestStartServerWithPort_RemovesPIDFileOnEarlyExit(t *testing.T) {
 	SetServerPIDsDir(pidsDir)
 	t.Cleanup(func() { SetServerPIDsDir("") })
 
-	srv, err := startServerWithPort(context.Background(), "test", bin, nil, t.TempDir(), "/healthcheck", 1)
+	srv, err := startServerWithPort(context.Background(), "test", bin, nil, t.TempDir(), "/healthcheck", 1, runenv.Overlay{})
 	if err == nil {
 		srv.shutdown()
 		t.Fatal("expected error when server exits before becoming healthy")

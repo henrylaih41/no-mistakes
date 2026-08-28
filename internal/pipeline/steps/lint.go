@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -15,6 +16,9 @@ type LintStep struct{}
 func (s *LintStep) Name() types.StepName { return types.StepLint }
 
 func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 	lintCmd := sctx.Config.Commands.Lint
@@ -31,7 +35,7 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			}
 		}
 		sctx.Log("no lint command configured, asking agent to lint and fix...")
-		reassessHistory := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
+		reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
 		prompt := fmt.Sprintf(
 			`Detect the linting and formatting tools for this project, run the relevant checks yourself, apply safe fixes, and verify the result.
 
@@ -65,7 +69,7 @@ Rules:
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
 		}
-		result, err := sctx.Agent.Run(ctx, agent.RunOpts{
+		result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 			Prompt:     prompt,
 			CWD:        sctx.WorkDir,
 			JSONSchema: findingsSchema,
@@ -85,6 +89,9 @@ Previous lint findings to address:
 		}
 		summary, err := extractCommitSummary(result)
 		if err != nil {
+			if errors.Is(err, errRejectedCommitSummary) {
+				return nil, fmt.Errorf("validate lint summary: %w", err)
+			}
 			sctx.Log(fmt.Sprintf("warning: could not parse lint summary: %v", err))
 		}
 		if err := commitAgentFixes(sctx, s.Name(), summary, "fix lint issues"); err != nil {
@@ -104,7 +111,7 @@ Previous lint findings to address:
 	// In fix mode, ask agent to fix lint issues first
 	var fixSummary string
 	if sctx.Fixing {
-		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
+		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
 		fixPrompt := fmt.Sprintf(
 			`Fix the lint issues in this repository. Run the linter, identify all issues, and fix them.
 
@@ -151,7 +158,7 @@ Previous lint findings to address:
 		return nil, fmt.Errorf("run lint command: %w", err)
 	}
 
-	sctx.Log(output)
+	projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepLint)
 
 	if exitCode != 0 {
 		findings := Findings{
@@ -159,7 +166,7 @@ Previous lint findings to address:
 				Severity:    "warning",
 				Description: fmt.Sprintf("linter found issues (exit code %d)", exitCode),
 			}},
-			Summary: output,
+			Summary: projectedOutput,
 		}
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{

@@ -1,10 +1,34 @@
 package git
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
+
+type environmentContextKey struct{}
+
+// WithEnvironment freezes an environment overlay into ctx for Git commands
+// and any hooks or credential helpers they spawn.
+func WithEnvironment(ctx context.Context, overlay runenv.Overlay) context.Context {
+	if overlay.Empty() {
+		return ctx
+	}
+	return context.WithValue(ctx, environmentContextKey{}, overlay.Clone())
+}
+
+func nonInteractiveEnvForContext(ctx context.Context, dir string) []string {
+	base := os.Environ()
+	if ctx != nil {
+		if overlay, ok := ctx.Value(environmentContextKey{}).(runenv.Overlay); ok {
+			base = overlay.Apply(base)
+		}
+	}
+	return NonInteractiveEnvFrom(base, dir)
+}
 
 // NonInteractiveEnv returns the environment for a subprocess that may invoke
 // git, with git forced into a fully non-interactive mode. It is intended for
@@ -26,10 +50,22 @@ import (
 // here to preserve symlinked working-directory paths (for example /tmp vs
 // /private/tmp on macOS, which os.Getwd reports differently depending on PWD).
 func NonInteractiveEnv(dir string) []string {
-	env := append(os.Environ(),
+	return NonInteractiveEnvFrom(os.Environ(), dir)
+}
+
+// NonInteractiveEnvFrom is NonInteractiveEnv applied to an explicit base
+// environment. A nil base means the current process environment.
+func NonInteractiveEnvFrom(base []string, dir string) []string {
+	if base == nil {
+		base = os.Environ()
+	}
+	env := append(append([]string(nil), base...),
 		"GIT_EDITOR=true",
 		"GIT_SEQUENCE_EDITOR=true",
 		"GIT_TERMINAL_PROMPT=0",
+		// Read-only commands such as status and rev-parse must not refresh the
+		// index as a side effect. Mutating commands still take required locks.
+		"GIT_OPTIONAL_LOCKS=0",
 	)
 	// Mirror os/exec, which only injects PWD when Cmd.Env is nil, skips it on
 	// these platforms, and absolutizes Cmd.Dir first (go.dev/issue/50599):

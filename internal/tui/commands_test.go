@@ -137,7 +137,7 @@ func TestModel_Update_RerunKeyStartsNewRunAndSwitchesModel(t *testing.T) {
 		if err := json.Unmarshal(raw, &params); err != nil {
 			return nil, err
 		}
-		if params.RepoID != "repo-001" || params.Branch != "feature/foo" {
+		if params.RepoID != "repo-001" || params.Branch != "feature/foo" || params.PreviousRunID != "run-001" {
 			return nil, fmt.Errorf("unexpected rerun params: %#v", params)
 		}
 		return &ipc.RerunResult{RunID: newRun.ID}, nil
@@ -152,15 +152,15 @@ func TestModel_Update_RerunKeyStartsNewRunAndSwitchesModel(t *testing.T) {
 		}
 		return &ipc.GetRunResult{Run: newRun}, nil
 	})
-	srv.HandleStream(ipc.MethodSubscribe, func(_ context.Context, raw json.RawMessage, send func(interface{}) error) error {
+	srv.HandleStream(ipc.MethodSubscribe, func(_ context.Context, raw json.RawMessage) (ipc.StreamFunc, error) {
 		var params ipc.SubscribeParams
 		if err := json.Unmarshal(raw, &params); err != nil {
-			return err
+			return nil, err
 		}
 		if params.RunID != newRun.ID {
-			return fmt.Errorf("unexpected subscribe id: %s", params.RunID)
+			return nil, fmt.Errorf("unexpected subscribe id: %s", params.RunID)
 		}
-		return nil
+		return func(func(interface{}) error) error { return nil }, nil
 	})
 
 	client, err := ipc.Dial(sock)

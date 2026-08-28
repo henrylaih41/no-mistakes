@@ -1,21 +1,25 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // ReviewStep reviews the diff for bugs, security issues, and doc gaps.
 type ReviewStep struct {
 	// verdictMinimum is a test seam. Production uses the bounded workload
-	// floor; unit tests that exercise unrelated review behavior may set zero.
+	// floor; unit tests for unrelated review behavior set it to zero.
 	verdictMinimum func(*agent.InvocationWorkload) time.Duration
 }
 
@@ -28,41 +32,65 @@ func (s *ReviewStep) minimumVerdictDuration(workload *agent.InvocationWorkload) 
 	return minimumReviewVerdictDuration(workload)
 }
 
-func (s *ReviewStep) runVerifiedReview(
-	sctx *pipeline.StepContext,
-	reviewer agent.Agent,
-	opts agent.RunOpts,
-	first func() (*agent.Result, error),
-	dropSession func(),
-) (*agent.Result, *reviewVerdictFailure, error) {
+func (s *ReviewStep) runVerifiedReview(ctx context.Context, sctx *pipeline.StepContext, opts agent.RunOpts) (*agent.Result, *reviewVerdictFailure, error) {
 	started := time.Now()
-	result, err := first()
+	result, err := sctx.RunAgentContext(ctx, opts)
 	if err != nil {
 		return nil, nil, err
 	}
-	evidenceErr := validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
-	if evidenceErr == nil {
+	initialEvidenceErr := validateReportedReviewVerdictEvidence(sctx.Agent, result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	if initialEvidenceErr == nil {
 		return result, nil, nil
 	}
 
-	sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", reviewer.Name(), evidenceErr))
-	if dropSession != nil {
-		dropSession()
+	reviewer := "reviewer"
+	if sctx.Agent != nil && sctx.Agent.Name() != "" {
+		reviewer = sctx.Agent.Name()
 	}
+	sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", reviewer, initialEvidenceErr))
 	started = time.Now()
-	result, err = first()
+	result, err = sctx.RunAgentContext(ctx, opts)
 	if err != nil {
-		return nil, nil, err
+		if ctx.Err() != nil {
+			return nil, nil, err
+		}
+		return nil, &reviewVerdictFailure{
+			reviewer: reviewer,
+			reason:   fmt.Errorf("initial verdict: %v; cold retry failed: %w", initialEvidenceErr, err),
+		}, nil
 	}
-	evidenceErr = validateReviewVerdictEvidenceAtFloor(result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
-	if evidenceErr != nil {
-		return nil, &reviewVerdictFailure{reviewer: reviewer.Name(), reason: evidenceErr}, nil
+	retryEvidenceErr := validateReportedReviewVerdictEvidence(sctx.Agent, result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	if retryEvidenceErr != nil {
+		return nil, &reviewVerdictFailure{
+			reviewer: reviewer,
+			reason:   fmt.Errorf("initial verdict: %v; cold retry: %w", initialEvidenceErr, retryEvidenceErr),
+		}, nil
 	}
 	return result, nil, nil
 }
 
 func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
+	var cancel context.CancelFunc
+	var timeout time.Duration
+	var restoreContext func()
+	startReviewTimeout := func() {
+		if cancel != nil {
+			return
+		}
+		parentCtx := sctx.Ctx
+		ctx, cancel, timeout = reviewAgentContext(sctx)
+		sctx.Ctx = ctx
+		restoreContext = func() {
+			cancel()
+			sctx.Ctx = parentCtx
+		}
+	}
+	defer func() {
+		if restoreContext != nil {
+			restoreContext()
+		}
+	}()
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 	branch := sctx.Run.Branch
 	ignorePatterns := "none"
@@ -72,7 +100,11 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 
 	reviewScope := fmt.Sprintf("branch changes between %s and %s", baseSHA, sctx.Run.HeadSHA)
 	if sctx.Fixing {
-		reviewScope = fmt.Sprintf("current worktree and HEAD changes relative to base commit %s (starting head %s)", baseSHA, sctx.Run.HeadSHA)
+		startingHeadSHA := sctx.ReviewStartingHeadSHA
+		if startingHeadSHA == "" {
+			startingHeadSHA = sctx.Run.HeadSHA
+		}
+		reviewScope = fmt.Sprintf("current worktree and HEAD changes relative to base commit %s (starting head %s)", baseSHA, startingHeadSHA)
 	}
 
 	// Bounded workload size (changed files + net lines) for local telemetry, so
@@ -98,9 +130,10 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// not an enforced sandbox - the agent has free shell access - so the pinned
 	// regression tests guard the wording, not the runtime.
 	var fixSummary string
-	if sctx.Fixing {
+	if sctx.Fixing && !sctx.SkipFixExecution {
+		startReviewTimeout()
 		previousFindings := sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
-		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
+		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx) + testguidance.Rule
 		fixPrompt := fmt.Sprintf(
 			`Investigate previous review findings and address legitimate ones.
 
@@ -116,7 +149,6 @@ Context:
 
 Rules:
 - Always start with double checking whether the findings are legitimate.
-- The findings may come from multiple independent reviewers (see each finding's source); reconcile their agreements and contradictions yourself and apply only the legitimate fixes.
 - Before changing code, identify whether each finding is a local defect or a symptom of a deeper design, abstraction, validation, ownership, or test-coverage flaw. Prefer the smallest correct root-cause fix within the changed area over patching only the reported line.
 - If a narrow fix would leave the same class of bug likely elsewhere, fix the deepest practical cause instead.
 - Avoid resolving a finding by removing or reverting the author's intentional code in their original 1st commit. If the original change introduced something on purpose, fix it forward (e.g. add validation, handle edge cases, tighten logic) rather than deleting it. Similarly, if the original change intentionally deleted or simplified code, do not restore or re-add the removed code unless the finding is a legitimate correctness, reliability, or security issue and the smallest reasonable fix happens to reintroduce a small amount of previously deleted logic. When in doubt about whether code is intentional, leave it and report the finding as unresolved.
@@ -151,65 +183,51 @@ Previous review findings to address:
 			Workload:                workload,
 		})
 		if err != nil {
-			return nil, err
+			return nil, reviewAgentError(ctx, timeout, "agent fix", err)
 		}
 		fixSummary = summary
 	}
+	reviewTargetSHA := sctx.Run.HeadSHA
 
-	// Check whether there are any reviewable changed files after applying ignore patterns.
+	// The changed-file set is read once and viewed two ways on purpose: the
+	// ignore-filtered subset decides whether there is anything to review, while
+	// trusted path instructions are selected against the complete set (see
+	// matchPathInstructions).
 	var args []string
 	if sctx.Fixing {
-		args = []string{"diff", "--name-only", baseSHA}
+		args = []string{"diff", "--name-only", "-z", "--no-renames", baseSHA}
 	} else {
-		args = []string{"diff", "--name-only", baseSHA + ".." + sctx.Run.HeadSHA}
+		args = []string{"diff", "--name-only", "-z", "--no-renames", baseSHA + ".." + sctx.Run.HeadSHA}
 	}
 	changedFiles, err := git.Run(ctx, sctx.WorkDir, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get changed files: %w", err)
 	}
+	changed := changedPathList(changedFiles)
 
-	hasReviewableChanges := false
-	for _, path := range strings.Split(changedFiles, "\n") {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			continue
-		}
-		ignored := false
-		for _, pattern := range sctx.Config.IgnorePatterns {
-			if matchIgnorePattern(path, pattern) {
-				ignored = true
-				break
-			}
-		}
-		if !ignored {
-			hasReviewableChanges = true
-			break
-		}
-	}
-
-	if !hasReviewableChanges {
+	if len(reviewablePaths(changed, sctx.Config.IgnorePatterns)) == 0 {
 		sctx.Log("no changes to review")
 		noChangeFindings := Findings{
 			RiskLevel:     "low",
 			RiskRationale: "no reviewable changes",
 		}
 		findingsJSON, _ := json.Marshal(noChangeFindings)
-		return &pipeline.StepOutcome{
+		return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
 			Findings:   string(findingsJSON),
 			FixSummary: fixSummary,
-		}, nil
+		})
 	}
 
 	// Ask agent to review
 	sctx.Log("reviewing changes...")
+	startReviewTimeout()
 
 	// The review turn (initial and every post-fix rereview) carries the intent
 	// conformance obligation: when the intent is authoritative acceptance
 	// criteria (explicit --intent), a change that contradicts it must become a
 	// finding whose action reflects the authority needed to restore or change
 	// the criterion. The clause is empty for inferred intent, leaving the prompt
-	// unchanged. This is what makes a fixer round that removed a required
-	// behavior get corrected or park instead of silently completing.
+	// unchanged.
 	//
 	// Review is always pre-push (StepReview.Order < StepPush/PR/CI). The phase
 	// clause and the post-parse strip below keep pipeline-owned delivery
@@ -221,7 +239,19 @@ Previous review findings to address:
 	// net-deleted-author-lines git-diff backstop for the removal-of-required
 	// class - a fixer round that net-deletes author-added lines parks
 	// regardless of intent source. Held pending a scope decision.
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause()
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
+
+	// Path-scoped repository review guidance, taken from the trusted
+	// default-branch config copy (regardless of allow_repo_commands) so a pushed
+	// branch cannot steer the reviewer that gates it. Selection runs against the
+	// complete changed-file set, never the ignore-filtered one, so a pushed
+	// ignore_patterns entry cannot suppress a trusted rule. Only blocks whose
+	// glob matches a changed path are appended, so a repository with none
+	// configured - or none relevant to this diff - gets the prompt above
+	// unchanged.
+	pathInstructionMatches := matchPathInstructions(changed, sctx.Config.Review.PathInstructions)
+	logPathInstructions(sctx.Log, pathInstructionMatches)
+	pathInstructions := reviewPathInstructionsSection(pathInstructionMatches)
 
 	prompt := fmt.Sprintf(
 		agent.ReviewPromptOpening+`
@@ -237,10 +267,16 @@ Context:
 Task:
 - Read the relevant history and diff yourself.
 - Focus findings on risks introduced by changed code, but inspect surrounding code, call sites, shared helpers, tests, and invariants when needed to understand root cause.
+- Determine from the stated intent and relevant evidence whether a bug-fix change claims a durable fix or explicitly authorized short-term containment.
+- For a claimed durable fix, reconstruct the concrete failing sequence and required invariant, inspect relevant sibling paths and shared state transitions, and ask whether the same authorized failure remains reachable.
+- For any new or changed logic, construct at least one concrete input or state and trace it through the code, looking for a case that produces a wrong result without erroring.
+- When source evidence proves the failure remains reachable, report the concrete path and recommend the earliest supported shared boundary that would make the invariant hold, rather than duplicating another symptom patch.
+- Do not infer a systemic flaw from code shape, duplication, or architectural preference alone. Do not demand a shared abstraction or broad redesign without a concrete reachable path, violated invariant, or immediately competing semantic owner.
+- Do not block explicitly authorized honest containment merely because a later durable fix is possible. Do not expand user scope or turn optional broader improvements into blockers.
 - Do NOT run tests during review. The pipeline has a dedicated test step after review.
 - Analyze for bugs, risks, and code simplification opportunities.
 - "Simplification" means reducing code complexity through non-functional refactoring (e.g. deduplication, clearer control flow). It does NOT mean removing features, changing product behavior, or stripping intentional user-facing output.
-- Treat security issues, performance regressions, breaking changes, and insufficient error handling as risks.
+- Treat security issues, performance regressions, breaking changes, insufficient error handling, and a computation that returns a wrong value, label, or set without failing as risks.
 - Do a full review pass before returning. Do not stop after the first valid finding. Continue inspecting the rest of the changed code until you have enumerated all material issues you can substantiate.
 
 Rules:
@@ -252,10 +288,10 @@ Rules:
 - If the change is clean, return an empty findings array.
 - For each finding, choose exactly one action. The action states who has the authority and context to resolve the finding; it is independent of severity:
   - "no-op": informational only; no change is requested.
-  - "auto-fix": there is exactly one correct, bounded correction, established by currently authoritative evidence - the explicit intent, ratified design or design context, an existing contract or invariant, or tests that still stand. A fixer can implement and validate it without making any new product or guarantee decision. A user-visible fix can still be auto-fix when it restores already-established behavior; in that case the description MUST name the evidence that establishes it. Evidence this diff itself removed or changed does not count. Examples: an inverted comparator, a wrong state object, a missing bounds check.
+  - "auto-fix": there is exactly one correct, bounded correction, established by currently authoritative evidence - the explicit intent, ratified design or design context, an existing contract or invariant, or tests that still stand. A fixer can implement and validate it without making any new product or guarantee decision. A user-visible fix can still be auto-fix when it restores already-established behavior; in that case the description MUST name the evidence that establishes it. Evidence this diff itself removed or changed does not count.
   - "ask-master": the defect is real and stays within approved product behavior and guarantees, but resolving it safely needs non-local implementation judgment - several valid implementations, a bounded design choice, reconciliation across modules or lifecycles, or stronger contextual review. State what must be decided and the invariant the fix must preserve.
-  - "ask-user": a genuine unresolved decision owned by the user. Use only when the intent, design, contracts, invariants, and tests do not determine one outcome; at least two materially different outcomes are plausible; and the choice changes product behavior, scope, or a previously agreed guarantee (correctness, security, durability, performance, compatibility, cost, or similar). The description MUST state the exact decision, the options, the consequence of each, and a recommendation. Also use it for destructive or irreversible actions, outward-facing commitments, deploy go/no-go, project direction or priorities, or unusual spend.
-- Do not choose ask-user merely because a finding is severe, user-visible, mentions intent, or has a large diff; if approved behavior already determines the answer, use auto-fix when the correction is clear and bounded, otherwise ask-master. When uncertain HOW to fix - whether a correction is bounded - choose ask-master over ask-user. When uncertain WHAT the product should do, and the plausible outcomes differ in behavior or a guarantee, that uncertainty is the ask-user signal; do not bury it in ask-master.
+  - "ask-user": a genuine unresolved decision owned by the user. Use only when the intent, design, contracts, invariants, and tests do not determine one outcome; at least two materially different outcomes are plausible; and the choice changes product behavior, scope, or a previously agreed guarantee. The description MUST state the exact decision, the options, the consequence of each, and a recommendation. Also use it for destructive or irreversible actions, outward-facing commitments, deploy go/no-go, project direction or priorities, or unusual spend.
+- Do not choose ask-user merely because a finding is severe, user-visible, mentions intent, or has a large diff. When uncertain HOW to fix approved behavior, choose ask-master. When uncertain WHAT the product should do, and the plausible outcomes differ in behavior or a guarantee, choose ask-user.
 - For each finding, set review_scope to exactly one of:
   - "source": every source-verifiable finding, including any finding that mixes a source defect with a delivery claim.
   - "pipeline-owned-delivery": only a finding whose sole claim is that this run's remote branch, push, PR, or CI output is not present yet.
@@ -267,7 +303,7 @@ Risk assessment (after listing all findings):
 - Set risk_level to "medium" if the change has room to improve but is safe to merge first with concerns addressed as follow-ups.
 - Set risk_level to "high" if the change should not be merged without explicit human approval - it is fundamental, risky, ambiguous, or has strong negative signals.
 - Provide a one-sentence risk_rationale explaining why you chose that risk level.
-- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s`,
+- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s`,
 		branch,
 		baseSHA,
 		sctx.Run.HeadSHA,
@@ -275,106 +311,69 @@ Risk assessment (after listing all findings):
 		sctx.Repo.DefaultBranch,
 		ignorePatterns,
 		historySection,
+		pathInstructions,
 	)
 
-	// The review panel reviews the same diff independently. An empty Reviewers
-	// slice (the single-agent default) collapses to the configured agent, so
-	// this call site runs in both the initial review and every post-fix
-	// re-review - the fix agent's own re-reviewed code gets the full panel too.
-	reviewers := sctx.Reviewers
-	if len(reviewers) == 0 {
-		reviewers = []agent.Agent{sctx.Agent}
-	}
-
+	// Every review turn - the initial review and every post-fix rereview -
+	// deliberately runs session-free. Round N's fixes implement round N-1's
+	// review findings, so resuming any prior review turn's session would seat
+	// the prescriber of those fixes as their certifier: the rereview then
+	// verifies that its own prescription was implemented instead of judging
+	// whether the pipeline-authored code is correct (the mechanism behind a
+	// real shipped defect where one fix round wrote both wrong code and the
+	// test blessing it, and the resumed reviewer session passed them). The
+	// cross-round context a rereview legitimately needs travels in the
+	// explicit sanitized round-history section above; only the fixer keeps a
+	// durable session (executeFixMode), because it certifies nothing.
 	opts := agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
+		Env:        sctx.Env,
 		JSONSchema: reviewFindingsSchema,
+		OnChunk:    sctx.LogChunk,
 		Purpose:    "review",
 		Workload:   workload,
 	}
-
-	var findings Findings
-	if len(reviewers) <= 1 && len(sctx.Config.Review.Reviewers) == 0 {
-		// The default reviewer resumes one durable reviewer-role session across
-		// the initial review and post-fix rereviews. Configured panel reviewers
-		// stay independent and cold because each may use a different family,
-		// binary, or model override.
-		opts.OnChunk = sctx.LogChunk
-		result, invalid, err := s.runVerifiedReview(
-			sctx,
-			reviewers[0],
-			opts,
-			func() (*agent.Result, error) {
-				return sctx.RunAgentSession(pipeline.SessionRoleReviewer, opts)
-			},
-			func() { sctx.DropAgentSession(pipeline.SessionRoleReviewer) },
-		)
-		if err != nil {
-			return nil, fmt.Errorf("agent review: %w", err)
-		}
-		if invalid != nil {
-			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, Findings{}, fixSummary), nil
-		}
-		findings = parseReviewFindings(result, sctx.Log)
-	} else if len(reviewers) <= 1 {
-		// A configured one-member panel remains an explicitly selected reviewer
-		// and therefore does not share the implementation agent's session.
-		opts.OnChunk = sctx.LogChunk
-		result, invalid, err := s.runVerifiedReview(
-			sctx,
-			reviewers[0],
-			opts,
-			func() (*agent.Result, error) { return reviewers[0].Run(ctx, opts) },
-			nil,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("agent review: %w", err)
-		}
-		if invalid != nil {
-			return reviewVerdictTriageOutcome([]reviewVerdictFailure{*invalid}, Findings{}, fixSummary), nil
-		}
-		findings = parseReviewFindings(result, sctx.Log)
-	} else {
-		merged, invalid, err := runReviewPanel(sctx, reviewers, opts, s.minimumVerdictDuration(opts.Workload))
-		if err != nil {
-			return nil, err
-		}
-		if len(invalid) > 0 {
-			return reviewVerdictTriageOutcome(invalid, stripDeferredReviewFindings(sctx, merged), fixSummary), nil
-		}
-		findings = merged
+	result, invalid, err := s.runVerifiedReview(ctx, sctx, opts)
+	if err != nil {
+		return nil, reviewAgentError(ctx, timeout, "agent review", err)
 	}
+	if invalid != nil {
+		return reviewVerdictTriageOutcome(*invalid, fixSummary), nil
+	}
+
+	findings := parseReviewFindings(result, sctx.Log)
 
 	// Phase ownership boundary: drop findings that only claim later pipeline-
 	// owned delivery (push/PR/CI for this run) has not happened yet. Prompt
 	// guidance alone is not enough - models still emit these under
 	// authoritative intent criteria like "Open PR A unmerged".
-	findings = stripDeferredReviewFindings(sctx, findings)
+	if stripped, n := stripDeferredPipelineOwnedDeliveryFindings(findings); n > 0 {
+		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
+		findings = stripped
+	}
 
 	needsApproval := hasBlockingFindings(findings.Items)
 	findingsJSON, _ := json.Marshal(findings)
 
-	return &pipeline.StepOutcome{
+	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
 		NeedsApproval: needsApproval,
 		AutoFixable:   len(findings.Items) > 0,
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
-	}, nil
+	})
 }
 
-// parseReviewFindings decodes a reviewer's structured output into Findings,
-// falling back to the raw text as a summary when the JSON cannot be parsed.
-// log receives a note on the fallback. This is the single parse used by both
-// the single-reviewer path and every reviewer in the panel.
 func parseReviewFindings(result *agent.Result, log func(string)) Findings {
 	var findings Findings
-	if result.Output != nil {
+	if result != nil && result.Output != nil {
 		if err := json.Unmarshal(result.Output, &findings); err != nil {
 			log("could not parse structured output, using text response")
 			findings = Findings{Summary: result.Text}
 		}
 	}
+	// The evidence ID/source pair is gate authority. A reviewer may report the
+	// same words as an ordinary finding, but cannot mint a gate diagnostic.
 	for i := range findings.Items {
 		if findings.Items[i].ID == types.FindingIDReviewVerdictEvidence {
 			findings.Items[i].ID = ""
@@ -386,12 +385,50 @@ func parseReviewFindings(result *agent.Result, log func(string)) Findings {
 	return types.NormalizeFindings(findings, "review")
 }
 
-func stripDeferredReviewFindings(sctx *pipeline.StepContext, findings Findings) Findings {
-	stripped, n := stripDeferredPipelineOwnedDeliveryFindings(findings)
-	if n > 0 {
-		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
+// fixRoundProvenanceClause reframes a rereview's fix-round changes as
+// pipeline-authored code under the author-grade adversarial standard. Without
+// it, the round-history section reads as "found and fixed" and invites less
+// scrutiny of exactly the code the pipeline itself just wrote: the fixer
+// authors both code and tests in one round, so the only independent check
+// that code ever gets is this rereview.
+//
+// The same framing is emitted for an uncertified range left by a previous
+// run whose re-review did not complete, even when Fixing is false, so a
+// replacement initial review is not cold on those commits. Empty when
+// neither case applies, leaving an ordinary initial review unchanged.
+func fixRoundProvenanceClause(sctx *pipeline.StepContext) string {
+	if sctx != nil && sctx.Fixing {
+		return `
+
+Fix-round provenance:
+- This is a re-review after this run's automated fix round(s): every commit after the starting head, plus any uncommitted worktree changes, was authored by the pipeline's own fixer agent, not by the change author.
+- Review that pipeline-authored code with exactly the same adversarial standard as the author's original changes. It is unreviewed new code, not a settled resolution of the findings that prompted it.
+- Prior findings and fix summaries are claims, not evidence. Verify each claimed fix against the current code, and independently judge whether behavior the fix rounds introduced is correct, not merely whether it implements what was prescribed.
+- A test added or changed in the same fix round as the code it exercises is part of that round's claim, not independent proof: judge whether its asserted outcome is the right outcome and whether it could still pass with the code wrong.
+`
 	}
-	return stripped
+	if sctx == nil || strings.TrimSpace(sctx.UncertifiedToSHA) == "" {
+		return ""
+	}
+	fromSHA := strings.TrimSpace(sctx.UncertifiedFromSHA)
+	toSHA := strings.TrimSpace(sctx.UncertifiedToSHA)
+	return fmt.Sprintf(`
+
+Fix-round provenance:
+- Commits after %s through %s on this branch were authored by a previous run's fixer and were never certified: that run's re-review did not complete. Review them as pipeline-authored code under the same adversarial standard.
+- Review that pipeline-authored code with exactly the same adversarial standard as the author's original changes. It is unreviewed new code, not a settled resolution of the findings that prompted it.
+- Prior findings and fix summaries are claims, not evidence. Verify each claimed fix against the current code, and independently judge whether behavior the fix rounds introduced is correct, not merely whether it implements what was prescribed.
+- A test added or changed in the same fix round as the code it exercises is part of that round's claim, not independent proof: judge whether its asserted outcome is the right outcome and whether it could still pass with the code wrong.
+`, fromSHA, toSHA)
+}
+
+// approvedReviewOutcome captures the immutable commit examined by this full
+// review round. The executor persists it only if this outcome ultimately
+// completes the review step, so parked, failed, skipped, and superseded rounds
+// cannot gain or advance approval authority.
+func approvedReviewOutcome(reviewTargetSHA string, outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {
+	outcome.ReviewApprovedHeadSHA = reviewTargetSHA
+	return outcome, nil
 }
 
 func sanitizedPreviousFindingsForPrompt(raw string) string {
@@ -432,4 +469,22 @@ func sanitizePromptMultilineText(text string) string {
 		lines[i] = strings.Join(strings.Fields(lines[i]), " ")
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func reviewAgentContext(sctx *pipeline.StepContext) (context.Context, context.CancelFunc, time.Duration) {
+	timeout := config.DefaultReviewAgentTimeout
+	if sctx != nil && sctx.Config != nil && sctx.Config.ReviewAgentTimeout > 0 {
+		timeout = sctx.Config.ReviewAgentTimeout
+	}
+	ctx, cancel := context.WithTimeoutCause(sctx.Ctx, timeout, errReviewAgentTimeout)
+	return ctx, cancel, timeout
+}
+
+var errReviewAgentTimeout = errors.New("review agent timeout")
+
+func reviewAgentError(ctx context.Context, timeout time.Duration, prefix string, err error) error {
+	if timeout > 0 && errors.Is(context.Cause(ctx), errReviewAgentTimeout) {
+		return fmt.Errorf("%s timed out after %s (review agent silent for %s): %w", prefix, timeout, timeout, err)
+	}
+	return fmt.Errorf("%s: %w", prefix, err)
 }

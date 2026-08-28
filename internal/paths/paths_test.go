@@ -64,6 +64,12 @@ func TestLogPaths(t *testing.T) {
 	if got := p.DaemonLog(); got != filepath.Join(root, "logs", "daemon.log") {
 		t.Errorf("DaemonLog() = %q", got)
 	}
+	if got := p.DaemonBootstrapLog(); got != filepath.Join(root, "logs", "daemon-bootstrap.log") {
+		t.Errorf("DaemonBootstrapLog() = %q", got)
+	}
+	if got := p.ManagedServerLog(); got != filepath.Join(root, "logs", "managed-server.log") {
+		t.Errorf("ManagedServerLog() = %q", got)
+	}
 }
 
 func TestNewWithEnvOverride(t *testing.T) {
@@ -79,8 +85,19 @@ func TestNewWithEnvOverride(t *testing.T) {
 	}
 }
 
+func TestNewRejectsDefaultRootInTests(t *testing.T) {
+	t.Setenv("NM_HOME", "")
+	t.Setenv("NO_MISTAKES_ALLOW_DEFAULT_ROOT_IN_TESTS", "")
+
+	_, err := New()
+	if err == nil {
+		t.Fatal("New() should reject the default root under go test")
+	}
+}
+
 func TestNewDefault(t *testing.T) {
 	t.Setenv("NM_HOME", "")
+	t.Setenv("NO_MISTAKES_ALLOW_DEFAULT_ROOT_IN_TESTS", "1")
 
 	p, err := New()
 	if err != nil {

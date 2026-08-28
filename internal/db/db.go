@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -41,14 +42,37 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 	}
-	canonicalPath, pathErr := filepath.Abs(path)
-	if pathErr != nil {
-		canonicalPath = path
+	return &DB{sql: sqlDB, path: canonicalDBPath(path)}, nil
+}
+
+// OpenReadOnly opens an existing database without creating or migrating it.
+// It is used by pre-mutation authorization, where even schema repair would be
+// an unacceptable side effect before the caller is classified.
+func OpenReadOnly(path string) (*DB, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
 	}
-	if resolvedPath, resolveErr := filepath.EvalSymlinks(canonicalPath); resolveErr == nil {
-		canonicalPath = resolvedPath
+	sqlDB, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, fmt.Errorf("open db read-only: %w", err)
 	}
-	return &DB{sql: sqlDB, path: canonicalPath}, nil
+	sqlDB.SetMaxOpenConns(1)
+	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("open db read-only: %w", err)
+	}
+	return &DB{sql: sqlDB, path: canonicalDBPath(path)}, nil
+}
+
+func canonicalDBPath(path string) string {
+	canonical, err := filepath.Abs(path)
+	if err != nil {
+		canonical = path
+	}
+	if resolved, err := filepath.EvalSymlinks(canonical); err == nil {
+		canonical = resolved
+	}
+	return canonical
 }
 
 // isDuplicateColumnErr reports whether err is SQLite's "duplicate column name"

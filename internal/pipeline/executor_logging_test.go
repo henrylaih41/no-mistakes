@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -104,12 +105,15 @@ func TestExecutor_LogChunkThrottlesStepActivityWrites(t *testing.T) {
 		t.Fatalf("install activity counter: %v", err)
 	}
 
+	var chunkDuration time.Duration
 	step := &adaptiveCallStep{
 		name: types.StepReview,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			started := time.Now()
 			for i := 0; i < 100; i++ {
 				sctx.LogChunk(fmt.Sprintf("delta-%03d ", i))
 			}
+			chunkDuration = time.Since(started)
 			return &StepOutcome{ExitCode: 0}, nil
 		},
 	}
@@ -123,8 +127,13 @@ func TestExecutor_LogChunkThrottlesStepActivityWrites(t *testing.T) {
 	if err := counterDB.QueryRow(`SELECT n FROM step_activity_update_count`).Scan(&updates); err != nil {
 		t.Fatalf("read activity update count: %v", err)
 	}
-	if updates > 5 {
-		t.Fatalf("step activity updates = %d, want throttled count <= 5", updates)
+	// Start and completion each update activity once. Streaming may update once
+	// immediately and once per complete throttle interval after that; a fixed
+	// count is invalid when race-enabled Windows CI takes several seconds to
+	// write the chunks under filesystem contention.
+	maxUpdates := int(chunkDuration/stepActivityThrottleInterval) + 3
+	if updates > maxUpdates {
+		t.Fatalf("step activity updates = %d over %s, want throttled count <= %d", updates, chunkDuration, maxUpdates)
 	}
 }
 
@@ -173,80 +182,6 @@ func (lifecycleTestAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Res
 }
 
 func (lifecycleTestAgent) Close() error { return nil }
-
-type concurrentPanelLifecycleAgent struct {
-	name    string
-	barrier *sync.WaitGroup
-}
-
-func (a concurrentPanelLifecycleAgent) Name() string { return a.name }
-
-func (a concurrentPanelLifecycleAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-	a.barrier.Done()
-	a.barrier.Wait()
-	for i := 0; i < 32; i++ {
-		opts.OnLifecycle(agent.LifecycleEvent{
-			Agent:   a.name,
-			Phase:   agent.LifecyclePhaseRetry,
-			Message: fmt.Sprintf("%s lifecycle %02d", a.name, i),
-		})
-		runtime.Gosched()
-	}
-	return &agent.Result{Text: "ok"}, nil
-}
-
-func (a concurrentPanelLifecycleAgent) Close() error { return nil }
-
-func TestExecutor_ReviewPanelLifecycleLoggingConcurrent(t *testing.T) {
-	database, p, run, repo := setupTest(t)
-	workDir := t.TempDir()
-
-	var barrier sync.WaitGroup
-	barrier.Add(3)
-	reviewers := []agent.Agent{
-		concurrentPanelLifecycleAgent{name: "codex", barrier: &barrier},
-		concurrentPanelLifecycleAgent{name: "claude", barrier: &barrier},
-		concurrentPanelLifecycleAgent{name: "grok", barrier: &barrier},
-	}
-	step := &adaptiveCallStep{
-		name: types.StepReview,
-		fn: func(sctx *StepContext) (*StepOutcome, error) {
-			for _, result := range agent.FanOut(sctx.Ctx, sctx.Reviewers, agent.RunOpts{}, 0) {
-				if result.Err != nil {
-					return nil, result.Err
-				}
-			}
-			return &StepOutcome{ExitCode: 0}, nil
-		},
-	}
-
-	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
-	exec.SetReviewers(reviewers)
-	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	logPath := filepath.Join(p.RunLogDir(run.ID), "review.log")
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
-	}
-	content := string(data)
-	for _, reviewer := range reviewers {
-		last := -1
-		for i := 0; i < 32; i++ {
-			message := fmt.Sprintf("%s lifecycle %02d", reviewer.Name(), i)
-			index := strings.Index(content, message)
-			if index < 0 {
-				t.Fatalf("log missing %q", message)
-			}
-			if index <= last {
-				t.Fatalf("lifecycle log order for %s changed at event %d", reviewer.Name(), i)
-			}
-			last = index
-		}
-	}
-}
 
 func TestExecutor_AgentLifecycleLoggedAndClearsPID(t *testing.T) {
 	database, p, run, repo := setupTest(t)
@@ -415,6 +350,66 @@ func TestExecutor_LogFileWritten_OnStepError(t *testing.T) {
 	}
 	if !strings.Contains(string(data), stepErr.Error()) {
 		t.Errorf("expected push log to contain the step error %q, got: %s", stepErr.Error(), data)
+	}
+}
+
+func TestExecutor_StepErrorRedactsCredentialURL(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	// A step error carrying a credentialled upstream URL (as a real git push
+	// rejection error would). It must be redacted before reaching the step log
+	// file, the DB error column, the returned executor error, and the IPC event.
+	const token = "ghp_secret_DO_NOT_LEAK"
+	credURL := "https://x-access-token:" + token + "@github.com/o/r.git"
+	stepErr := fmt.Errorf("push to upstream: git push %s: remote rejected: file exceeds 100.00 MB", credURL)
+
+	ec := &eventCollector{}
+	exec := NewExecutor(database, p, nil, nil, []Step{newFailStep(types.StepPush, stepErr)}, ec.handler)
+	err := exec.Execute(context.Background(), run, repo, workDir)
+	if err == nil {
+		t.Fatal("expected error from failing step")
+	}
+
+	// 1) Step log file must contain the redacted form, never the token.
+	logPath := filepath.Join(p.RunLogDir(run.ID), "push.log")
+	data, rerr := os.ReadFile(logPath)
+	if rerr != nil {
+		t.Fatalf("expected log file at %s: %v", logPath, rerr)
+	}
+	logContent := string(data)
+	if strings.Contains(logContent, token) {
+		t.Errorf("step log leaked credential: %s", logContent)
+	}
+	if !strings.Contains(logContent, "redacted@github.com/o/r.git") {
+		t.Errorf("step log missing redacted URL, got: %s", logContent)
+	}
+
+	// 2) DB step error column must not carry the token.
+	steps, _ := database.GetStepsByRun(run.ID)
+	if steps[0].Error == nil {
+		t.Fatal("expected step error to be persisted")
+	}
+	dbErr := *steps[0].Error
+	if strings.Contains(dbErr, token) {
+		t.Errorf("DB step error leaked credential: %q", dbErr)
+	}
+	if !strings.Contains(dbErr, "redacted@github.com/o/r.git") {
+		t.Errorf("DB step error missing redacted URL, got: %q", dbErr)
+	}
+
+	// 3) Returned executor error must not carry the token.
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("returned error leaked credential: %q", err.Error())
+	}
+
+	// 4) IPC step-completed event error must not carry the token.
+	ev := ec.find(ipc.EventStepCompleted, types.StepPush)
+	if ev == nil {
+		t.Fatal("expected step completed event")
+	}
+	if ev.Error != nil && strings.Contains(*ev.Error, token) {
+		t.Errorf("IPC event error leaked credential: %q", *ev.Error)
 	}
 }
 

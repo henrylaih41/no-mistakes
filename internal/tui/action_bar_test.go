@@ -357,60 +357,6 @@ func TestActionBar_FixCountUpdatesOnDeselect(t *testing.T) {
 	}
 }
 
-func TestActionBar_EvidenceOnlyTriageAllowsRealFindingFix(t *testing.T) {
-	run := testRun()
-	reason := types.ReviewTriageReasonEvidence
-	raw := `{"findings":[
-		{"id":"review-verdict-evidence","severity":"error","description":"invalid evidence","source":"review-gate"},
-		{"id":"review-codex-1-1","severity":"warning","description":"real defect","source":"codex"}
-	]}`
-	run.Steps[0].Status = types.StepStatusAwaitingTriage
-	run.Steps[0].Error = &reason
-	run.Steps[0].FindingsJSON = &raw
-	m := NewModel("", nil, run)
-
-	showSelection, allowFix, selected, total := m.awaitingActionState()
-	if !showSelection || !allowFix || selected != 1 || total != 1 {
-		t.Fatalf("action state = show=%v fix=%v selected=%d total=%d, want evidence-only real finding selectable", showSelection, allowFix, selected, total)
-	}
-	ids := m.selectedFindingIDs(types.StepReview)
-	if len(ids) != 1 || ids[0] != "review-codex-1-1" {
-		t.Fatalf("selected IDs = %v, want only real reviewer finding", ids)
-	}
-	m.findingCursor[types.StepReview] = 0
-	m.toggleCurrentFinding(types.StepReview)
-	if m.findingSelections[types.StepReview][types.FindingIDReviewVerdictEvidence] {
-		t.Fatal("diagnostic evidence finding became selectable")
-	}
-	if m.respondCmd(types.ActionFix, false) == nil {
-		t.Fatal("evidence-only triage must expose a normal fix response")
-	}
-}
-
-func TestActionBar_CapTriageKeepsFixUnavailable(t *testing.T) {
-	for _, reason := range []string{
-		types.ReviewTriageReasonFixRoundCap,
-		types.ReviewTriageReasonEvidence + "; " + types.ReviewTriageReasonFixRoundCap,
-	} {
-		t.Run(reason, func(t *testing.T) {
-			run := testRun()
-			raw := `{"findings":[{"id":"review-codex-1-1","severity":"warning","description":"real defect","source":"codex"}]}`
-			run.Steps[0].Status = types.StepStatusAwaitingTriage
-			run.Steps[0].Error = &reason
-			run.Steps[0].FindingsJSON = &raw
-			m := NewModel("", nil, run)
-
-			showSelection, allowFix, _, _ := m.awaitingActionState()
-			if showSelection || allowFix {
-				t.Fatalf("action state = show=%v fix=%v, want cap triage fix unavailable", showSelection, allowFix)
-			}
-			if m.respondCmd(types.ActionFix, false) != nil {
-				t.Fatal("cap-caused triage produced an unattributed TUI fix response")
-			}
-		})
-	}
-}
-
 func TestOutcomeBanner_InViewWhenDone(t *testing.T) {
 	run := testRun()
 	run.Status = types.RunCompleted

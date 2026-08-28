@@ -1,15 +1,14 @@
 package main
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/daemon"
 )
 
 func TestMain(m *testing.M) {
@@ -36,55 +35,64 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func TestRunDaemonProcessLogsExitBoundary(t *testing.T) {
-	tests := []struct {
-		name      string
-		runErr    error
-		wantCode  int
-		wantLevel string
-		wantAttrs []string
-	}{
-		{
-			name:      "success logs exit_code 0",
-			runErr:    nil,
-			wantCode:  0,
-			wantLevel: "level=INFO",
-			wantAttrs: []string{`reason="daemon run returned"`, "exit_code=0"},
-		},
-		{
-			name:      "run error logs exit_code 1",
-			runErr:    errors.New("boom"),
-			wantCode:  1,
-			wantLevel: "level=ERROR",
-			wantAttrs: []string{`reason="daemon run error"`, "exit_code=1", `error=boom`},
-		},
-	}
+func TestRunAttemptsOldExecutableCleanupBeforeEarlyRoutes(t *testing.T) {
+	originalArgs := os.Args
+	originalCleanup := cleanupOldExecutable
+	originalBackground := maybeHandleBackgroundCheck
+	t.Cleanup(func() {
+		os.Args = originalArgs
+		cleanupOldExecutable = originalCleanup
+		maybeHandleBackgroundCheck = originalBackground
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var logs bytes.Buffer
-			old := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-			defer slog.SetDefault(old)
+	t.Run("daemon", func(t *testing.T) {
+		called := false
+		cleanupOldExecutable = func() error {
+			called = true
+			return nil
+		}
+		os.Args = []string{"no-mistakes", "daemon", "log-sink", "--root", ""}
+		if code := run(); code != 1 {
+			t.Fatalf("run code = %d, want 1", code)
+		}
+		if !called {
+			t.Fatal("cleanup was not attempted before daemon routing")
+		}
+	})
 
-			oldRun := daemonRun
-			daemonRun = func() error { return tt.runErr }
-			defer func() { daemonRun = oldRun }()
-
-			code := runDaemonProcess("")
-			if code != tt.wantCode {
-				t.Fatalf("code = %d, want %d", code, tt.wantCode)
+	t.Run("background update", func(t *testing.T) {
+		cleanupFinished := false
+		cleanupOldExecutable = func() error {
+			cleanupFinished = true
+			return fmt.Errorf("executable is still locked")
+		}
+		maybeHandleBackgroundCheck = func([]string) (bool, error) {
+			if !cleanupFinished {
+				t.Fatal("background routing ran before cleanup")
 			}
+			return true, nil
+		}
+		os.Args = []string{"no-mistakes", "--update-check", "v1.2.3"}
+		if code := run(); code != 0 {
+			t.Fatalf("run code = %d, want 0", code)
+		}
+	})
 
-			got := logs.String()
-			wants := append([]string{`msg="daemon process exiting"`, tt.wantLevel}, tt.wantAttrs...)
-			for _, want := range wants {
-				if !strings.Contains(got, want) {
-					t.Fatalf("exit log missing %q:\n%s", want, got)
-				}
-			}
-		})
-	}
+	t.Run("interactive", func(t *testing.T) {
+		called := false
+		cleanupOldExecutable = func() error {
+			called = true
+			return nil
+		}
+		maybeHandleBackgroundCheck = originalBackground
+		os.Args = []string{"no-mistakes", "--version"}
+		if code := run(); code != 0 {
+			t.Fatalf("run code = %d, want 0", code)
+		}
+		if !called {
+			t.Fatal("cleanup was not attempted before interactive routing")
+		}
+	})
 }
 
 func TestCLILogWriterReturnsDiscardWhenLogsDirMissing(t *testing.T) {
@@ -171,6 +179,68 @@ func TestDaemonRunRootFromArgs(t *testing.T) {
 				t.Fatalf("got (%q, %v), want (%q, %v)", gotRoot, gotOK, tt.wantRoot, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestDaemonLogSinkRootFromArgs(t *testing.T) {
+	root, ok, err := daemonLogSinkRootFromArgs([]string{"daemon", "log-sink", "--root", "/tmp/nm"})
+	if err != nil || !ok || root != "/tmp/nm" {
+		t.Fatalf("got (%q, %v, %v)", root, ok, err)
+	}
+	for _, args := range [][]string{
+		{"daemon", "status"},
+		{"daemon", "log-sink"},
+		{"daemon", "log-sink", "--root=/tmp/nm"},
+	} {
+		if root, ok, err := daemonLogSinkRootFromArgs(args); err != nil || ok || root != "" {
+			t.Fatalf("%v got (%q, %v, %v)", args, root, ok, err)
+		}
+	}
+}
+
+func TestWriteDaemonRunErrorPreservesBootstrapSinkOwnership(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("NM_HOME", root)
+	logDir := filepath.Join(root, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bootstrapPath := filepath.Join(logDir, "daemon-bootstrap.log")
+	const existing = "active output\n"
+	if err := os.WriteFile(bootstrapPath, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, err := os.OpenFile(bootstrapPath, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDaemonRunError(bootstrap, fmt.Errorf("startup rejected: %w", daemon.ErrSingletonLockHeld))
+	if err := bootstrap.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(bootstrapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != existing {
+		t.Fatalf("bootstrap log = %q, want %q", got, existing)
+	}
+
+	terminalPath := filepath.Join(root, "terminal")
+	terminal, err := os.Create(terminalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDaemonRunError(terminal, fmt.Errorf("startup rejected: %w", daemon.ErrSingletonLockHeld))
+	if err := terminal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	terminalOutput, err := os.ReadFile(terminalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(terminalOutput), daemon.ErrSingletonLockHeld.Error()) {
+		t.Fatalf("terminal output = %q", terminalOutput)
 	}
 }
 

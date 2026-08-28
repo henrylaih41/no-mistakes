@@ -42,6 +42,10 @@ func (a *perfRecordingAgent) SupportsSessionProvider(provider string) bool {
 	return agent.SupportsSessionProvider(a.inner, provider)
 }
 
+func (a *perfRecordingAgent) ReportsReviewVerdictEvidence(provider string) bool {
+	return agent.ReportsReviewVerdictEvidence(a.inner, provider)
+}
+
 func (a *perfRecordingAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	attempts := 0
 	previous := opts.OnAttempt
@@ -80,7 +84,7 @@ func (a *perfRecordingAgent) record(ctx context.Context, opts agent.RunOpts, age
 		Round:       a.round(),
 		Purpose:     purpose,
 		Agent:       agentName,
-		SessionMode: invocationSessionMode(opts),
+		SessionMode: invocationSessionMode(opts, result),
 		SessionKey:  sessionKey,
 		StartedAt:   startedAt.Unix(),
 		CompletedAt: completedAt.Unix(),
@@ -138,10 +142,6 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 		cacheCreation := result.Usage.CacheCreationTokens
 		inv.CacheCreationTokens = &cacheCreation
 	}
-	if result.Usage.ReasoningReported {
-		reasoning := result.Usage.ReasoningTokens
-		inv.ReasoningTokens = &reasoning
-	}
 
 	// Per-round deltas: for a resumed session whose raw counters are cumulative,
 	// subtract the same session's prior cumulative so the row cannot be mistaken
@@ -154,6 +154,11 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 		inv.DeltaInputTokens = &deltaInput
 		inv.DeltaOutputTokens = &deltaOutput
 		inv.DeltaCacheReadTokens = &deltaCache
+	}
+
+	if result.UsageReported && result.Usage.ReasoningReported {
+		reasoning := result.Usage.ReasoningTokens
+		inv.ReasoningTokens = &reasoning
 	}
 
 	if result.Metrics != nil {
@@ -207,13 +212,20 @@ func countOutputFindings(output json.RawMessage) (int, bool) {
 	return len(items), true
 }
 
-func invocationSessionMode(opts agent.RunOpts) string {
+func invocationSessionMode(opts agent.RunOpts, result *agent.Result) string {
 	switch {
 	case opts.SessionFallback:
 		return db.InvocationModeFallback
 	case opts.Session == nil:
 		return db.InvocationModeCold
 	case opts.Session.ID != "":
+		// A session was requested but the adapter reported it did not actually
+		// resume (e.g. agy silently replaced a stale conversation with a fresh
+		// one). Record as fallback so the stale-session path is not mistaken
+		// for a successful resume.
+		if result != nil && !result.Resumed {
+			return db.InvocationModeFallback
+		}
 		return db.InvocationModeResumed
 	default:
 		return db.InvocationModeStarted

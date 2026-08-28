@@ -154,29 +154,30 @@ exit 0
 	}
 }
 
-func TestGrokAgent_Run_ReapsLeakedGrandchildOnCleanExit(t *testing.T) {
+func TestClaudeAgent_LargeStdinReapsGrandchildHoldingPipesOnLeaderExit(t *testing.T) {
 	dir := t.TempDir()
+	readyFile := filepath.Join(dir, "ready")
 	pidFile := filepath.Join(dir, "grandchild.pid")
-	bin := writeFakeGrok(t, dir, `#!/bin/sh
-( sleep 120 >/dev/null 2>&1 ) &
-echo $! > "`+pidFile+`"
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
-exit 0
-`, "")
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "spawn-grandchild")
+	t.Setenv("NM_CLAUDE_STDIN_READY", readyFile)
+	t.Setenv("NM_CLAUDE_STDIN_PID", pidFile)
 
-	ga := &grokAgent{bin: bin}
-	result, err := ga.Run(context.Background(), RunOpts{Prompt: "review", Purpose: "review", CWD: t.TempDir()})
+	a := newClaudeStdinHelperAgent(t)
+	result, err := a.runOnce(context.Background(), RunOpts{
+		Prompt: strings.Repeat("p", 2*1024*1024),
+		CWD:    dir,
+	})
 	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
+		t.Fatalf("Claude run with inherited-pipe holder: %v", err)
 	}
 	if result.Text != "ok" {
-		t.Fatalf("unexpected agent text: %q", result.Text)
+		t.Fatalf("Claude result text = %q, want ok", result.Text)
 	}
 
 	grandchild := waitForPidFile(t, pidFile, 5*time.Second)
 	if !pidGoneWithin(grandchild, 5*time.Second) {
 		_ = syscall.Kill(grandchild, syscall.SIGKILL)
-		t.Fatalf("grandchild pid %d still alive after clean Grok exit", grandchild)
+		t.Fatalf("Claude grandchild pid %d survived clean leader exit", grandchild)
 	}
 }
 

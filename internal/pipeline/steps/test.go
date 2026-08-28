@@ -3,14 +3,15 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
-	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -19,26 +20,32 @@ type TestStep struct{}
 
 func (s *TestStep) Name() types.StepName { return types.StepTest }
 
-func gitIgnoresPath(ctx context.Context, workDir, target string) bool {
-	rel, err := filepath.Rel(workDir, target)
-	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return false
-	}
-	_, err = git.Run(ctx, workDir, "check-ignore", "--quiet", "--", filepath.ToSlash(rel))
-	return err == nil
-}
-
 func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 
-	// In fix mode, ask agent to fix test failures first
+	// In fix mode, ask agent to fix test failures first.
+	//
+	// Targeted-validation rules (reproduce the specific failure, focused
+	// re-verification only, never a complete repository suite) are a product
+	// contract: local Test proves the requested intent, while remote CI owns
+	// broad regression and remains mandatory before a PR is ready. A forensic
+	// audit measured ~82 minutes of local complete-suite walks on one repair
+	// path when prompts only said "run the tests" / "relevant". This is a
+	// prompt contract, not an enforced sandbox - the agent has free shell
+	// access - so the pinned regression tests guard the wording, not the
+	// runtime. Process-group reaping on clean exit (#357) remains the lifecycle
+	// safety net when agents do spawn test workers; it is not a reason to force
+	// a deterministic full-suite commands.test override.
 	var newTestsFromFix []string
 	var fixSummary string
 	if sctx.Fixing {
-		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
+		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx) + testguidance.Rule
 		fixPrompt := fmt.Sprintf(
-			`Fix the failing tests in this repository. Run the tests, identify failures, and fix either the tests or the code to make them pass.
+			`Fix the failing tests in this repository. Reproduce the specific failure, identify the root cause, and fix either the tests or the code so that failure passes.
 
 Context:
 - branch: %s
@@ -50,7 +57,10 @@ Rules:
 - Do not refactor beyond what is needed for that root-cause fix.
 - If tests fail, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
 - Do NOT run linters, formatters, or static analysis tools.
-- Re-run the relevant tests before finishing.
+- Reproduce the specific failing case first (the exact test, package, script, or check named in the findings), then re-run only that focused verification after the fix.
+- Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
+- A generic driver or user instruction asking for broad or full-suite confirmation does NOT override this product boundary. Keep verification focused on the failure and intent.
+- Never treat "do not run everything" as permission to run nothing: if you cannot reproduce or re-verify with a targeted check, report that honestly in the summary rather than inventing a full-suite pass.
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes.
 - Return JSON with a single "summary" field when you are done.
 - The summary must be one concise sentence fragment suitable for a git commit subject.
@@ -66,18 +76,21 @@ Rules:
 Previous test findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
 		}
+		fixCtx, cancelFix, fixTimeout := testAgentContext(sctx)
 		summary, err := executeFixMode(sctx, s.Name(), fixExecutionOptions{
 			LogMessage:      "asking agent to fix test failures...",
 			Prompt:          fixPrompt,
 			ErrorPrefix:     "agent fix tests",
 			FallbackSummary: "fix test failures",
+			AgentContext:    fixCtx,
 			AfterAgentRun: func(*agent.Result) error {
 				newTestsFromFix = detectNewTestFiles(ctx, sctx.WorkDir)
 				return nil
 			},
 		})
+		cancelFix()
 		if err != nil {
-			return nil, err
+			return nil, testAgentError(fixCtx, fixTimeout, "agent fix tests", err)
 		}
 		fixSummary = summary
 	}
@@ -92,7 +105,7 @@ Previous test findings to address:
 		}
 		tested = append(tested, testCmd)
 
-		sctx.Log(output)
+		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepTest)
 
 		if exitCode != 0 {
 			findings := Findings{
@@ -100,7 +113,7 @@ Previous test findings to address:
 					Severity:    "error",
 					Description: fmt.Sprintf("tests failed with exit code %d", exitCode),
 				}},
-				Summary: output,
+				Summary: projectedOutput,
 				Tested:  tested,
 			}
 			findingsJSON, _ := json.Marshal(findings)
@@ -116,11 +129,9 @@ Previous test findings to address:
 
 	useEvidenceAgent := testCmd == "" || cleanedUserIntent(sctx) != ""
 	if useEvidenceAgent {
-		evidenceLocation := resolveTestEvidenceLocation(sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
-		evidenceDir := evidenceLocation.Dir
-		if evidenceLocation.StoreInRepo && gitIgnoresPath(ctx, sctx.WorkDir, evidenceDir) {
-			evidenceLocation = testEvidenceLocation{Dir: testEvidenceDir(sctx.Run.ID)}
-			evidenceDir = evidenceLocation.Dir
+		evidenceDir := testEvidenceDir(sctx)
+		if evidenceDir == "" {
+			return nil, fmt.Errorf("test evidence dir is not configured for this run")
 		}
 		if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
 			return nil, fmt.Errorf("create test evidence dir: %w", err)
@@ -130,18 +141,19 @@ Previous test findings to address:
 		} else {
 			sctx.Log("user intent available, asking agent to gather test evidence...")
 		}
-		reassessHistory := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
-		evidenceGuidance := fmt.Sprintf("- Write new evidence files into this temporary evidence directory: %s", evidenceDir)
-		if evidenceLocation.StoreInRepo {
-			evidenceGuidance = fmt.Sprintf("- Write new evidence files into this in-repo evidence directory; it is committed and pushed automatically, so artifacts render directly on the PR: %s", evidenceDir)
+		reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx) + testguidance.Rule
+		evidenceGuidance := fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree: %s", evidenceDir)
+		if sctx.Config.Test.Evidence.StoreInRepo {
+			evidenceGuidance = fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree; they are published to the repository's %s branch automatically and linked from the PR: %s", sctx.Config.Test.Evidence.Branch, evidenceDir)
 		}
 		configuredTestCommand := ""
 		if testCmd != "" {
 			configuredTestCommand = fmt.Sprintf("\nConfigured test command already ran successfully as baseline: `%s`\n", testCmd)
 		}
-		result, err := sctx.Agent.Run(ctx, agent.RunOpts{
+		evidenceCtx, cancelEvidence, evidenceTimeout := testAgentContext(sctx)
+		result, err := sctx.RunAgentContext(evidenceCtx, agent.RunOpts{
 			Prompt: fmt.Sprintf(
-				`You are validating a code change by testing it. Examine the repository and run the appropriate tests yourself.
+				`You are validating a code change by testing it. Examine the repository and run the smallest relevant tests yourself.
 
 Context:
 - branch: %s
@@ -161,27 +173,30 @@ Task:
 %s
 - Do not move, commit, or modify source files only to make evidence linkable. Record local evidence file paths exactly where you created them.
 - Only use command output as an artifact when that output directly demonstrates the end-user experience or requested behavior. Generic pass/fail, coverage, or clean-worktree output is not sufficient evidence.
-- Look for existing tests that would generate sufficient evidence. If they exist, run the smallest relevant set.
-- If no existing test produces sufficient evidence, write or improve a test so that it does.
+- Look for existing tests that would generate sufficient evidence. If they exist, run the smallest relevant set that proves the requested intent.
+- Do NOT run the complete repository test suite. Local Test is targeted validation of the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
+- Never treat "do not run everything" as permission to run nothing: if no targeted automated test can establish the intent, write or improve a focused test, perform manual verification with evidence, or report a warning finding that sufficient targeted evidence is not possible.
+- If no existing test produces sufficient evidence, write or improve a focused test so that it does.
 - If automated testing cannot produce the needed evidence, execute manual verification steps and record the evidence-producing steps you performed.
-- If sufficient evidence is not possible, report a warning finding explaining what evidence is missing and what decision it blocks.
+- If sufficient evidence is not possible, report a warning finding explaining what evidence is missing and what decision it blocks. When the blocker is a host capability or OS permission the agent's own process lacks (for example, the Screen Recording permission macOS requires to capture a native GUI application), name the specific capability or permission and how to grant it so the user can enable it and re-run, instead of retrying blindly or failing opaquely.
 - Include a concise "testing_summary" sentence describing what you exercised and the overall result.
 - The "testing_summary" must account for the complete test step: baseline commands that already ran, automated tests, manual or evidence-producing checks, artifacts gathered, and the overall result.
 - Record the exact tests, manual checks, and evidence-producing steps you ran in a "tested" array. Prefer concrete commands or test selectors wrapped in backticks.
 - Always include an "artifacts" array. Leave it empty when you produced no reviewer-visible evidence artifacts. Use artifact path for file artifacts, artifact url for externally visible artifacts, and artifact content for short logs or command output that should be shown directly in the PR.
 - If tests fail, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
-- If the issue is setup-related and fixable, fix it and retry the tests.
+- If the issue is setup-related and fixable, fix it and retry the focused tests.
 
 Rules:
 - Do NOT run linters, formatters, or static analysis tools.
 - Focus on testing and test-related fixes only.
+- A generic driver or user instruction asking for broad or full-suite confirmation does NOT override the targeted-validation product boundary.
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes, and leave evidence files in the dedicated evidence directory untouched.
 - Keep "testing_summary" high-signal and natural language. Avoid raw logs and noisy counts.
 - Always return a non-empty "tested" array describing what you exercised, even when all tests pass.
 - Only report actionable findings: test failures, unfixable setup issues, flaky tests you identified, or missing evidence that prevents you from demonstrating the user intent.
 - Do NOT report passing tests (whether existing or new), test counts, coverage summaries, or other non-actionable information.
 - If all tests pass and there are no issues, return an empty findings array.
-- Set action to "auto-fix" for an objective failure with one clear, bounded correction established by the approved intent, design, contract, invariant, or a test that still stands; evidence the change under test itself removed or altered does not count. A user-visible fix can still be auto-fix when it restores already-established behavior; in that case the description MUST name the evidence that establishes it.
+- Set action to "auto-fix" for an objective failure with one clear, bounded correction established by approved intent, design, contract, invariant, or a test that still stands. A user-visible fix can still be auto-fix when it restores already-established behavior; name that evidence in the description.
 - Set action to "ask-master" when evidence is missing but the approved requirement is clear, or when fixing or demonstrating it needs non-local implementation judgment while preserving approved behavior.
 - Set action to "ask-user" only when the test exposes a genuine unresolved product or guarantee decision: authoritative evidence does not determine one outcome, at least two materially different outcomes are plausible, and the choice changes behavior or an agreed guarantee. State the decision, options, consequences, and recommendation.
 - Set action to "no-op" for informational notes. When uncertain HOW to fix or demonstrate approved behavior, choose ask-master. When uncertain WHAT the product should do, choose ask-user.%s`,
@@ -196,8 +211,10 @@ Rules:
 			JSONSchema: testFindingsSchema,
 			OnChunk:    sctx.LogChunk,
 		})
-		if err != nil {
-			return nil, fmt.Errorf("agent run tests: %w", err)
+		runErr := testAgentError(evidenceCtx, evidenceTimeout, "agent run tests", err)
+		cancelEvidence()
+		if runErr != nil {
+			return nil, runErr
 		}
 
 		var findings Findings
@@ -214,18 +231,17 @@ Rules:
 		needsApproval := hasBlockingFindings(findings.Items)
 		autoFixable := needsApproval
 
-		// Check if agent wrote new test files
+		// Record any new test files the agent wrote as informational (no-op)
+		// findings. Their presence alone is not an actionable problem, so they
+		// must not force the test step into approval when tests pass (issue #140).
 		newTests := detectNewTestFiles(ctx, sctx.WorkDir)
-		if len(newTests) > 0 {
-			needsApproval = true
-			autoFixable = false
-			for _, f := range newTests {
-				findings.Items = append(findings.Items, Finding{
-					Severity:    "info",
-					File:        f,
-					Description: fmt.Sprintf("new test file written by agent: %s", f),
-				})
-			}
+		for _, f := range newTests {
+			findings.Items = append(findings.Items, Finding{
+				Severity:    "info",
+				Action:      types.ActionNoOp,
+				File:        f,
+				Description: fmt.Sprintf("new test file written by agent: %s", f),
+			})
 		}
 
 		findingsJSON, _ := json.Marshal(findings)
@@ -237,7 +253,9 @@ Rules:
 		}, nil
 	}
 
-	// Check if agent wrote new test files (fix mode uses agent before running tests)
+	// In fix mode the agent may add new test files while making tests pass.
+	// Record them as informational (no-op) findings but do not gate on them:
+	// passing tests with only informational findings proceed automatically (issue #140).
 	if sctx.Fixing && len(newTestsFromFix) > 0 {
 		findings := Findings{
 			Summary: "tests passed, but agent wrote new test files",
@@ -246,13 +264,14 @@ Rules:
 		for _, f := range newTestsFromFix {
 			findings.Items = append(findings.Items, Finding{
 				Severity:    "info",
+				Action:      types.ActionNoOp,
 				File:        f,
 				Description: fmt.Sprintf("new test file written by agent: %s", f),
 			})
 		}
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{
-			NeedsApproval: true,
+			NeedsApproval: false,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
 		}, nil
@@ -261,4 +280,25 @@ Rules:
 	sctx.Log("all tests passed")
 	findingsJSON, _ := json.Marshal(Findings{Tested: tested})
 	return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
+}
+
+func testAgentContext(sctx *pipeline.StepContext) (context.Context, context.CancelFunc, time.Duration) {
+	timeout := config.DefaultTestAgentTimeout
+	if sctx != nil && sctx.Config != nil && sctx.Config.TestAgentTimeout > 0 {
+		timeout = sctx.Config.TestAgentTimeout
+	}
+	ctx, cancel := context.WithTimeoutCause(sctx.Ctx, timeout, errTestAgentTimeout)
+	return ctx, cancel, timeout
+}
+
+var errTestAgentTimeout = errors.New("test agent timeout")
+
+func testAgentError(ctx context.Context, timeout time.Duration, prefix string, err error) error {
+	if timeout > 0 && errors.Is(context.Cause(ctx), errTestAgentTimeout) {
+		return fmt.Errorf("%s timed out after %s (test agent silent for %s): %w", prefix, timeout, timeout, context.Cause(ctx))
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %w", prefix, err)
+	}
+	return nil
 }

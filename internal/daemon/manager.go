@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,15 +14,23 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/designcontext"
+	"github.com/kunchenguid/no-mistakes/internal/eval"
+	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/worktrees"
 )
 
 // StepFactory creates pipeline steps for a run. Defaults to steps.AllSteps.
@@ -47,11 +54,29 @@ type RunManager struct {
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
-	subMu          sync.RWMutex
-	subscribers    map[string][]chan<- ipc.Event // runID → subscriber channels
-	completedRuns  map[string]bool               // runIDs whose goroutines have finished
-	completedOrder []string                      // insertion order for FIFO eviction
+	// evalCaptureMu serializes automatic eval collection. Concurrent runs
+	// finishing together would otherwise write the same per-repository object
+	// pool and the same registry file at once.
+	evalCaptureMu sync.Mutex
+
+	// subMu guards the subscriber set and the per-run state revisions. It is
+	// a plain Mutex, not an RWMutex, because revision assignment and fan-out
+	// must be one atomic step: if two concurrent state events could be
+	// enqueued out of revision order, a consumer's monotonic guard would
+	// permanently discard the older one's payload. The critical section
+	// contains no blocking operation and no I/O, so hold time is
+	// O(subscribers) memory writes.
+	subMu          sync.Mutex
+	subscribers    map[string][]*eventMailbox // runID → subscriber mailboxes
+	stateRevs      map[string]int64           // runID → monotonic state revision
+	completedRuns  map[string]bool            // runIDs whose goroutines have finished
+	completedOrder []string                   // insertion order for FIFO eviction
 }
+
+// maxSubscribersPerRun bounds the global mailbox footprint: queued bytes can
+// never exceed activeRuns × maxSubscribersPerRun × mailboxMaxBytes. Refusing
+// past the cap is an ordinary error, never unbounded growth.
+const maxSubscribersPerRun = 32
 
 // NewRunManager creates a RunManager. Pass nil for stepFactory to use default steps.
 func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *RunManager {
@@ -65,7 +90,8 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		db:            database,
 		paths:         p,
 		steps:         stepFactory,
-		subscribers:   make(map[string][]chan<- ipc.Event),
+		subscribers:   make(map[string][]*eventMailbox),
+		stateRevs:     make(map[string]int64),
 		completedRuns: make(map[string]bool),
 	}
 }
@@ -78,6 +104,7 @@ type recoveredRunPlan struct {
 	cfg     *config.Config
 	agent   agent.Agent
 	steps   []pipeline.Step
+	forge   *forgecontext.Context
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -117,7 +144,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if repo == nil {
 		return nil, fmt.Errorf("run repository is missing")
 	}
-	workDir := m.paths.WorktreeDir(repo.ID, run.ID)
+	workDir := worktrees.RecordedDir(m.paths, run.WorktreePath(), repo.ID, run.ID)
 	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("worktree is missing")
 	}
@@ -142,7 +169,11 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
-	ag, err := newPipelineAgent(ctx, cfg, exec.LookPath)
+	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err != nil {
+		return nil, fmt.Errorf("resolve forge profile: %w", err)
+	}
+	ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +191,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		cfg:     cfg,
 		agent:   ag,
 		steps:   execSteps,
+		forge:   forgeCtx,
 	}, nil
 }
 
@@ -175,7 +207,7 @@ func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.A
 		if session.Agent == "" || session.SessionID == "" {
 			return fmt.Errorf("recovered run has incomplete session metadata")
 		}
-		if !agent.SupportsSessionProvider(ag, session.Agent) {
+		if session.Role == string(pipeline.SessionRoleFixer) && !agent.SupportsSessionProvider(ag, session.Agent) {
 			return fmt.Errorf("session provider %q is no longer configured", session.Agent)
 		}
 	}
@@ -208,15 +240,23 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	if err := assertGateTrustedConfigReadable(ctx, workDir, repo.DefaultBranch, trustedSHA); err != nil {
 		return nil, err
 	}
-	trustedRepoCfg, err := loadTrustedRepoConfig(ctx, workDir, trustedSHA, run.ID)
-	if err != nil {
+	trustedRepoCfg := loadTrustedRepoConfig(ctx, workDir, trustedSHA, run.ID)
+	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
+	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
+	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
 		return nil, err
 	}
-	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
-	return config.Merge(globalCfg, config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)), nil
+	cfg.TrustedConfigSHA = trustedSHA
+	if globalCfg.Eval.CaptureProvenance {
+		if err := cfg.EnableEvalProvenance(globalCfg, effectiveRepoCfg); err != nil {
+			return nil, err
+		}
+	}
+	return cfg, nil
 }
 
-func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (agent.Agent, error) {
+func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
 	if steps.IsDemoMode() {
 		return agent.NewNoop(), nil
 	}
@@ -232,6 +272,8 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 		next, err := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
 			ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
 			DisableProjectSettings: cfg.DisableProjectSettings,
+			Profile:                cfg.AgentProfileFor(name),
+			Environment:            environment,
 		})
 		if err != nil {
 			for _, existing := range created {
@@ -239,7 +281,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 			}
 			return nil, fmt.Errorf("create agent %s: %w", name, err)
 		}
-		created = append(created, agent.WithSteering(next))
+		created = append(created, agent.WithSteering(next, evidenceRoot))
 	}
 	ag := agent.NewFallback(created)
 	// Fail closed ONLY under the trusted opt-out (see startRun): refuse an
@@ -252,6 +294,13 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 		}
 	}
 	return ag, nil
+}
+
+func forgeEnvironment(ctx *forgecontext.Context) runenv.Overlay {
+	if ctx == nil {
+		return runenv.Overlay{}
+	}
+	return ctx.Environment
 }
 
 func resolveGitPath(workDir, value string) string {
@@ -287,6 +336,14 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	executor.SetOnPRMerged(func(_ context.Context, runID string) {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.relabelEvalRun(context.Background(), plan.cfg, runID)
+		}()
+	})
+	executor.SetForgeContext(plan.forge)
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[plan.run.ID] = executor
@@ -311,9 +368,12 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
-			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
-				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
-			}
+			m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
+			// A recovered run is a finished run too. This is the second of the
+			// two completion boundaries, and leaving it out is what let a run
+			// resumed after a daemon restart keep its empty evidence directory
+			// until some later run or restart happened to sweep it.
+			m.cleanupRunEvidence(plan.cfg, plan.run.ID)
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
 			delete(m.cancels, plan.run.ID)
@@ -362,54 +422,163 @@ func agentListsEqual(a, b []types.AgentName) bool {
 	return true
 }
 
-// Subscribe registers a channel to receive events for a run.
-// Returns the channel and an unsubscribe function.
-// If the run has already completed, the returned channel is immediately closed.
-func (m *RunManager) Subscribe(runID string) (<-chan ipc.Event, func()) {
-	ch := make(chan ipc.Event, 64)
+// Subscribe registers a subscriber mailbox for a run.
+//
+// The returned subscription always opens with a stream-gap frame, so a
+// subscriber's first action is always one authoritative read. That makes
+// attach and reconnect converge without each consumer needing its own
+// subscribe-then-reconcile ordering rule. A run that has already completed
+// yields that one gap and then finishes.
+func (m *RunManager) Subscribe(runID string) (*Subscription, error) {
 	m.subMu.Lock()
+	defer m.subMu.Unlock()
+
+	mb := newEventMailbox(runID, m.stateRevs[runID])
 	if m.completedRuns[runID] {
-		m.subMu.Unlock()
-		close(ch)
-		return ch, func() {}
+		mb.close()
+		return &Subscription{mb: mb, unsub: func() {}}, nil
 	}
-	m.subscribers[runID] = append(m.subscribers[runID], ch)
-	m.subMu.Unlock()
+	if len(m.subscribers[runID]) >= maxSubscribersPerRun {
+		return nil, fmt.Errorf("run %s already has the maximum of %d event subscribers", runID, maxSubscribersPerRun)
+	}
+	m.subscribers[runID] = append(m.subscribers[runID], mb)
 
+	var once sync.Once
 	unsub := func() {
-		m.subMu.Lock()
-		defer m.subMu.Unlock()
-		subs := m.subscribers[runID]
-		for i, s := range subs {
-			if s == ch {
-				m.subscribers[runID] = append(subs[:i], subs[i+1:]...)
-				break
+		once.Do(func() {
+			m.subMu.Lock()
+			subs := m.subscribers[runID]
+			for i, s := range subs {
+				if s == mb {
+					m.subscribers[runID] = append(subs[:i], subs[i+1:]...)
+					break
+				}
 			}
-		}
+			if len(m.subscribers[runID]) == 0 {
+				delete(m.subscribers, runID)
+			}
+			m.subMu.Unlock()
+			mb.release()
+		})
 	}
-	return ch, unsub
+	return &Subscription{mb: mb, unsub: unsub}, nil
 }
 
-// broadcast sends an event to all subscribers of the event's run.
+// Subscription is one subscriber's view of a run's event stream. It owns no
+// goroutine: the caller drives it with Next.
+type Subscription struct {
+	mb    *eventMailbox
+	unsub func()
+}
+
+// Next blocks until the next frame is available and returns it. ok is false
+// once the stream is finished or ctx is done.
+func (s *Subscription) Next(ctx context.Context) (ipc.Event, bool) { return s.mb.next(ctx) }
+
+// Close unsubscribes and releases every retained payload. It is idempotent.
+func (s *Subscription) Close() { s.unsub() }
+
+// StateRev returns the current monotonic state revision for a run.
+//
+// A caller serving an authoritative snapshot must sample this BEFORE reading
+// the database. Every producer writes state and only then broadcasts, so a
+// revision sampled first is never newer than the snapshot that follows it:
+// every event at or below it is already reflected in that read, and every
+// event above it still reaches the subscriber and still applies on top.
+func (m *RunManager) StateRev(runID string) int64 {
+	m.subMu.Lock()
+	defer m.subMu.Unlock()
+	return m.stateRevs[runID]
+}
+
+// broadcast stamps a state revision and publishes an event to every subscriber
+// of the event's run. It performs no blocking channel operation and no I/O, so
+// the executor can never be stalled by a slow or dead subscriber.
 func (m *RunManager) broadcast(event ipc.Event) {
-	m.subMu.RLock()
-	defer m.subMu.RUnlock()
-	for _, ch := range m.subscribers[event.RunID] {
-		select {
-		case ch <- event:
-		default:
-			slog.Debug("dropped event for slow subscriber", "run_id", event.RunID, "type", event.Type)
-		}
+	m.subMu.Lock()
+	defer m.subMu.Unlock()
+	if ipc.ClassOf(event.Type) == ipc.ClassState {
+		m.stateRevs[event.RunID]++
+		event.StateRev = m.stateRevs[event.RunID]
+	}
+	for _, mb := range m.subscribers[event.RunID] {
+		mb.publish(event)
 	}
 }
 
-// closeSubscribers closes all subscriber channels for a run and marks it
-// as completed so future Subscribe calls return an immediately-closed channel.
+// sweepRunWorktreeProcesses terminates whatever is still standing in a
+// finished run's worktree. Cancelling the run context tears down each step's
+// process group, but a descendant that called setsid(2) is no longer in any
+// group the pipeline can name - only the worktree it is standing in still
+// identifies it (see internal/procreap).
+//
+// The run's own worktree is what the sweep is pointed at, so a placement
+// outside the default tree needs no configuration lookup and cannot be hidden
+// by a worktree_roots edit made while the run was executing. The ordering rule
+// and its rationale live on procreap.SweepRunWorktree, which every removal site
+// in every package goes through.
+func (m *RunManager) sweepRunWorktreeProcesses(repoID, runID, wtDir string) {
+	procreap.SweepRunWorktree(m.paths.WorktreesDir(), repoID, runID, wtDir, "run_cleanup")
+}
+
+// cleanupRunEvidence tidies up after one finished run, then bounds the whole
+// evidence directory.
+//
+// The per-run half is deliberately os.Remove and not os.RemoveAll: it succeeds
+// only when the directory is empty, so a run that produced no artifact leaves
+// nothing behind while a run that did keeps every file. The test step creates
+// the directory before the agent decides whether it has evidence to write, so
+// without this nearly every run left a permanent empty directory - that alone
+// was the overwhelming majority of the accumulation this reaper exists to stop.
+//
+// The sweep that follows keeps a long-lived daemon converging on the retention
+// budget instead of waiting for a restart. Both halves are best effort: losing
+// a cleanup pass costs disk, while failing a finished run over it would cost
+// the user their result.
+func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
+	configured := ""
+	policy := evidenceReapPolicy{
+		Retention: config.DefaultEvidenceRetention,
+		MaxRuns:   config.DefaultEvidenceMaxRuns,
+	}
+	if cfg != nil {
+		configured = cfg.Test.Evidence.LocalRoot
+		policy = evidenceReapPolicy{
+			Retention: cfg.Test.Evidence.Retention,
+			MaxRuns:   cfg.Test.Evidence.MaxRuns,
+		}
+	}
+	root := m.paths.EvidenceRoot(configured)
+	if err := os.Remove(filepath.Join(root, runID)); err != nil && !os.IsNotExist(err) {
+		slog.Debug("run evidence kept", "run_id", runID, "reason", err)
+	}
+	reapEvidence(m.db, root, policy, time.Now())
+}
+
+// removeRunWorktree tears one run's worktree down: it sweeps whatever is still
+// standing in the directory and only then removes it.
+//
+// Every removal of a run worktree this package performs goes through here, and
+// none calls git.WorktreeRemove directly, because the ordering is easy to forget
+// at one site and invisible when forgotten - a run whose setup failed, whose
+// execution returned, or which was resumed after a crash all reach this point by
+// different routes. reason distinguishes the routes in the log.
+func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason string) {
+	m.sweepRunWorktreeProcesses(repoID, runID, wtDir)
+	if err := git.WorktreeRemove(context.Background(), gateDir, wtDir); err != nil {
+		slog.Warn("failed to remove run worktree", "reason", reason, "run_id", runID, "path", wtDir, "error", err)
+	}
+}
+
+// closeSubscribers soft-closes every subscriber for a run and marks the run
+// completed so future Subscribe calls return a gapped, immediately-finished
+// subscription. Soft close still drains queued frames and any pending gap, so
+// a coalesced terminal transition cannot be discarded by completion.
 func (m *RunManager) closeSubscribers(runID string) {
 	m.subMu.Lock()
 	defer m.subMu.Unlock()
-	for _, ch := range m.subscribers[runID] {
-		close(ch)
+	for _, mb := range m.subscribers[runID] {
+		mb.close()
 	}
 	delete(m.subscribers, runID)
 	m.completedRuns[runID] = true
@@ -418,6 +587,7 @@ func (m *RunManager) closeSubscribers(runID string) {
 		half := len(m.completedOrder) / 2
 		for _, id := range m.completedOrder[:half] {
 			delete(m.completedRuns, id)
+			delete(m.stateRevs, id)
 		}
 		m.completedOrder = m.completedOrder[half:]
 	}
@@ -448,38 +618,31 @@ func branchFromRef(ref string) string {
 //
 // trustedSHA is empty when the default branch is unknown, the fetch failed,
 // or the ref did not resolve. The caller must first reject those cases with
-// assertGateTrustedConfigReadable; returning (nil, nil) here remains defensive
-// and ensures EffectiveRepoConfig never uses pushed gate-control fields. An
-// absent .no-mistakes.yaml on a readable default-branch tree is valid.
-//
-// A .no-mistakes.yaml that IS present on the default branch but fails to parse
-// or validate (e.g. review.max_fix_rounds < 0) returns a non-nil error so the
-// caller fails the run loudly. That is a maintainer error on the trusted
-// default branch, not the untrusted pushed branch; silently swallowing it to
-// nil would normalize an invalid trusted cap to the global/default and drop
-// the maintainer's commands/agent without anyone noticing.
-func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) (*config.RepoConfig, error) {
+// assertGateTrustedConfigReadable; returning nil here remains defensive and
+// ensures EffectiveRepoConfig never uses pushed gate-control fields.
+func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) *config.RepoConfig {
 	if trustedSHA == "" {
 		// No trusted SHA means no freshly-fetched default-branch commit to
 		// read from. Return nil so EffectiveRepoConfig forces empty
 		// commands/agent - the secure default - instead of falling back to a
 		// potentially stale origin/<defaultBranch> ref.
-		return nil, nil
+		return nil
 	}
 	content, err := git.ShowFile(ctx, wtDir, trustedSHA, ".no-mistakes.yaml")
 	if err != nil {
 		// Path absent on the default branch is the common "repo has no
-		// trusted commands" case; log at debug so it isn't noisy. Treat a
-		// missing/unreadable file as no trusted config → fail closed.
+		// trusted commands" case; log at debug so it isn't noisy. Other
+		// errors are surfaced at warn so a genuinely broken read isn't
+		// silent. Either way trusted is nil → fail closed.
 		slog.Debug("trusted repo config: not present on default branch", "run_id", runID, "sha", trustedSHA, "error", err)
-		return nil, nil
+		return nil
 	}
 	trusted, err := config.LoadRepoFromBytes([]byte(content))
 	if err != nil {
-		slog.Warn("trusted repo config invalid on default branch; failing run", "run_id", runID, "sha", trustedSHA, "error", err)
-		return nil, fmt.Errorf("trusted repo config invalid on default branch: %w", err)
+		slog.Warn("trusted repo config: parse failed; commands/agent from pushed branch will be disabled", "run_id", runID, "sha", trustedSHA, "error", err)
+		return nil
 	}
-	return trusted, nil
+	return trusted
 }
 
 // assertGateTrustedConfigReadable fails a run LOUD when the trusted
@@ -525,13 +688,6 @@ func assertGateTrustedConfigReadable(ctx context.Context, wtDir, defaultBranch, 
 	return nil
 }
 
-// trustedRouteRefPrefix namespaces the per-worktree ref the trusted
-// default-branch commit is fetched into when a selected route's base URL
-// differs from the gate "origin" remote. Like the rebase step's route refs it
-// lives under refs/worktree/* so a route base that is a different repo than the
-// gate origin can never clobber the shared refs/remotes/origin/* view.
-const trustedRouteRefPrefix = "refs/worktree/no-mistakes-trusted/"
-
 // HandlePushReceived processes a push notification from the post-receive hook.
 // It creates a run, sets up a worktree, and launches pipeline execution in the background.
 func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {
@@ -554,26 +710,17 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 		return "", fmt.Errorf("unknown repo for gate %s", params.Gate)
 	}
 
-	// Resolve the selected route (or the default/legacy target) into the run's
-	// effective base/fork BEFORE the run is created. An explicit but unknown
-	// route name fails fast here so the error surfaces to the pusher via the
-	// post-receive hook instead of silently falling back.
-	effectiveRepo, effectiveRoute, err := m.resolveRepoRoute(repo, params.Route)
-	if err != nil {
-		return "", err
-	}
-
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, effectiveRepo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.DesignContextPaths, params.ReviewLoopDisabled, effectiveRoute)
+	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.DesignContextPaths)
 }
 
-// HandleRerun creates a new run for the latest gate head on a branch by
-// replaying a prior run's base and route. When there is no prior run it returns
-// an error, UNLESS expectedHead is set and matches the current gate head (the
-// `axi run` bootstrap path), in which case it starts the FIRST run from the gate
-// head with a zero-SHA base. Optional intent and design-context paths are
-// stamped/materialized onto the new run.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, expectedHead string, skipSteps []types.StepName, intent string, designContextPaths []string, reviewLoopDisabled bool) (string, error) {
+// HandleRerun creates a new run for the latest recoverable head on a branch:
+// normally the gate branch, or the latest terminal run's verified unpublished
+// head while custody remains outstanding. An explicit intent overrides the
+// selected run. Otherwise an authoritative intent is inherited byte-for-byte;
+// runs without one infer intent afresh. When no prior run exists, axi run may
+// bootstrap the first run by supplying the exact gate head it just pushed.
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID, expectedHead string, skipSteps []types.StepName, intent string, designContextPaths []string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -583,7 +730,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, expectedHe
 	}
 
 	gateDir := m.paths.RepoDir(repo.ID)
-	headSHA, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
+	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve gate head: %w", err)
 	}
@@ -602,7 +749,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, expectedHe
 		if latestForBranch == nil {
 			latestForBranch = run
 		}
-		if run.HeadSHA == headSHA {
+		if run.HeadSHA == gateHead {
 			matchingHead = run
 			break
 		}
@@ -616,59 +763,113 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, expectedHe
 		// expected head, so it keeps the replay-only error. Base is the zero SHA,
 		// identical to a brand-new branch's first push; the true base (merge-base
 		// with the default branch) is resolved lazily at step time.
-		if expectedHead == "" || expectedHead != headSHA {
+		if expectedHead == "" || expectedHead != gateHead {
 			return "", fmt.Errorf("no previous run for branch %s", branch)
 		}
-		effectiveRepo, effectiveRoute, err := m.resolveRepoRoute(repo, "")
-		if err != nil {
-			return "", err
-		}
-		return m.startRun(ctx, effectiveRepo, branch, headSHA, git.ZeroSHA, "bootstrap", skipSteps, intent, designContextPaths, reviewLoopDisabled, effectiveRoute)
+		return m.startRun(ctx, repo, branch, gateHead, git.ZeroSHA, "bootstrap", skipSteps, intent, designContextPaths)
 	}
-
-	sourceRun := latestForBranch
-	if matchingHead != nil {
-		sourceRun = matchingHead
-	}
-	baseSHA := sourceRun.BaseSHA
-
-	// A rerun carries no route push-option, so it re-resolves the SAME route
-	// the original push selected (persisted on the run). Re-resolving by name
-	// (rather than reusing stored URLs) honors a later edit to the route
-	// definition, and keeps a rerun target-stable instead of silently
-	// retargeting the current default route. An empty stored route resolves the
-	// default/legacy target, preserving pre-routes behavior.
-	routeName := ""
-	if sourceRun.Route != nil {
-		routeName = strings.TrimSpace(*sourceRun.Route)
-	}
-	// The named route may have been removed since the original push. Fall back
-	// to the default/legacy target rather than hard-failing the rerun, mirroring
-	// the dangling-default-route fallback in resolveRoute. resolveRepoRoute would
-	// otherwise treat a stored-but-unknown name as a fail-fast push selector.
-	if routeName != "" {
-		r, lookupErr := m.db.GetRoute(repo.ID, routeName)
-		if lookupErr != nil {
-			return "", fmt.Errorf("look up route %q: %w", routeName, lookupErr)
-		}
-		if r == nil {
-			slog.Warn("route stored on previous run no longer exists; falling back to default/legacy target for rerun", "repo_id", repo.ID, "route", routeName)
-			routeName = ""
-		}
-	}
-	effectiveRepo, effectiveRoute, err := m.resolveRepoRoute(repo, routeName)
+	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
 	if err != nil {
 		return "", err
 	}
+	selectedRun := latestForBranch
+	if previousRunID != "" {
+		selectedRun, err = m.db.GetRun(previousRunID)
+		if err != nil {
+			return "", fmt.Errorf("get selected run: %w", err)
+		}
+		if selectedRun == nil || selectedRun.RepoID != repoID || selectedRun.Branch != branch {
+			return "", fmt.Errorf("selected run %s does not belong to repo %s branch %s", previousRunID, repoID, branch)
+		}
+	}
 
-	return m.startRun(ctx, effectiveRepo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, designContextPaths, reviewLoopDisabled, effectiveRoute)
+	baseSHA := latestForBranch.BaseSHA
+	if matchingHead != nil && headSHA == gateHead {
+		baseSHA = matchingHead.BaseSHA
+	}
+
+	intentSource := db.RunIntentSourceAgent
+	if strings.TrimSpace(intent) == "" {
+		intentSource = ""
+		if selectedRun.Intent != nil && selectedRun.IntentSource != nil &&
+			db.IsAuthoritativeRunIntentSource(*selectedRun.IntentSource) {
+			// Do not normalize or regenerate this value. The selected run's
+			// persisted bytes are the canonical acceptance criteria for the
+			// replacement run.
+			intent = *selectedRun.Intent
+			intentSource = db.RunIntentSourceRerun
+		}
+	}
+
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, designContextPaths)
+}
+
+func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run) (string, error) {
+	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("resolve gate head: %w", err)
+	}
+	if latest == nil || !latest.Status.Terminal() || latest.CustodyReturnedAt != nil || latest.HeadSHA == gateHead {
+		return gateHead, nil
+	}
+	published := ""
+	if latest.LastPushedSHA != nil {
+		published = *latest.LastPushedSHA
+	} else if latest.SubmittedHeadSHA != nil {
+		published = *latest.SubmittedHeadSHA
+	}
+	if published == latest.HeadSHA || latest.TerminalHeadVerifiedAt == nil {
+		return gateHead, nil
+	}
+	recoveryRef := custody.RecoveryRef(latest.ID)
+	refTarget, refExists, refErr := git.ExactRefTarget(ctx, gateDir, recoveryRef)
+	if refErr != nil {
+		return "", fmt.Errorf("inspect terminal recovery ref for run %s: %w", latest.ID, refErr)
+	}
+	if refExists {
+		preserved, preserveErr := git.Run(ctx, gateDir, "rev-parse", recoveryRef+"^{commit}")
+		if preserveErr != nil {
+			return "", fmt.Errorf("refusing rerun: terminal recovery ref for run %s points at non-commit object %s; inspect with `no-mistakes axi status` and reconcile custody first", latest.ID, refTarget)
+		}
+		if preserved != latest.HeadSHA {
+			return "", fmt.Errorf("refusing rerun: terminal recovery ref for run %s points at %s, not recorded unpublished head %s; inspect with `no-mistakes axi status` and reconcile custody first", latest.ID, preserved, latest.HeadSHA)
+		}
+		return preserved, nil
+	}
+	if preserved, objectErr := git.Run(ctx, gateDir, "rev-parse", latest.HeadSHA+"^{commit}"); objectErr == nil && preserved == latest.HeadSHA {
+		if anchorErr := custody.PreserveRecoveryHead(ctx, gateDir, latest.ID, preserved); anchorErr != nil {
+			return "", fmt.Errorf("preserve terminal head %s before rerun: %w", preserved, anchorErr)
+		}
+		return preserved, nil
+	}
+	return "", fmt.Errorf("refusing rerun from stale gate head %s: terminal run %s recorded unpublished head %s, but that head is unavailable; inspect with `no-mistakes axi status` and reconcile custody first", gateHead, latest.ID, latest.HeadSHA)
+}
+
+// fetchRunDefaultBranch fetches the trusted branch from the refreshed
+// registration when it differs from the gate worktree's inherited origin. It
+// updates only the run worktree's existing origin tracking ref and never
+// rewrites clone or gate remote configuration. When the values agree after
+// redaction, origin remains authoritative so embedded credentials retained in
+// the gate can still authenticate without ever entering the database.
+func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) error {
+	originURL, err := git.GetRemoteURL(ctx, workDir, "origin")
+	if !repo.URLsVerified || (err == nil && safeurl.Redact(originURL) == repo.UpstreamURL) {
+		return git.FetchRemoteBranch(ctx, workDir, "origin", repo.DefaultBranch)
+	}
+	return git.FetchRemoteBranchToRef(ctx, workDir, repo.UpstreamURL, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
-// step uses it instead of inferring from transcripts. Design-context files are
-// materialized once here so all review/fix rounds use the same contract.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string, designContextPaths []string, reviewLoopDisabled bool, route string) (string, error) {
+// step uses it instead of inferring from transcripts.
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string, designContextPaths []string) (string, error) {
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, designContextPaths)
+}
+
+// startRunWithIntentSource is the common run-creation path. source is empty
+// when no intent is supplied, RunIntentSourceAgent for a new explicit
+// override, and RunIntentSourceRerun for inherited explicit intent.
+func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source string, designContextPaths []string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -692,64 +893,85 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	branchMu.Lock()
 	defer branchMu.Unlock()
 
+	// Best-effort only: a clone's remotes may change after init. Refresh the
+	// registered URLs before constructing any run-owned Git operation, but keep
+	// the exact prior repo value and continue when discovery, validation, or the
+	// atomic database replacement fails. The reason is deliberately bounded and
+	// URL-free so neither credentials nor sensitive remote material reach logs.
+	if refreshed, _, refreshErr := gate.RefreshRepoURLs(ctx, m.db, repo); refreshErr != nil {
+		slog.Warn("repository URL refresh skipped; continuing with existing registration", "repo_id", repo.ID, "reason", gate.ReasonForRefreshFailure(refreshErr))
+	} else {
+		repo = refreshed
+	}
+
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
-	// Create run record. The selected route name is persisted so a later rerun
-	// re-resolves the same target instead of falling back to the default route.
-	run, err := m.db.InsertRunWithRoute(repo.ID, branch, headSHA, baseSHA, route)
+	storedIntent := intent
+	if source != db.RunIntentSourceRerun {
+		storedIntent = strings.TrimSpace(storedIntent)
+	}
+	var runIntent *db.RunIntent
+	if strings.TrimSpace(storedIntent) != "" {
+		if source == "" {
+			source = db.RunIntentSourceAgent
+		}
+		runIntent = &db.RunIntent{Summary: storedIntent, Source: source, Score: 1}
+	}
+
+	run, err := m.db.InsertRunWithIntent(repo.ID, branch, headSHA, baseSHA, runIntent)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
-	if reviewLoopDisabled {
-		if err := m.db.UpdateRunReviewLoopDisabled(run.ID, true); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
-			trackStartFailure("stamp_review_loop_override")
-			return "", err
-		}
-		run.ReviewLoopDisabled = true
+
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
+		trackStartFailure("load_global_config")
+		return "", fmt.Errorf("load global config: %w", err)
 	}
 
-	// Stamp an agent-supplied intent onto the run before the pipeline starts,
-	// so the intent step finds it already present and skips transcript-based
-	// inference. A persist failure is non-fatal: the intent step would simply
-	// fall back to inference.
-	if trimmed := strings.TrimSpace(intent); trimmed != "" {
-		if err := m.db.UpdateRunIntent(run.ID, db.RunIntent{Summary: trimmed, Source: db.RunIntentSourceAgent, Score: 1}); err != nil {
-			slog.Warn("failed to persist agent-supplied intent", "run_id", run.ID, "error", err)
-		} else {
-			run.Intent = &trimmed
-			source := db.RunIntentSourceAgent
-			run.IntentSource = &source
-			score := 1.0
-			run.IntentScore = &score
-		}
-	}
-
-	// Create worktree from the gate bare repo.
+	// Create worktree from the gate bare repo, where this repository's
+	// worktree placement says it belongs (see internal/worktrees). This is the
+	// only point at which configuration decides placement: the resolved
+	// directory is recorded on the run before it exists on disk, and every
+	// later consumer reads that record back, so an edit to worktree_roots from
+	// here on is inert for this run.
 	gateDir := m.paths.RepoDir(repo.ID)
-	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
+	layout := worktrees.New(m.paths, globalCfg.WorktreeRoots)
+	checkouts, err := registeredCheckouts(m.db)
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("list registered checkouts: %s", err))
+		trackStartFailure("list_registered_checkouts")
+		return "", fmt.Errorf("list registered checkouts: %w", err)
+	}
+	if err := layout.ValidateCheckout(repo.WorkingPath, checkouts...); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("worktree placement: %s", err))
+		trackStartFailure("invalid_worktree_placement")
+		return "", fmt.Errorf("worktree placement: %w", err)
+	}
+	wtDir := layout.Dir(repo.ID, repo.WorkingPath, run.ID)
+	if err := m.db.SetRunWorktreeDir(run.ID, wtDir); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("record worktree placement: %s", err))
+		trackStartFailure("record_worktree_placement")
+		return "", fmt.Errorf("record worktree placement: %w", err)
+	}
 	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
 
-	// Track whether the background goroutine takes ownership of worktree cleanup.
-	// Registered immediately after WorktreeAdd succeeds so any setup failure past
-	// this point (identity copy, config load, agent build) removes the worktree
-	// with actor/reason attribution instead of leaking it without a trail.
+	// The worktree exists from here on, so cleanup ownership is armed from here
+	// on: every later setup failure returns through this defer, and the
+	// background goroutine takes ownership only once it is running. Arming it any
+	// later would leave the directory behind - in the operator's own worktree
+	// root, unswept - for whichever failures happen in between.
 	bgOwnsWorktree := false
 	defer func() {
 		if !bgOwnsWorktree {
-			_ = cleanupRunWorktree(context.Background(), gateDir, wtDir, worktreeCleanupLog{
-				Actor:  worktreeCleanupActorRunManager,
-				Reason: worktreeCleanupReasonSetupFailed,
-				RepoID: repo.ID,
-				RunID:  run.ID,
-				Path:   wtDir,
-			})
+			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_setup_failed")
 		}
 	}()
 
@@ -766,48 +988,19 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// EffectiveRepoConfig drops the pushed branch's commands/agent. Without
 	// the resolve, a stale origin/<defaultBranch> left in the shared bare
 	// repo by a previous run could serve a trusted copy that the live default
-	// branch has already removed — silently running stale shell.
-	//
-	// SECURITY: the trusted config must come from the repo the run actually
-	// targets. A selected route can repoint the run's base (repo.UpstreamURL
-	// here is the route-resolved value) at a repository other than the gate
-	// "origin" remote; reading commands/agent/allow_repo_commands from origin
-	// would trust the code-executing config of the WRONG repo. When the base
-	// differs from origin we fetch the default branch from that base URL into
-	// an isolated per-worktree ref (never the shared refs/remotes/origin/*
-	// namespace, which would clobber the gate origin's view) and pin the
-	// trusted SHA from it. An unset base, or a base equal to origin, keeps the
-	// pre-routes behavior of fetching origin into refs/remotes/origin/<default>.
+	// branch has already removed - silently running stale shell.
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
-		trustedRemote := "origin"
-		trustedRef := "refs/remotes/origin/" + repo.DefaultBranch
-		// A persisted route name is the authoritative signal that this run was
-		// retargeted. The v1.37 test and bare-gate layout may point worktree
-		// `origin` at the local mirror rather than the public upstream URL, so URL
-		// inequality alone would incorrectly classify every implicit-default run
-		// as routed and bypass its local trusted ref.
-		if run.Route != nil && strings.TrimSpace(*run.Route) != "" {
-			if base := strings.TrimSpace(repo.UpstreamURL); base != "" {
-				trustedRemote = base
-				trustedRef = trustedRouteRefPrefix + repo.DefaultBranch
-			}
-		}
-		if err := git.FetchRemoteBranchToRef(ctx, wtDir, trustedRemote, repo.DefaultBranch, trustedRef); err != nil {
-			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
-		} else if sha, err := git.ResolveRef(ctx, wtDir, trustedRef); err != nil {
+		fetchErr := fetchRunDefaultBranch(ctx, wtDir, repo)
+		if fetchErr != nil {
+			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", fetchErr)
+		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
 			slog.Warn("failed to resolve fetched default-branch ref; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else {
 			trustedSHA = sha
 		}
 	}
 
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
-	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-		trackStartFailure("load_global_config")
-		return "", fmt.Errorf("load global config: %w", err)
-	}
 	repoCfg, err := config.LoadRepo(wtDir)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
@@ -835,19 +1028,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trackStartFailure("trusted_config_unreadable")
 		return "", err
 	}
-	trustedRepoCfg, err := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
-	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("validate repo config: %s", err))
-		trackStartFailure("validate_repo_config")
-		return "", fmt.Errorf("validate repo config: %w", err)
-	}
+	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
-	if err := config.ValidateEffectiveRepoConfig(effectiveRepoCfg); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("validate repo config: %s", err))
-		trackStartFailure("validate_repo_config")
-		return "", fmt.Errorf("validate repo config: %w", err)
-	}
 	if allowRepoCommands {
 		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/agent from pushed branch", "run_id", run.ID, "branch", branch)
 	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) {
@@ -857,7 +1040,6 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		slog.Info("repo commands/agent loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
-
 	designCtx, err := designcontext.Materialize(wtDir, designContextPaths, cfg.DesignContext.Files)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load design context: %s", err))
@@ -876,10 +1058,28 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}
 		run.DesignContextJSON = &rawDesignContext
 	}
+	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("evidence_root")
+		return "", err
+	}
+	cfg.TrustedConfigSHA = trustedSHA
+	if globalCfg.Eval.CaptureProvenance {
+		if err := cfg.EnableEvalProvenance(globalCfg, effectiveRepoCfg); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("eval_provenance")
+			return "", err
+		}
+	}
+	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("resolve forge profile: %s", err))
+		trackStartFailure("resolve_forge_profile")
+		return "", fmt.Errorf("resolve forge profile: %w", err)
+	}
 
 	// Create agent. In demo mode, skip resolution and use a no-op agent.
 	var ag agent.Agent
-	var reviewerAgents []agent.Agent
 	if steps.IsDemoMode() {
 		ag = agent.NewNoop()
 	} else {
@@ -897,6 +1097,8 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			next, agErr := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
 				ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
 				DisableProjectSettings: cfg.DisableProjectSettings,
+				Profile:                cfg.AgentProfileFor(name),
+				Environment:            forgeEnvironment(forgeCtx),
 			})
 			if agErr != nil {
 				m.db.UpdateRunError(run.ID, fmt.Sprintf("create agent %s: %s", name, agErr))
@@ -906,7 +1108,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			// Steer every pipeline agent to keep writes inside the worktree and
 			// avoid mutating system state (e.g. brew/Homebrew touching
 			// /Applications), which triggers macOS App Management prompts.
-			created = append(created, agent.WithSteering(next))
+			created = append(created, agent.WithSteering(next, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot)))
 		}
 		ag = agent.NewFallback(created)
 		// Fail closed ONLY under the trusted opt-out: when the repo asked to
@@ -921,72 +1123,30 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 				return "", err
 			}
 		}
-
-		// Build the cross-family review panel (empty when review.reviewers is
-		// unset, leaving behavior unchanged). Reviewers use the SAME factory and
-		// steering as the impl agent. Any failure here must close what has been
-		// built so far before returning, since the cleanup defer below only runs
-		// once the background goroutine owns the run.
-		//
-		// Skip reviewer resolution entirely when the review step itself is
-		// skipped for this run: otherwise a missing reviewer binary or an invalid
-		// reviewer spec would fail startRun for a run that never reviews.
-		if !slices.Contains(skipSteps, types.StepReview) {
-			reviewerSpecs, revErr := cfg.ResolveReviewers(ctx, exec.LookPath)
-			if revErr != nil {
-				ag.Close()
-				m.db.UpdateRunError(run.ID, revErr.Error())
-				trackStartFailure("resolve_reviewers")
-				return "", revErr
-			}
-			for _, spec := range reviewerSpecs {
-				rev, rErr := agent.NewWithOptions(spec.Agent, cfg.ReviewerPath(spec), cfg.ReviewerArgs(spec), agent.Options{
-					ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
-					DisableProjectSettings: cfg.DisableProjectSettings,
-				})
-				if rErr != nil {
-					for _, built := range reviewerAgents {
-						_ = built.Close()
-					}
-					_ = ag.Close()
-					m.db.UpdateRunError(run.ID, fmt.Sprintf("create reviewer agent: %s", rErr))
-					trackStartFailure("create_reviewer_agent")
-					return "", fmt.Errorf("create reviewer agent: %w", rErr)
-				}
-				steered := agent.WithSteering(rev)
-				if cfg.DisableProjectSettings {
-					if err := agent.EnsureGateNeutralized(steered); err != nil {
-						_ = steered.Close()
-						for _, built := range reviewerAgents {
-							_ = built.Close()
-						}
-						_ = ag.Close()
-						m.db.UpdateRunError(run.ID, err.Error())
-						trackStartFailure("reviewer_gate_not_neutralized")
-						return "", err
-					}
-				}
-				reviewerAgents = append(reviewerAgents, steered)
-			}
-		}
 	}
 
 	execSteps := m.steps()
 	telemetry.Track("run", telemetry.Fields{
-		"action":         "started",
-		"trigger":        trigger,
-		"agent":          string(cfg.Agent),
-		"branch_role":    branchRole,
-		"step_count":     len(execSteps),
-		"demo_mode":      steps.IsDemoMode(),
-		"reviewer_count": len(reviewerAgents),
+		"action":      "started",
+		"trigger":     trigger,
+		"agent":       string(cfg.Agent),
+		"branch_role": branchRole,
+		"step_count":  len(execSteps),
+		"demo_mode":   steps.IsDemoMode(),
 	})
 
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
-	executor.SetReviewers(reviewerAgents)
+	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
+	executor.SetOnPRMerged(func(_ context.Context, runID string) {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.relabelEvalRun(context.Background(), cfg, runID)
+		}()
+	})
 
 	// Track executor.
 	done := make(chan struct{})
@@ -1026,34 +1186,23 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 				}
 				addRunPerformanceSummary(m.db, run.ID, fields)
 				telemetry.Track("run", fields)
-				if dbErr := m.db.UpdateRunErrorStatus(run.ID, errMsg, types.RunFailed); dbErr != nil {
+				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
+				var dbErr error
+				if verified {
+					dbErr = m.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, types.RunFailed, verifiedHead)
+				} else {
+					dbErr = m.db.UpdateRunErrorStatus(run.ID, errMsg, types.RunFailed)
+				}
+				if dbErr != nil {
 					slog.Error("failed to update run after panic", "run_id", run.ID, "error", dbErr)
 				}
 			}
-			// Read the cancellation cause before cancel(nil) below: cancel(nil)
-			// sets context.Cause(runCtx) to context.Canceled, which would
-			// misattribute a normally-finished run as cancelled. A genuine
-			// cancellation (daemon shutdown, user abort, superseded) has already
-			// recorded its non-nil cause by the time the finalizer runs.
-			cleanupReason, cleanupCause := classifyRunCleanup(context.Cause(runCtx))
 			cancel(nil)
 			ag.Close()
-			// Close every reviewer panel agent (no-op when none configured).
-			for _, rev := range reviewerAgents {
-				rev.Close()
-			}
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
-			// Clean up worktree.
-			_ = cleanupRunWorktree(context.Background(), gateDir, wtDir, worktreeCleanupLog{
-				Actor:     worktreeCleanupActorRunManager,
-				Reason:    cleanupReason,
-				RepoID:    repo.ID,
-				RunID:     run.ID,
-				Path:      wtDir,
-				RunStatus: string(run.Status),
-				Cause:     cleanupCause,
-			})
+			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
+			m.cleanupRunEvidence(cfg, run.ID)
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)
@@ -1094,9 +1243,105 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			telemetry.Track("run", fields)
 			slog.Info("pipeline completed", "run_id", run.ID)
 		}
+		// Collection runs here, on the finished run, because a case is only
+		// honest once the human gate decision it labels is recorded - which is
+		// exactly what reaching this point means. It is last on purpose: the
+		// pipeline's own outcome is already decided and reported above, so
+		// nothing below can change it.
+		m.autoCaptureEvalCase(runCtx, cfg, run.ID)
 	}()
 
 	return run.ID, nil
+}
+
+// evalAutoCaptureTimeout bounds one automatic collection pass. Collection is
+// local Git and SQLite work whose slowest step is seeding a repository's object
+// pool the first time it is seen, so this is generous rather than tight; the
+// pass also stops early with the run context, which Shutdown cancels.
+const evalAutoCaptureTimeout = 3 * time.Minute
+
+// autoCaptureEvalCase freezes a finished run's review passes into the local
+// eval corpus.
+//
+// Everything here is subordinate to the run: collection can be slow, can fail,
+// can find nothing, and none of that may reach the pipeline. So it swallows its
+// own panic rather than letting the run goroutine's recover mark a completed
+// run as failed, it bounds its own time, and it reports failure only to the
+// log. Runs are serialized against each other because they share one object
+// pool and one registry file; the wait is harmless, since every run holding
+// this lock has already finished its pipeline.
+//
+// A run with nothing to collect is the common case (no review step, a skipped
+// gate, rounds recorded before provenance was on), so that outcome is DEBUG.
+// Only a genuine capture fault is worth a warning.
+func (m *RunManager) autoCaptureEvalCase(ctx context.Context, cfg *config.Config, runID string) {
+	if cfg == nil || !cfg.Eval.AutoCapture || !cfg.Eval.CaptureProvenance {
+		return
+	}
+	// A cancelled or aborted run has nothing worth freezing and every Git call
+	// below would fail on the dead context anyway. Leaving early keeps that
+	// ordinary outcome out of the warning log.
+	if ctx.Err() != nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic while collecting eval case", "run_id", runID, "panic", r)
+		}
+	}()
+	m.evalCaptureMu.Lock()
+	defer m.evalCaptureMu.Unlock()
+
+	if ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, evalAutoCaptureTimeout)
+	defer cancel()
+
+	result, err := eval.AutoCapture(ctx, m.paths, m.db, runID, cfg.Eval.MaxCases)
+	switch {
+	case err != nil:
+		slog.Warn("failed to collect eval case", "run_id", runID, "error", err)
+	case result.Skipped:
+		slog.Debug("run has no eval case to collect", "run_id", runID, "reason", result.Reason)
+	default:
+		slog.Info("collected eval case", "run_id", runID, "cases", result.Captured, "pruned", result.Pruned)
+	}
+}
+
+func (m *RunManager) relabelEvalRun(ctx context.Context, cfg *config.Config, runID string) {
+	// Best-effort and off the CI step's call stack: a merge must not stall
+	// the pipeline for eval I/O. The caller holds m.wg for daemon drain.
+	if m == nil || m.paths == nil || m.db == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic while relabeling eval case", "run_id", runID, "panic", r)
+		}
+	}()
+	m.evalCaptureMu.Lock()
+	defer m.evalCaptureMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, evalAutoCaptureTimeout)
+	defer cancel()
+	store, err := eval.Open(m.paths.EvalDir())
+	if err != nil {
+		slog.Warn("failed to open eval store for relabel", "run_id", runID, "error", err)
+		return
+	}
+	defer store.Close()
+	if cfg != nil {
+		store.SetDiversifiedSize(cfg.Eval.DiversifiedSize)
+	}
+	if _, err := eval.RelabelRun(ctx, store, m.paths, m.db, runID); err != nil {
+		slog.Warn("failed to relabel eval case after merge", "run_id", runID, "error", err)
+	}
 }
 
 // addRunPerformanceSummary attaches the bounded per-run performance rollup
@@ -1136,7 +1381,7 @@ func telemetryFailedStepName(database *db.DB, runID string) string {
 	return ""
 }
 
-// HandleRespond routes an approval response to the executor for the given run.
+// HandleRespond routes a user approval action to the executor for the given run.
 func (m *RunManager) HandleRespond(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
 	return m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, "", false)
 }
@@ -1152,7 +1397,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 		return fmt.Errorf("no active executor for run %s", runID)
 	}
 
-	return exec.RespondWithOverrideReason(step, action, findingIDs, instructions, addedFindings, fixOverrideReason, autoRetry)
+	return exec.RespondWithRetryAttribution(step, action, findingIDs, instructions, addedFindings, fixOverrideReason, autoRetry)
 }
 
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent

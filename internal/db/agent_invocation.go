@@ -76,7 +76,7 @@ type AgentInvocation struct {
 	ReasoningTokens *int
 	// SubprocessWaitMS is the wall-clock this invocation spent inside tool
 	// subprocesses; DurationMS minus it is model/reasoning time. Nil when the
-	// adapter does not report subprocess timing.
+	// adapter reported no activity metrics.
 	SubprocessWaitMS *int64
 	// Delta* are the per-round token amounts for resumed durable sessions whose
 	// raw counters are cumulative: current cumulative minus the same session's

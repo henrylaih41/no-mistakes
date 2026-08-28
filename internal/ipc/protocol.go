@@ -11,6 +11,7 @@ import (
 const (
 	MethodPushReceived   = "push_received"
 	MethodGetRun         = "get_run"
+	MethodGetStepDiff    = "get_step_diff"
 	MethodGetRuns        = "get_runs"
 	MethodGetRunsForHead = "get_runs_for_head"
 	MethodGetActiveRun   = "get_active_run"
@@ -18,6 +19,8 @@ const (
 	MethodSubscribe      = "subscribe"
 	MethodRespond        = "respond"
 	MethodCancelRun      = "cancel_run"
+	MethodGateContext    = "gate_context"
+	MethodAdmitPush      = "admit_push"
 	MethodHealth         = "health"
 	MethodShutdown       = "shutdown"
 )
@@ -62,11 +65,6 @@ func (e *RPCError) Error() string { return e.Message }
 // Intent, when set, is an agent-supplied description of the change. It is
 // stamped onto the run so the intent step uses it verbatim instead of inferring
 // intent from local transcripts.
-//
-// Route, when set, is the name of a local route (a no-mistakes.route push
-// option) selecting which pre-defined base/fork the run targets. It only
-// SELECTS a route stored in the local gate database by name; it can never
-// supply a base or fork URL.
 type PushReceivedParams struct {
 	// Gate is the absolute path to the gate bare repo.
 	Gate               string           `json:"gate"`
@@ -75,14 +73,28 @@ type PushReceivedParams struct {
 	New                string           `json:"new"`
 	SkipSteps          []types.StepName `json:"skip_steps,omitempty"`
 	Intent             string           `json:"intent,omitempty"`
-	Route              string           `json:"route,omitempty"`
 	DesignContextPaths []string         `json:"design_context_paths,omitempty"`
-	ReviewLoopDisabled bool             `json:"review_loop_disabled,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.
 type GetRunParams struct {
 	RunID string `json:"run_id"`
+}
+
+// GetStepDiffParams requests the working-tree diff for a run parked at a
+// fix-review gate. The diff is derived on demand from the run's worktree and
+// is never stored, so it is the reconstruction authority for the one piece of
+// gate context that is not persisted.
+type GetStepDiffParams struct {
+	RunID string `json:"run_id"`
+}
+
+// GetStepDiffResult carries a bounded working-tree diff. Truncated reports
+// that the diff exceeded the response budget and was cut, so a very large
+// change degrades to a partial view instead of an oversized frame.
+type GetStepDiffResult struct {
+	Diff      string `json:"diff"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // GetRunsParams requests all runs for a repo.
@@ -107,16 +119,19 @@ type GetActiveRunParams struct {
 	Branch string `json:"branch,omitempty"`
 }
 
-// RerunParams requests a new run for the latest gate head on a branch. Intent
-// and DesignContextPaths, when set, are stamped/materialized onto the new run
-// like PushReceivedParams.
+// RerunParams requests a new run for the latest recoverable head on a branch.
+// The daemon resolves whether that is the gate branch or a verified unpublished
+// terminal head whose custody remains outstanding.
+// Intent, when set, overrides inherited intent and fresh inference. When empty,
+// the daemon inherits authoritative intent from the selected prior run or
+// leaves the new run to perform fresh inference.
 type RerunParams struct {
 	RepoID             string           `json:"repo_id"`
 	Branch             string           `json:"branch"`
+	PreviousRunID      string           `json:"previous_run_id,omitempty"`
 	SkipSteps          []types.StepName `json:"skip_steps,omitempty"`
 	Intent             string           `json:"intent,omitempty"`
 	DesignContextPaths []string         `json:"design_context_paths,omitempty"`
-	ReviewLoopDisabled bool             `json:"review_loop_disabled,omitempty"`
 	// ExpectedHeadSHA, when set, permits bootstrapping the FIRST run for a branch
 	// the gate already mirrors but has never run: HandleRerun starts a fresh run
 	// only when this matches the current gate head. `axi run` sets it to the head
@@ -130,7 +145,7 @@ type SubscribeParams struct {
 	RunID string `json:"run_id"`
 }
 
-// RespondParams sends an approval response for a step awaiting authority action.
+// RespondParams sends a user action for a step awaiting approval.
 //
 // Instructions carries optional per-finding notes keyed by finding ID, which
 // the daemon attaches to the corresponding finding before dispatching a fix.
@@ -138,26 +153,32 @@ type SubscribeParams struct {
 // alongside agent-produced ones. Both fields only apply when Action triggers
 // a fix round.
 type RespondParams struct {
-	RunID         string               `json:"run_id"`
-	Step          types.StepName       `json:"step"`
-	Action        types.ApprovalAction `json:"action"`
-	FindingIDs    []string             `json:"finding_ids,omitempty"`
-	Instructions  map[string]string    `json:"instructions,omitempty"`
-	AddedFindings []types.Finding      `json:"added_findings,omitempty"`
-	// AutoRetry is set by --yes when it resumes an awaiting_agent_retry park.
-	// The executor persists it separately from manual retries so repeated
-	// driver invocations can keep the auto-resume bound per step.
-	AutoRetry bool `json:"auto_retry,omitempty"`
-	// FixOverrideReason is required when a review gate has reached
-	// review.max_fix_rounds and the driver explicitly authorizes one more fix
-	// round. It is persisted on the step_rounds row whose findings triggered
-	// that override.
-	FixOverrideReason string `json:"fix_override_reason,omitempty"`
+	RunID             string               `json:"run_id"`
+	Step              types.StepName       `json:"step"`
+	Action            types.ApprovalAction `json:"action"`
+	FindingIDs        []string             `json:"finding_ids,omitempty"`
+	Instructions      map[string]string    `json:"instructions,omitempty"`
+	AddedFindings     []types.Finding      `json:"added_findings,omitempty"`
+	FixOverrideReason string               `json:"fix_override_reason,omitempty"`
+	AutoRetry         bool                 `json:"auto_retry,omitempty"`
 }
 
 // CancelRunParams cancels an active pipeline run.
 type CancelRunParams struct {
 	RunID string `json:"run_id"`
+}
+
+// GateContextParams asks the daemon to classify the authenticated caller.
+// CWD and MarkerPresent are evidence only; peer PID comes from the transport.
+type GateContextParams struct {
+	CWD           string `json:"cwd,omitempty"`
+	MarkerPresent bool   `json:"marker_present,omitempty"`
+}
+
+// AdmitPushParams asks whether a local receive hook's authenticated process
+// ancestry is allowed to mutate a managed gate ref.
+type AdmitPushParams struct {
+	Gate string `json:"gate"`
 }
 
 // HealthParams has no fields but exists for consistency.
@@ -203,6 +224,22 @@ type CancelRunResult struct {
 	OK bool `json:"ok"`
 }
 
+// GateContextResult is the privacy-safe execution-context classification.
+type GateContextResult struct {
+	Nested           bool           `json:"nested"`
+	ManagedGit       bool           `json:"managed_git,omitempty"`
+	AgentDescendant  bool           `json:"agent_descendant,omitempty"`
+	DaemonDescendant bool           `json:"daemon_descendant,omitempty"`
+	MarkerPresent    bool           `json:"marker_present,omitempty"`
+	RunID            string         `json:"run_id,omitempty"`
+	Phase            types.StepName `json:"phase,omitempty"`
+}
+
+// AdmitPushResult is returned before a receive hook permits ref mutation.
+type AdmitPushResult struct {
+	Context GateContextResult `json:"context"`
+}
+
 // HealthResult confirms the daemon is alive.
 type HealthResult struct {
 	Status string `json:"status"`
@@ -217,24 +254,31 @@ type ShutdownResult struct {
 
 // RunInfo is the IPC representation of a pipeline run.
 type RunInfo struct {
-	ID      string          `json:"id"`
-	RepoID  string          `json:"repo_id"`
-	Branch  string          `json:"branch"`
-	HeadSHA string          `json:"head_sha"`
-	BaseSHA string          `json:"base_sha"`
-	Status  types.RunStatus `json:"status"`
-	PRURL   *string         `json:"pr_url,omitempty"`
-	Error   *string         `json:"error,omitempty"`
+	ID               string          `json:"id"`
+	RepoID           string          `json:"repo_id"`
+	Branch           string          `json:"branch"`
+	HeadSHA          string          `json:"head_sha"`
+	SubmittedHeadSHA *string         `json:"submitted_head_sha,omitempty"`
+	BaseSHA          string          `json:"base_sha"`
+	Status           types.RunStatus `json:"status"`
+	PRURL            *string         `json:"pr_url,omitempty"`
+	Error            *string         `json:"error,omitempty"`
+	CIReady          bool            `json:"ci_ready,omitempty"`
+	CIReadyNoCI      bool            `json:"ci_ready_no_ci,omitempty"`
 	// AwaitingAgent is true while the run is parked at a gate awaiting the
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both
-	// are observability only and clear atomically with the durable gate exit.
+	// are observability only and clear the moment the agent responds.
 	AwaitingAgent      bool             `json:"awaiting_agent,omitempty"`
 	AwaitingAgentSince *int64           `json:"awaiting_agent_since,omitempty"`
-	ReviewLoopDisabled bool             `json:"review_loop_disabled,omitempty"`
 	Steps              []StepResultInfo `json:"steps,omitempty"`
-	CreatedAt          int64            `json:"created_at"`
-	UpdatedAt          int64            `json:"updated_at"`
+	// StateRev is the monotonic run-state revision this snapshot is at least
+	// as new as. It is sampled before the database read, so every event at or
+	// below it is already reflected here and every event above it still
+	// applies on top.
+	StateRev  int64 `json:"state_rev,omitempty"`
+	CreatedAt int64 `json:"created_at"`
+	UpdatedAt int64 `json:"updated_at"`
 }
 
 // StepResultInfo is the IPC representation of a step result.
@@ -272,12 +316,18 @@ type StepResultInfo struct {
 type EventType string
 
 const (
-	EventRunCreated    EventType = "run_created"
-	EventRunUpdated    EventType = "run_updated"
-	EventRunCompleted  EventType = "run_completed"
-	EventStepStarted   EventType = "step_started"
-	EventStepCompleted EventType = "step_completed"
-	EventLogChunk      EventType = "log_chunk"
+	EventRunCreated         EventType = "run_created"
+	EventRunUpdated         EventType = "run_updated"
+	EventRunCompleted       EventType = "run_completed"
+	EventCIReadinessChanged EventType = "ci_readiness_changed"
+	EventStepStarted        EventType = "step_started"
+	EventStepCompleted      EventType = "step_completed"
+	EventLogChunk           EventType = "log_chunk"
+	// EventStreamGap tells a subscriber that the daemon coalesced at least
+	// one state transition away under buffer pressure. StateRev is the
+	// highest revision folded into it. The subscriber must read authoritative
+	// state once; the frame carries no payload of its own.
+	EventStreamGap EventType = "stream_gap"
 )
 
 // Event is a real-time update sent to subscribers.
@@ -292,11 +342,18 @@ type Event struct {
 	Content          *string         `json:"content,omitempty"`
 	Branch           *string         `json:"branch,omitempty"`
 	Findings         *string         `json:"findings,omitempty"` // JSON-encoded findings for step_completed events
-	Diff             *string         `json:"diff,omitempty"`     // unified diff for fix_review events
 	ReportedFindings *int            `json:"reported_findings,omitempty"`
 	FixedFindings    *int            `json:"fixed_findings,omitempty"`
 	DurationMS       *int64          `json:"duration_ms,omitempty"` // execution-only duration for step events
 	PRURL            *string         `json:"pr_url,omitempty"`      // PR URL for run_updated/run_completed events
+	// StateRev is the daemon-assigned monotonic revision of the run state
+	// this event reflects, or zero for activity. A consumer applies a state
+	// delta only when StateRev exceeds the revision it has already applied,
+	// which makes a delta queued before an authoritative snapshot an
+	// idempotent no-op after it.
+	StateRev    int64 `json:"state_rev,omitempty"`
+	CIReady     *bool `json:"ci_ready,omitempty"`
+	CIReadyNoCI *bool `json:"ci_ready_no_ci,omitempty"`
 }
 
 // --- Helpers ---

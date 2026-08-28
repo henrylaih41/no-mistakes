@@ -16,11 +16,12 @@ When set, everything else moves under this root:
 
 - Global config: `$NM_HOME/config.yaml`
 - Gate repos: `$NM_HOME/repos/<id>.git`
-- Worktrees: `$NM_HOME/worktrees/<repoID>/<runID>/`
+- Worktrees: `$NM_HOME/worktrees/<repoID>/<runID>/`, unless [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) places a repository's run worktrees elsewhere
 - Logs: `$NM_HOME/logs/`
 - Database: `$NM_HOME/state.sqlite`
 - Socket / PID / singleton lock: `$NM_HOME/socket`, `$NM_HOME/daemon.pid`, and `$NM_HOME/daemon.lock`
 - Managed agent server PID records: `$NM_HOME/servers/`
+- Local evaluation cases and registry: `$NM_HOME/eval/` (created by automatic collection or an explicit `no-mistakes eval` command)
 - Managed service names get a short stable suffix derived from `$NM_HOME` so multiple installs don't collide.
 
 ## `NM_DAEMON_CONNECT_TIMEOUT`
@@ -33,6 +34,61 @@ Override how long a CLI client waits for an existing daemon socket to accept a c
 | Default | unset (falls back to the `daemon_connect_timeout` global config value, itself defaulting to `3s`) |
 
 Takes precedence over `daemon_connect_timeout` in `config.yaml`. An empty, unparsable, or non-positive value is ignored and the config value (or its default) is used instead.
+
+## `FORGEJO_BASE_URL`
+
+Canonical Forgejo web base URL used for provider discovery and forgejo-axi commands.
+
+|         |          |
+| ------- | -------- |
+| Type    | `URL`    |
+| Default | (none)   |
+
+Set this for every SSH origin, because an SSH remote does not identify the canonical Forgejo web scheme, port, or path prefix. Also set it when an HTTPS origin uses a self-hosted hostname other than `codeberg.org` or one containing `forgejo`. Recognized HTTPS origins are detected automatically, including non-default ports and path prefixes inferred from the origin. When set, the host and prefix must match the repository's upstream origin; credentials, query strings, and fragments are rejected.
+
+## `FORGEJO_TOKEN_<HOST_KEY>`
+
+Preferred host-scoped token used by forgejo-axi for Forgejo PR and CI operations.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+`HOST_KEY` is the uppercase URL host, including a non-default port, with each non-alphanumeric ASCII character replaced by its uppercase hexadecimal code point between underscores. For example, `forgejo.example:8443` uses `FORGEJO_TOKEN_FORGEJO_2E_EXAMPLE_3A_8443`. Host-scoped names prevent credentials from being reused for a look-alike host.
+
+## `FORGEJO_TOKEN`
+
+Generic Forgejo token fallback. When present, no-mistakes passes its name explicitly to forgejo-axi; prefer a host-scoped token when the daemon serves multiple Forgejo instances.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+Tokens remain in the subprocess environment: no-mistakes never puts a token value in command arguments and redacts Forgejo token values from surfaced provider errors.
+
+## `FORGEJO_TIMEOUT_MS`
+
+Per-request forgejo-axi timeout in positive integer milliseconds.
+
+|         |          |
+| ------- | -------- |
+| Type    | `int`    |
+| Default | `15000`  |
+
+The pipeline context still bounds and cancels the complete subprocess independently.
+
+## `FORGEJO_CA_FILE`
+
+Path to a replacement CA trust bundle used by forgejo-axi for HTTPS requests.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+This replaces rather than appends to the platform trust store. See [Provider Integration](/no-mistakes/guides/provider-integration/#forgejo) for provider setup.
 
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
@@ -79,27 +135,27 @@ Alternatively, authenticate the Azure DevOps extension with `az devops login`.
 
 See [Provider Integration](/no-mistakes/guides/provider-integration/#azure-devops).
 
-## `DEVIN_API_KEY`
+## `GITHUB_TOKEN`
 
-Devin API token used by the post-PR [review loop](/no-mistakes/reference/global-config/#review_loop) to explicitly (re-)trigger a Devin review via the legacy `/v1/sessions` agent session.
+GitHub token used to authenticate updater release requests.
 
-| | |
-|---|---|
-| Type | `string` |
-| Default | (none) |
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
 
-Takes precedence over `review_loop.devin_api_key_file`. When this variable is empty, no-mistakes reads the key from the configured key file (default `~/.config/devin/api_key`). When neither yields a key, the explicit re-trigger is skipped (best-effort) and the loop falls back to Devin's auto-review. The key is sent only in the Devin API `Authorization` header and is never logged. Only consulted when `review_loop.enabled` and `review_loop.retrigger` are true.
+When set, the updater sends the token as a Bearer authorization header for release metadata requests, including background update checks, and release asset downloads. `GITHUB_TOKEN` takes precedence over `GH_TOKEN`; when neither variable is set, these requests remain anonymous. The token is not printed, logged, or persisted.
 
-## `DEVIN_REVIEW_API_KEY`
+## `GH_TOKEN`
 
-Dedicated Devin Review API token (a `cog_`-prefixed service-user token, distinct from `DEVIN_API_KEY`) used by the post-PR [review loop](/no-mistakes/reference/global-config/#review_loop) to trigger a review via the Devin Review API (`POST /v3/organizations/{org}/pr-reviews`).
+Fallback GitHub token used by `no-mistakes update` when `GITHUB_TOKEN` is unset or empty.
 
-| | |
-|---|---|
-| Type | `string` |
-| Default | (none) |
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
 
-Takes precedence over `review_loop.devin_review_api_key_file` (default `~/.config/devin/review_api_key`). When this token **and** `review_loop.devin_org_id` both resolve, the loop prefers the Review API, which is not per-organization ACU-limited and so keeps working when `/v1/sessions` is exhausted (`out_of_quota`); otherwise it falls back to the legacy `DEVIN_API_KEY` / `/v1/sessions` path. The token is sent only in the Devin API `Authorization` header and is never logged. Only consulted when `review_loop.enabled` and `review_loop.retrigger` are true.
+See [`GITHUB_TOKEN`](#github_token) for the updater's authentication behavior and precedence.
 
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 
@@ -133,7 +189,7 @@ Directory holding glab's `config.yml`, consulted when detecting self-hosted GitL
 | Type    | `string` |
 | Default | (none)   |
 
-When the upstream hostname carries no `gitlab` marker, no-mistakes reads glab's configured hosts from `$GLAB_CONFIG_DIR/config.yml` to decide whether the host is a GitLab instance. It takes precedence over `XDG_CONFIG_HOME`. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-githubgitlab).
+When the upstream hostname carries no `gitlab` marker, no-mistakes reads glab's configured hosts from `$GLAB_CONFIG_DIR/config.yml` to decide whether the host is a GitLab instance. It takes precedence over `XDG_CONFIG_HOME`. A selected [`forge_profiles`](/no-mistakes/reference/global-config/#forge_profiles) entry overrides this variable for that run and removes `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`, `CI_JOB_TOKEN`, `GLAB_ENABLE_CI_AUTOLOGIN`, `GITLAB_HOST`, `GL_HOST`, `GITLAB_URI`, `GITLAB_API_HOST`, `GITLAB_REPO`, `GITLAB_GROUP`, `REMOTE_ALIAS`, and `GIT_REMOTE_URL_VAR` from all child processes. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-githubgitlab).
 
 ## `GH_CONFIG_DIR`
 
@@ -144,11 +200,11 @@ Directory holding gh's `hosts.yml`, consulted when detecting self-hosted GitHub 
 | Type    | `string` |
 | Default | (none)   |
 
-When the upstream hostname is not `github.com`, no-mistakes reads gh's configured hosts from `$GH_CONFIG_DIR/hosts.yml` to decide whether the host is a GitHub Enterprise instance. It takes precedence over `XDG_CONFIG_HOME`. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-githubgitlab).
+When the upstream hostname is not `github.com`, no-mistakes reads gh's configured hosts from `$GH_CONFIG_DIR/hosts.yml` to decide whether the host is a GitHub Enterprise instance. It takes precedence over `XDG_CONFIG_HOME`. A selected [`forge_profiles`](/no-mistakes/reference/global-config/#forge_profiles) entry overrides this variable for that run and removes `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GH_HOST`, and `GH_REPO` from all child processes. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-githubgitlab).
 
 ## `XDG_CONFIG_HOME`
 
-Config directory used to locate glab's `config.yml` for self-hosted GitLab detection and gh's `hosts.yml` for self-hosted GitHub Enterprise detection.
+Config directory used to locate glab's `config.yml` for self-hosted GitLab detection, gh's `hosts.yml` for self-hosted GitHub Enterprise detection, and tea's `config.yml` for Gitea detection.
 
 |         |             |
 | ------- | ----------- |
@@ -157,6 +213,7 @@ Config directory used to locate glab's `config.yml` for self-hosted GitLab detec
 
 When `GLAB_CONFIG_DIR` is unset, no-mistakes looks for glab's configured hosts at `$XDG_CONFIG_HOME/glab-cli/config.yml`, falling back to `~/.config/glab-cli/config.yml` when `XDG_CONFIG_HOME` is unset.
 When `GH_CONFIG_DIR` is unset, no-mistakes looks for gh's configured hosts at `$XDG_CONFIG_HOME/gh/hosts.yml`, falling back to `~/.config/gh/hosts.yml` when `XDG_CONFIG_HOME` is unset.
+tea has no CLI-specific override env var (unlike `GLAB_CONFIG_DIR`/`GH_CONFIG_DIR`); no-mistakes always looks for its configured logins at `$XDG_CONFIG_HOME/tea/config.yml`, falling back to `~/.config/tea/config.yml` when `XDG_CONFIG_HOME` is unset. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-gitea).
 
 ## `NO_MISTAKES_UMAMI_HOST`
 
@@ -182,25 +239,27 @@ When set, telemetry uses this website ID at runtime. If it is unset in a dev bui
 
 When telemetry is enabled, `no-mistakes` sends command, run, approval, fix, agent-retry, and wizard events, completed step events with `awaiting_approval`, `awaiting_agent_retry`, `fix_review`, `awaiting_triage`, or `failed` status, and pageviews for the human surfaces `/wizard` and `/tui` and the state-changing agent surfaces `/axi/run`, `/axi/respond`, and `/axi/abort` to Umami.
 Mutation pageviews are sent alongside command events, so command status and duration remain available.
-They include only flag-derived context: `/axi/run` records whether `--yes`, `--intent`, or `--skip` was present, and `/axi/respond` records the sanitized action and whether `--yes` or `--fix-override` was present.
+They include only flag-derived context: `/axi/run` records whether `--yes`, `--intent`, `--skip`, or any `--design-context` was present, and `/axi/respond` records the sanitized action plus whether `--yes` or `--fix-override` was present. Design-context paths and override reasons are not sent.
 
 Read-only surfaces (`axi` home, `axi status`, `axi logs`, `status`, `runs`) emit no pageview and rate-limit their command event: it is sent when the observed run state changed since the last emit, and otherwise at most once per 10 minutes, with the dedupe state persisted at `<NM_HOME>/telemetry-gate.json` so agent polling loops stay bounded across processes.
 The `axi logs` command event records the sanitized step, whether `--full` was present, and whether `--run` was present; `axi status` records whether `--run` was present.
+Each explicit human CLI, AXI, or TUI branch-sync check/apply attempt emits one command event and no additional pageview.
+Its fields are bounded enums and booleans only: surface, mode, state, relation, target kind, pipeline phase, PR state, result, refusal reason, dirty state, and duration.
+It never sends a SHA, run ID, path, branch name, URL, remote name, or command argument.
 
 ### What stays local and what leaves the machine
 
 Everything sent remotely is low-cardinality: command names, statuses, durations, counts, flag booleans, agent and step names, and - on the single terminal `run finished` event - the bounded performance rollup `agent_invocations`, `resumed_invocations`, and `fallback_invocations` (small counts only).
 Run IDs, repository paths, branch names, session identities, prompts, model outputs, diffs, and per-invocation performance records are never sent.
 
-Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per recorded agent invocation, plus each run's accumulated parked-at-gate time.
-Configured review-panel member invocations, including a verdict-evidence cold retry, are separate `purpose=review` records and contribute to derived local statistics and the bounded terminal run counts. Their rows include duration, workload, reported token usage, model round-trips, and tool activity when the adapter surfaces those fields.
+Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per agent invocation, plus each run's accumulated parked-at-gate time.
 Each row records run and step identity, purpose (such as review/review-fix/housekeeping), the reported model and its provider, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
 
 The additive session-fidelity fields are nullable and read back as unknown (rendered `-`) rather than a fabricated zero when the adapter did not report them, so rows written before a field existed, and adapters that do not surface a datum, stay honest.
 The legacy raw input, output, and cache-read token counters render numerically; use the nullable per-round and derived fields to determine whether the adapter reported comparable usage:
 
-- Token detail: `input_tokens`/`output_tokens`/`cache_read_tokens` (raw, cumulative across a resumed session for codex), `fresh_input_tokens` (input minus cache reads), `cache_creation_tokens` (unknown when the provider does not surface it), `reasoning_tokens`, and `delta_input_tokens`/`delta_output_tokens`/`delta_cache_read_tokens` (the correct per-round amounts, so a resumed session's cumulative counter is never mistaken for one round's usage).
+- Token detail: `input_tokens`/`output_tokens`/`cache_read_tokens` (raw, cumulative across a resumed session for codex; per-invocation for pi), `fresh_input_tokens` (input minus cache reads), `cache_creation_tokens` (unknown when the provider does not surface it), `reasoning_tokens`, and `delta_input_tokens`/`delta_output_tokens`/`delta_cache_read_tokens` (the correct per-round amounts, so a resumed session's cumulative counter is never mistaken for one round's usage).
 - Activity: `model_roundtrips` (a proxy for productive model turns), `tool_calls`, and a bounded tool-category histogram (`tool_wait_calls`, `tool_test_lint_calls`, `tool_edit_calls`, `tool_read_calls`, `tool_git_calls`, `tool_other_calls`); a compound command counts once per sub-command, so the histogram can sum higher than `tool_calls`.
 - Timing split: `subprocess_wait_ms` is the wall-clock spent inside tool subprocesses; model/reasoning time is the invocation duration minus it, clamped at zero.
 - Context: `workload_files`/`workload_lines` (bounded change size), `finding_count` (findings in the structured output), and `fallback_reason` (why a failed resume forced a fresh session, one of transient/parse/exit/spawn/unsupported/other).

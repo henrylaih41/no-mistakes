@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -20,7 +21,10 @@ var nowUnix = func() int64 { return time.Now().Unix() }
 // maxFindingDesc caps a finding description rendered inline. Findings are the
 // decision content at a gate, so the limit is generous; only pathological
 // descriptions get truncated, with the full length disclosed.
-const maxFindingDesc = 600
+const (
+	maxFindingDesc = 600
+	maxGateSummary = 1200
+)
 
 // Row types carry `toon` tags so the encoder renders a []row slice as a
 // tabular array (name[N]{cols}:) with one comma-delimited line per element.
@@ -43,7 +47,6 @@ type activeStepRow struct {
 type findingRow struct {
 	ID          string `toon:"id"`
 	Severity    string `toon:"severity"`
-	Source      string `toon:"source"`
 	File        string `toon:"file"`
 	Action      string `toon:"action"`
 	Description string `toon:"description"`
@@ -94,11 +97,13 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
-	ID      string
-	Branch  string
-	Status  string
-	HeadSHA string
-	PRURL   string
+	ID          string
+	Branch      string
+	Status      string
+	HeadSHA     string
+	PRURL       string
+	CIReady     bool
+	CIReadyNoCI bool
 	// AwaitingAgentSince is the unix-seconds time the run parked at a gate
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
@@ -112,6 +117,8 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		Branch:             r.Branch,
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
+		CIReady:            r.CIReady,
+		CIReadyNoCI:        r.CIReadyNoCI,
 		AwaitingAgentSince: r.AwaitingAgentSince,
 	}
 	if r.PRURL != nil {
@@ -189,8 +196,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 	return rv
 }
 
-// awaitingStep returns the step currently blocking on an authority decision,
-// if any.
+// awaitingStep returns the step currently blocking on a human decision, if any.
 // At most one step awaits at a time, so the first match is the active gate.
 func (rv runView) awaitingStep() (stepView, bool) {
 	for _, s := range rv.Steps {
@@ -256,7 +262,7 @@ func (rv runView) findingsTally() string {
 			continue
 		}
 		for _, f := range parsed.Items {
-			switch f.Action {
+			switch f.ActionOrDefault() {
 			case types.ActionAskMaster:
 				askMaster++
 			case types.ActionAskUser:
@@ -265,8 +271,6 @@ func (rv runView) findingsTally() string {
 				autofix++
 			case types.ActionNoOp:
 				info++
-			default:
-				askMaster++
 			}
 		}
 	}
@@ -450,6 +454,40 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 // gateFields renders the active approval gate: the awaiting step, its findings
 // table, and the next-step commands an agent can run to clear it.
 func gateFields(gate stepView) []toon.Field {
+	if gate.Status == string(types.StepStatusAwaitingRetry) {
+		return gateFieldsWithHelp(gate, []string{
+			"Run `no-mistakes axi respond --action retry` to retry this agent step without creating a review fix round",
+			fmt.Sprintf("Run `%s` to read the full step log", axiLogsFullCommand(gate.Name, "")),
+			"A long-running call is working, not stalled; the run never advances past this gate on its own.",
+		})
+	}
+	help := []string{
+		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
+	}
+	parsed, _ := types.ParseFindingsJSON(gate.FindingsJSON)
+	evidenceTriage := gate.Status == string(types.StepStatusAwaitingTriage) && types.HasReviewVerdictEvidenceFinding(parsed)
+	if gate.Status == string(types.StepStatusAwaitingTriage) && !evidenceTriage {
+		help = append(help, "Run `no-mistakes axi respond --action fix --fix-override --override-reason \"<master triage reason>\" --findings <ids>` only after master rules a residual merge-blocking")
+	} else if !evidenceTriage {
+		help = append(help, "Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)")
+	}
+	help = append(help,
+		"Run `no-mistakes axi respond --action skip` to skip this step",
+		fmt.Sprintf("Run `%s` to read the full step log", axiLogsFullCommand(gate.Name, "")),
+		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
+		preserveGateFixCommitsGuidance,
+	)
+	return gateFieldsWithHelp(gate, help)
+}
+
+func inspectionOnlyGateFields(gate stepView, runID string) []toon.Field {
+	return gateFieldsWithHelp(gate, []string{
+		fmt.Sprintf("The explicitly selected gate for run %s is inspection-only; no run-scoped response command exists", runID),
+		fmt.Sprintf("Run `%s` to read the full step log", axiLogsFullCommand(gate.Name, runID)),
+	})
+}
+
+func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 	parsed, parseErr := types.ParseFindingsJSON(gate.FindingsJSON)
 	gfields := []toon.Field{
 		{Key: "step", Value: gate.Name},
@@ -460,36 +498,19 @@ func gateFields(gate stepView) []toon.Field {
 			gfields = append(gfields, toon.Field{Key: "reason", Value: gate.Error})
 		}
 		gfields = append(gfields, toon.Field{Key: "auto_retries", Value: gate.AgentAutoRetries})
-		help := []string{
-			"Run `no-mistakes axi respond --action retry` to retry this agent step without creating a review fix round",
-			fmt.Sprintf("Run `no-mistakes axi logs --step %s --full` to read the full step log", gate.Name),
-			"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
-		}
 		return []toon.Field{
 			{Key: "gate", Value: toon.NewObject(gfields...)},
 			{Key: "help", Value: help},
 		}
 	}
-	// An unreadable findings payload must not render as a silent empty gate:
-	// name the failure so the responder knows why no findings rows follow and
-	// where to look before deciding.
 	if parseErr != nil && gate.FindingsJSON != "" {
 		gfields = append(gfields, toon.Field{Key: "findings_unreadable", Value: "the step's findings JSON could not be parsed; read the step log (`no-mistakes axi logs --step " + gate.Name + " --full`) before responding"})
 	}
 	if parsed.Summary != "" {
-		gfields = append(gfields, toon.Field{Key: "summary", Value: parsed.Summary})
+		gfields = append(gfields, toon.Field{Key: "summary", Value: truncate(parsed.Summary, maxGateSummary)})
 	}
 	if parsed.RiskLevel != "" {
 		gfields = append(gfields, toon.Field{Key: "risk", Value: parsed.RiskLevel})
-	}
-	evidenceTriage := gate.Status == string(types.StepStatusAwaitingTriage) && types.HasReviewVerdictEvidenceFinding(parsed)
-	fixRoundCapTriage := gate.Status == string(types.StepStatusAwaitingTriage) && (!evidenceTriage || strings.Contains(gate.Error, types.ReviewTriageReasonFixRoundCap))
-	selectableFinding := false
-	for _, finding := range parsed.Items {
-		if finding.ID != types.FindingIDReviewVerdictEvidence || finding.Source != types.FindingSourceReviewGate {
-			selectableFinding = true
-			break
-		}
 	}
 	// Point-of-use reminder at the review gate: review auto-fix defaults to
 	// disabled, so agents should expect blocking and both manual actions to park
@@ -498,11 +519,12 @@ func gateFields(gate stepView) []toon.Field {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking findings plus `ask-master` and `ask-user` review findings park for a decision rather than being silently self-fixed."})
 	}
 	if gate.Status == string(types.StepStatusAwaitingTriage) {
-		triage := "Review max_fix_rounds has been reached. Residual findings require master triage: approve accepted/follow-up residuals, or use a one-round override only for a merge-blocking ruling."
-		if evidenceTriage && fixRoundCapTriage {
-			triage = "Review verdict evidence failed after one cold retry and review max_fix_rounds was reached. Both causes apply: a valid source review is still required, and any further source-fix round for real reviewer findings requires an attributed one-round override. The review-verdict-evidence item is diagnostic and cannot be selected."
-		} else if evidenceTriage {
-			triage = "Review verdict evidence failed after one cold retry. A valid source review is still required; approve only after master triage, or use a normal fix round for real reviewer findings. The review-verdict-evidence item is diagnostic and cannot be selected."
+		triage := "Review max_fix_rounds has been reached. Residual findings require master triage; one more fix round requires an explicit, attributed override."
+		if types.HasReviewVerdictEvidenceFinding(parsed) {
+			triage = "Review verdict evidence failed after one cold retry. A valid source review is still required; the review-verdict-evidence item is diagnostic and cannot be selected for source-fix work."
+			if strings.Contains(gate.Error, types.ReviewTriageReasonFixRoundCap) {
+				triage += " The review max_fix_rounds cap was also reached."
+			}
 		}
 		gfields = append(gfields, toon.Field{Key: "triage", Value: triage})
 	}
@@ -511,7 +533,6 @@ func gateFields(gate stepView) []toon.Field {
 		rows = append(rows, findingRow{
 			ID:          f.ID,
 			Severity:    f.Severity,
-			Source:      f.Source,
 			File:        f.File,
 			Action:      f.Action,
 			Description: truncate(f.Description, maxFindingDesc),
@@ -519,29 +540,17 @@ func gateFields(gate stepView) []toon.Field {
 	}
 	gfields = append(gfields, toon.Field{Key: "findings", Value: rows})
 
-	help := []string{
-		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
-	}
-	if fixRoundCapTriage && selectableFinding {
-		help = append(help,
-			"Run `no-mistakes axi respond --action fix --fix-override --override-reason \"<master triage reason>\" --findings <ids>` only after master rules a residual merge-blocking",
-		)
-	} else if selectableFinding || !evidenceTriage {
-		help = append(help,
-			"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
-		)
-	}
-	help = append(help,
-		"Run `no-mistakes axi respond --action skip` to skip this step",
-		fmt.Sprintf("Run `no-mistakes axi logs --step %s --full` to read the full step log", gate.Name),
-		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
-		preserveGateFixCommitsGuidance,
-	)
-
 	return []toon.Field{
 		{Key: "gate", Value: toon.NewObject(gfields...)},
 		{Key: "help", Value: help},
 	}
+}
+
+func axiLogsFullCommand(step, runID string) string {
+	if runID != "" {
+		return fmt.Sprintf("no-mistakes axi logs --run %s --step %s --full", runID, step)
+	}
+	return fmt.Sprintf("no-mistakes axi logs --step %s --full", step)
 }
 
 // truncate shortens s to limit runes, appending a disclosure of the full size
@@ -557,12 +566,127 @@ func truncate(s string, limit int) string {
 // --- output helpers ---
 
 // axiDoc marshals an ordered set of TOON fields into a document with a trailing
-// newline. Encoding errors are impossible for the value shapes we build here,
-// so a failure degrades to an empty document rather than propagating.
+// newline. AXI fields can include arbitrary subprocess output, findings, and
+// provider data. TOON intentionally rejects most C0 controls, so make those
+// bytes visible before encoding instead of dropping the entire document.
 func axiDoc(fields ...toon.Field) string {
-	out, err := toon.MarshalString(toon.NewObject(fields...))
+	value := sanitizeTOONValue(toon.NewObject(fields...))
+	out, err := toon.MarshalString(value)
 	if err != nil {
-		return ""
+		return axiEncodingError(err)
+	}
+	return out + "\n"
+}
+
+// escapeUnsupportedTOONControls converts only C0 bytes the TOON encoder cannot
+// represent. Byte-wise copying preserves all printable Unicode and arbitrary
+// non-ASCII evidence exactly; tab, carriage return, and newline keep TOON's
+// supported escaping semantics.
+func escapeUnsupportedTOONControls(s string) string {
+	first := -1
+	for i := 0; i < len(s); i++ {
+		if unsupportedTOONControl(s[i]) {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s) + 3)
+	b.WriteString(s[:first])
+	for i := first; i < len(s); i++ {
+		if unsupportedTOONControl(s[i]) {
+			fmt.Fprintf(&b, `\x%02X`, s[i])
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func unsupportedTOONControl(b byte) bool {
+	return b < 0x20 && b != '\t' && b != '\r' && b != '\n'
+}
+
+// sanitizeTOONValue recursively copies the render value while escaping strings.
+// Keeping each concrete type intact preserves TOON's existing ordered objects,
+// struct field names, and tabular-array rendering.
+func sanitizeTOONValue(value any) any {
+	return sanitizeTOONReflect(reflect.ValueOf(value)).Interface()
+}
+
+func sanitizeTOONReflect(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+
+	switch value.Kind() {
+	case reflect.String:
+		out := reflect.New(value.Type()).Elem()
+		out.SetString(escapeUnsupportedTOONControls(value.String()))
+		return out
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.New(value.Type()).Elem()
+		out.Set(sanitizeTOONReflect(value.Elem()))
+		return out
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.New(value.Type().Elem())
+		out.Elem().Set(sanitizeTOONReflect(value.Elem()))
+		return out
+	case reflect.Struct:
+		out := reflect.New(value.Type()).Elem()
+		out.Set(value)
+		for i := 0; i < value.NumField(); i++ {
+			if value.Type().Field(i).PkgPath != "" {
+				continue
+			}
+			out.Field(i).Set(sanitizeTOONReflect(value.Field(i)))
+		}
+		return out
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			out.Index(i).Set(sanitizeTOONReflect(value.Index(i)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			out.Index(i).Set(sanitizeTOONReflect(value.Index(i)))
+		}
+		return out
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), sanitizeTOONReflect(iter.Value()))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func axiEncodingError(err error) string {
+	message := "encode AXI output: " + escapeUnsupportedTOONControls(err.Error())
+	out, fallbackErr := toon.MarshalString(toon.NewObject(toon.Field{Key: "error", Value: message}))
+	if fallbackErr != nil {
+		return "error: \"encode AXI output failed\"\n"
 	}
 	return out + "\n"
 }

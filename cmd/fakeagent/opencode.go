@@ -325,6 +325,7 @@ func (s *fakeOpencodeServer) forgetSessionDir(sessionID string) {
 // OpenCode would emit, and then returns the synchronous message response
 // with the structured payload.
 func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Request, sessionID string) {
+	started := time.Now()
 	var body struct {
 		Role  string `json:"role"`
 		Parts []struct {
@@ -356,11 +357,20 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		waitForFakeReviewEvidence(started, prompt)
 		framed, err := rewriteOpencodeFixtureSSE(s.fixture, action, sessionID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fakeagent: opencode sse patch: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if isReviewPrompt(prompt) {
+			framed, err = addOpencodeReviewEvidence(framed, sessionID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "fakeagent: opencode review evidence: %v\n", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		s.broadcastRaw(framed)
 		patched, err := rewriteOpencodeFixtureMessage(s.fixture, action, sessionID)
@@ -379,6 +389,7 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	waitForFakeReviewEvidence(started, prompt)
 
 	s.mu.Lock()
 	s.msgSeq++
@@ -389,6 +400,9 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 
 	// Mark the user message so the parser can filter its echoes.
 	s.broadcast(eventMessageUpdated(sessionID, userID, "user"))
+	if isReviewPrompt(prompt) {
+		s.broadcast(eventMessageToolUpdated(sessionID, asstID, "fake-review-read", "view_file"))
+	}
 
 	// Stream a single text part with the response body, then mark the
 	// assistant message updated with token usage so the parser captures
@@ -419,6 +433,16 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, resp)
 }
 
+func addOpencodeReviewEvidence(raw []byte, sessionID string) ([]byte, error) {
+	event, err := json.Marshal(eventMessageToolUpdated(sessionID, "fake-reviewer", "fake-review-read", "view_file"))
+	if err != nil {
+		return nil, fmt.Errorf("marshal review evidence: %w", err)
+	}
+	prefix := append([]byte("data: "), event...)
+	prefix = append(prefix, '\n', '\n')
+	return append(prefix, raw...), nil
+}
+
 func eventMessagePartUpdated(sessionID, msgID, partID, text string) map[string]any {
 	return map[string]any{
 		"payload": map[string]any{
@@ -430,6 +454,24 @@ func eventMessagePartUpdated(sessionID, msgID, partID, text string) map[string]a
 					"messageID": msgID,
 					"type":      "text",
 					"text":      text,
+				},
+			},
+		},
+	}
+}
+
+func eventMessageToolUpdated(sessionID, msgID, partID, tool string) map[string]any {
+	return map[string]any{
+		"payload": map[string]any{
+			"type": "message.part.updated",
+			"properties": map[string]any{
+				"sessionID": sessionID,
+				"part": map[string]any{
+					"id":        partID,
+					"messageID": msgID,
+					"type":      "tool",
+					"tool":      tool,
+					"callID":    partID,
 				},
 			},
 		},

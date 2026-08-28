@@ -159,22 +159,19 @@ func TestFilterFindings_EmptyIDs(t *testing.T) {
 }
 
 func TestParseFindingsJSON_Action(t *testing.T) {
-	raw := `{"findings":[{"severity":"warning","description":"implementation choice","action":"ask-master"},{"severity":"warning","description":"design choice","action":"ask-user"},{"severity":"error","description":"bug","action":"auto-fix"}],"risk_level":"medium","risk_rationale":"Mixed."}`
+	raw := `{"findings":[{"severity":"warning","description":"design choice","action":"ask-user"},{"severity":"error","description":"bug","action":"auto-fix"}],"risk_level":"medium","risk_rationale":"Mixed."}`
 	f, err := ParseFindingsJSON(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Items) != 3 {
-		t.Fatalf("Items count = %d, want 3", len(f.Items))
+	if len(f.Items) != 2 {
+		t.Fatalf("Items count = %d, want 2", len(f.Items))
 	}
-	if f.Items[0].Action != ActionAskMaster {
-		t.Errorf("Items[0].Action = %q, want %q", f.Items[0].Action, ActionAskMaster)
+	if f.Items[0].Action != ActionAskUser {
+		t.Errorf("Items[0].Action = %q, want %q", f.Items[0].Action, ActionAskUser)
 	}
-	if f.Items[1].Action != ActionAskUser {
-		t.Errorf("Items[1].Action = %q, want %q", f.Items[1].Action, ActionAskUser)
-	}
-	if f.Items[2].Action != ActionAutoFix {
-		t.Errorf("Items[2].Action = %q, want %q", f.Items[2].Action, ActionAutoFix)
+	if f.Items[1].Action != ActionAutoFix {
+		t.Errorf("Items[1].Action = %q, want %q", f.Items[1].Action, ActionAutoFix)
 	}
 }
 
@@ -243,7 +240,7 @@ func TestAutoFixableFindings_NoOpExcluded(t *testing.T) {
 }
 
 // An empty/missing action must NOT be auto-fixed. It fails closed to ask-master
-// (park) so an unclassified finding routes to delegated implementation authority instead of being
+// (park) so an unclassified finding routes to delegated authority instead of being
 // silently auto-applied.
 func TestAutoFixableFindings_EmptyActionIsNotAutoFixable(t *testing.T) {
 	f := Findings{
@@ -286,19 +283,6 @@ func TestEmptyActionFindingFailsClosedToAskMaster(t *testing.T) {
 	}
 }
 
-func TestUnknownActionFindingFailsClosedToAskMaster(t *testing.T) {
-	f := Findings{Items: []Finding{{Action: "future-owner"}}}
-	if len(AutoFixableFindings(f).Items) != 0 {
-		t.Error("unknown-action finding must not be auto-fixable")
-	}
-	if HasAskUserFindings(f) {
-		t.Error("unknown-action finding must not be escalated directly to the user")
-	}
-	if !HasManualFindings(f) {
-		t.Error("unknown-action finding must fail closed to ask-master")
-	}
-}
-
 func TestHasAskUserFindings(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -319,48 +303,6 @@ func TestHasAskUserFindings(t *testing.T) {
 			f := Findings{Items: tt.items}
 			if got := HasAskUserFindings(f); got != tt.expect {
 				t.Errorf("HasAskUserFindings() = %v, want %v", got, tt.expect)
-			}
-		})
-	}
-}
-
-func TestIsManualAction(t *testing.T) {
-	tests := []struct {
-		action string
-		want   bool
-	}{
-		{ActionAskMaster, true},
-		{ActionAskUser, true},
-		{"", true},
-		{"future-owner", true},
-		{ActionAutoFix, false},
-		{ActionNoOp, false},
-	}
-	for _, tt := range tests {
-		if got := IsManualAction(tt.action); got != tt.want {
-			t.Errorf("IsManualAction(%q) = %v, want %v", tt.action, got, tt.want)
-		}
-	}
-}
-
-func TestHasManualFindings(t *testing.T) {
-	tests := []struct {
-		name  string
-		items []Finding
-		want  bool
-	}{
-		{"ask-master", []Finding{{Action: ActionAskMaster}}, true},
-		{"ask-user", []Finding{{Action: ActionAskUser}}, true},
-		{"missing", []Finding{{Action: ""}}, true},
-		{"unknown", []Finding{{Action: "future-owner"}}, true},
-		{"auto-fix", []Finding{{Action: ActionAutoFix}}, false},
-		{"no-op", []Finding{{Action: ActionNoOp}}, false},
-		{"empty", nil, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := HasManualFindings(Findings{Items: tt.items}); got != tt.want {
-				t.Errorf("HasManualFindings() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -581,17 +523,21 @@ func TestFinding_Action_Values(t *testing.T) {
 	}
 }
 
-func TestHasReviewVerdictEvidenceFindingRequiresGateSource(t *testing.T) {
-	if !HasReviewVerdictEvidenceFinding(Findings{Items: []Finding{{
-		ID:     FindingIDReviewVerdictEvidence,
-		Source: FindingSourceReviewGate,
-	}}}) {
-		t.Fatal("canonical evidence finding was not recognized")
-	}
-	if HasReviewVerdictEvidenceFinding(Findings{Items: []Finding{{
-		ID:     FindingIDReviewVerdictEvidence,
-		Source: "codex",
-	}}}) {
-		t.Fatal("reviewer-controlled ID collision was recognized as gate evidence")
+func TestFindingAuthorityFailsClosedToMaster(t *testing.T) {
+	for _, action := range []string{"", "future-owner"} {
+		finding := Finding{Action: action}
+		if got := finding.ActionOrDefault(); got != ActionAskMaster {
+			t.Errorf("ActionOrDefault(%q) = %q, want %q", action, got, ActionAskMaster)
+		}
+		if !IsManualAction(action) {
+			t.Errorf("IsManualAction(%q) = false, want true", action)
+		}
+		findings := Findings{Items: []Finding{finding}}
+		if !HasManualFindings(findings) {
+			t.Errorf("HasManualFindings(%q) = false, want true", action)
+		}
+		if HasAskUserFindings(findings) {
+			t.Errorf("HasAskUserFindings(%q) = true, want false", action)
+		}
 	}
 }

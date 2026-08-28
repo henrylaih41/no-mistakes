@@ -5,21 +5,18 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
-	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
-	defaultChecksGracePeriod          = 60 * time.Second
 	defaultBaseBranchTipResolveWindow = 30 * time.Second
+	defaultPublishedHeadResolveWindow = 30 * time.Second
 )
 
 // CI monitoring status messages. These are surfaced to the user and parsed by
@@ -34,48 +31,17 @@ const (
 
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, auto-fixing CI failures.
+//
+// Empty check lists are never treated as green unless the resolved config
+// carries the trusted default-branch `no_ci: true` declaration (config.Config.NoCI).
+// A feature branch cannot self-declare that value. When checks exist, their
+// actual states are always processed normally - even on a declared no-CI repo.
 type CIStep struct {
-	// lastFixedChecks, lastFixedCompletedAt, and ciFixAttempts are written only by
-	// the single CIStep.Execute goroutine (one CIStep per run). The Devin
-	// review-loop fields below share that same single-writer assumption but are
-	// additionally guarded by devinMu per AGENTS.md, since this PR introduced them
-	// and their access spans helper methods that a future caller could reach off
-	// the Execute goroutine.
 	lastFixedChecks      string               // sorted check names from last fix attempt, to avoid re-fixing
-	lastFixedCompletedAt map[string]time.Time // failing check completion times seen before the last fix attempt
+	lastFixedCompletedAt map[string]time.Time // terminally failed check completion times seen before the last fix attempt
 	ciFixAttempts        int                  // number of CI auto-fix attempts made
-
-	// devinMu guards the post-PR review-loop (Devin) mutable fields below. Reach
-	// them only through the devinRounds/recordDevinRound/devinAnchorReset/
-	// devinFixKey/recordDevinFixKey helpers.
-	devinMu        sync.Mutex
-	devinFixRounds int       // number of post-PR review-loop (Devin) fix rounds made
-	devinAnchorSHA string    // head SHA the Devin grace window is anchored to
-	devinAnchorAt  time.Time // when the current head SHA was first seen (Devin grace start)
-	// lastDevinFixKey is the anti-thrash key for the last completed Devin fix round
-	// — (headSHA, finding fingerprints). It is dedicated to the review loop rather
-	// than reusing lastFixedChecks (the CI-check fix path's key) so the two paths
-	// cannot collide on each other's keys.
-	lastDevinFixKey string
-	// lastRetriggeredSHA is the head SHA for which we last (attempted to) explicitly
-	// trigger a Devin review via the API. Guarded by devinMu. It makes the trigger
-	// idempotent at most once per head SHA: COST-CRITICAL, since the CI loop polls
-	// every few seconds and each trigger creates a paid Devin session.
-	lastRetriggeredSHA string
-
-	// triggerReview, when nil, defaults to a real Devin API client. It is injected
-	// in tests so the loop never makes a real HTTP call. Its signature matches
-	// devin.Client.TriggerReview: (ctx, apiKey, prURL, headSHA) -> (sessionID, err).
-	triggerReview func(ctx context.Context, apiKey, prURL, headSHA string) (string, error)
-
-	// triggerPRReview, when nil, defaults to a real Devin API client. Injected in
-	// tests. Its signature matches devin.Client.TriggerPRReview:
-	// (ctx, token, orgID, prURL) -> (status, commitSHA, err). Used in preference to
-	// triggerReview when a Devin Review token AND org id are configured.
-	triggerPRReview func(ctx context.Context, token, orgID, prURL string) (string, string, error)
-
-	checksGracePeriod    time.Duration // minimum wait before trusting empty CI checks (0 = default 60s)
-	pollIntervalOverride time.Duration // if set, overrides computed poll interval (for testing)
+	transientReruns      checkRerunBudget     // per-check rerun budget spent on provider-reported transient failures
+	pollIntervalOverride time.Duration        // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error
 	now                  func() time.Time
 	// baseBranchTip resolves the current tip SHA of the upstream default
@@ -93,13 +59,13 @@ func (s *CIStep) Name() types.StepName { return types.StepCI }
 // the normal CI polling loop. Open, unknown, and provider-error states remain
 // parked so reconciliation never guesses success.
 func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error) {
+	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		return false, fmt.Errorf("%w: %w", pipeline.ErrFatalGateReconciliation, err)
+	}
 	if err := sctx.Ctx.Err(); err != nil {
 		return false, err
 	}
-	provider := scm.DetectProvider(sctx.Repo.UpstreamURL)
-	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
-		provider = scm.DetectProvider(*sctx.Run.PRURL)
-	}
+	provider := resolvedProvider(sctx)
 	host, skipReason := buildHost(sctx, provider)
 	if host == nil {
 		return false, fmt.Errorf("cannot check PR state: %s", skipReason)
@@ -125,184 +91,81 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	}
 	switch state {
 	case scm.PRStateMerged:
+		if err := verifyMergedProof(sctx.Ctx, host, &scm.PR{Number: prNumber, URL: prURL}, sctx.Run.HeadSHA); err != nil {
+			return false, err
+		}
+		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
+			return false, err
+		}
+		notifyPRMerged(sctx)
 		if sctx.Log != nil {
 			sctx.Log("PR has been merged; clearing stale CI approval gate")
 		}
 		return true, nil
 	case scm.PRStateClosed:
+		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
+			return false, err
+		}
 		if sctx.Log != nil {
 			sctx.Log("PR has been closed; clearing stale CI approval gate")
 		}
 		return true, nil
 	case scm.PRStateOpen:
+		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+			return false, err
+		}
 		return false, nil
 	default:
 		return false, fmt.Errorf("PR state is unresolved: %q", state)
 	}
 }
 
-func (s *CIStep) gracePeriod() time.Duration {
-	if s.checksGracePeriod > 0 {
-		return s.checksGracePeriod
+func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedHead string) error {
+	if !host.Capabilities().MergedProof {
+		return nil
 	}
-	return defaultChecksGracePeriod
-}
-
-type reviewLoopActivation struct {
-	active bool
-	reason string
-}
-
-func reviewLoopForRun(sctx *pipeline.StepContext, host scm.Host) reviewLoopActivation {
-	if sctx == nil || sctx.Config == nil {
-		return reviewLoopActivation{}
+	proofHost, ok := host.(scm.MergedProofHost)
+	if !ok {
+		return fmt.Errorf("SCM provider advertises merged proof but does not implement it")
 	}
-	cfg := sctx.Config.ReviewLoop
-	if sctx.Run != nil && sctx.Run.ReviewLoopDisabled {
-		return reviewLoopActivation{reason: "review loop disabled for this run via no-mistakes.review-loop=off; CI monitoring continues without Devin"}
+	proof, err := proofHost.GetMergedProof(ctx, pr, expectedHead)
+	if err != nil {
+		return fmt.Errorf("verify merged PR proof: %w", err)
 	}
-	if !reviewLoopActive(cfg, host) {
-		return reviewLoopActivation{}
+	if !proof.Merged {
+		return fmt.Errorf("verify merged PR proof: PR %s is not merged", pr.Number)
 	}
-	if reason := reviewLoopApplicabilitySkipReason(sctx.Repo); reason != "" {
-		return reviewLoopActivation{reason: reason}
+	if proof.Number != pr.Number || proof.URL != pr.URL {
+		return fmt.Errorf("verify merged PR proof: proof identifies PR %s at %q, want PR %s at %q", proof.Number, proof.URL, pr.Number, pr.URL)
 	}
-	return reviewLoopActivation{active: true}
-}
-
-func reviewLoopApplicabilitySkipReason(repo *db.Repo) string {
-	if repo == nil || strings.TrimSpace(repo.ForkURL) == "" {
-		return ""
+	if expectedHead != "" && proof.HeadSHA != expectedHead {
+		return fmt.Errorf("verify merged PR proof: %w: expected %s, got %s", scm.ErrHeadChanged, expectedHead, proof.HeadSHA)
 	}
-	baseSlug := github.RepoSlug(repo.UpstreamURL)
-	forkSlug := github.RepoSlug(repo.ForkURL)
-	if baseSlug == "" || forkSlug == "" {
-		return ""
-	}
-	baseOwner, _, baseOK := strings.Cut(baseSlug, "/")
-	forkOwner, _, forkOK := strings.Cut(forkSlug, "/")
-	if !baseOK || !forkOK || baseOwner == "" || forkOwner == "" {
-		return ""
-	}
-	if strings.EqualFold(baseOwner, forkOwner) {
-		return ""
-	}
-	return fmt.Sprintf("review loop skipped: PR base %s differs from fork %s; CI monitoring continues without Devin", baseSlug, forkSlug)
-}
-
-// devinRounds returns the number of completed post-PR review-loop fix rounds,
-// read under devinMu. See CIStep for the single-writer note.
-func (s *CIStep) devinRounds() int {
-	s.devinMu.Lock()
-	defer s.devinMu.Unlock()
-	return s.devinFixRounds
-}
-
-// recordDevinRound counts a completed review-loop fix round (a push or a clean
-// no-op) and returns the new total, written under devinMu. A round is recorded
-// only after the fix attempt completes, so a transient failure does not consume
-// one.
-func (s *CIStep) recordDevinRound() int {
-	s.devinMu.Lock()
-	defer s.devinMu.Unlock()
-	s.devinFixRounds++
-	return s.devinFixRounds
-}
-
-// devinAnchorReset resets the Devin grace anchor whenever the head advances (so
-// each new commit gets a fresh window for the bot to re-review) and returns the
-// anchor time for the current head. All anchor reads/writes happen under devinMu.
-func (s *CIStep) devinAnchorReset(headSHA string, now func() time.Time) time.Time {
-	s.devinMu.Lock()
-	defer s.devinMu.Unlock()
-	if headSHA != s.devinAnchorSHA {
-		s.devinAnchorSHA = headSHA
-		s.devinAnchorAt = now()
-	}
-	return s.devinAnchorAt
-}
-
-// devinFixKey returns the anti-thrash key recorded for the last completed Devin
-// fix round, read under devinMu. See CIStep for the single-writer note.
-func (s *CIStep) devinFixKey() string {
-	s.devinMu.Lock()
-	defer s.devinMu.Unlock()
-	return s.lastDevinFixKey
-}
-
-// recordDevinFixKey stores the anti-thrash key for the Devin fix round just
-// pushed, written under devinMu. Dedicated to the review loop so it never
-// collides with the CI-check path's lastFixedChecks.
-func (s *CIStep) recordDevinFixKey(key string) {
-	s.devinMu.Lock()
-	defer s.devinMu.Unlock()
-	s.lastDevinFixKey = key
-}
-
-// ciFixAlreadyAttempted reports whether the shared CI-fix path already pushed a
-// fix for the current issue state, so the monitor should wait for CI to re-run
-// rather than re-running the fixer. The CI-check identity (failing names + merge
-// conflict, ciKey) and the review-loop identity (head SHA + finding
-// fingerprints, devinKey) are compared as INDEPENDENT dimensions: the stable CI
-// anti-thrash must not be reset just because the review verdict transitions from
-// "not green" to "pending" on a freshly pushed head (devinKey would otherwise
-// vanish from a conflated key and spuriously mismatch). A still-flagging review
-// only re-triggers when it carries a distinct fingerprint set; with no
-// fingerprints there is nothing new to feed the fixer, so the CI key alone gates.
-func (s *CIStep) ciFixAlreadyAttempted(ciKey, devinKey string, devinNotGreen bool) bool {
-	if ciKey == "" || ciKey != s.lastFixedChecks {
-		return false
-	}
-	if !devinNotGreen || devinKey == "" {
-		return true
-	}
-	return devinKey == s.devinFixKey()
-}
-
-// recordCIFix records the anti-thrash keys for a fix the shared CI-fix path just
-// pushed. The CI key and (when the review loop flagged the head) the review key
-// are stored separately so each dimension's anti-thrash survives the other's
-// state changing on the next poll.
-func (s *CIStep) recordCIFix(ciKey, devinKey string, devinNotGreen bool, fixCompletedAt map[string]time.Time) {
-	s.lastFixedChecks = ciKey
-	if devinNotGreen && devinKey != "" {
-		s.recordDevinFixKey(devinKey)
-	}
-	s.lastFixedCompletedAt = fixCompletedAt
-}
-
-// retriggeredSHA returns the head SHA the last explicit Devin re-trigger was made
-// for, read under devinMu.
-func (s *CIStep) retriggeredSHA() string {
-	s.devinMu.Lock()
-	defer s.devinMu.Unlock()
-	return s.lastRetriggeredSHA
-}
-
-// claimRetrigger records headSHA as the head we are (about to) trigger a Devin
-// review for, returning true only if it was not already the recorded head. The
-// compare-and-set runs under devinMu so concurrent callers (and the once-per-head
-// cost guard) cannot both claim the same head. It is set BEFORE the network call
-// so a failed/rate-limited trigger is not retried every poll.
-func (s *CIStep) claimRetrigger(headSHA string) bool {
-	s.devinMu.Lock()
-	defer s.devinMu.Unlock()
-	if s.lastRetriggeredSHA == headSHA {
-		return false
-	}
-	s.lastRetriggeredSHA = headSHA
-	return true
+	return nil
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		return nil, err
+	}
+	if sctx.StepResultID != "" {
+		stepResult, err := sctx.DB.GetStepResult(sctx.StepResultID)
+		if err != nil {
+			return nil, fmt.Errorf("restore CI auto-fix attempts: %w", err)
+		}
+		if stepResult != nil {
+			s.ciFixAttempts = max(s.ciFixAttempts, stepResult.CIFixAttempts)
+		}
+	}
+	// A run recovered after a restart resumes the rerun budget it already
+	// spent. Without this the fresh in-memory budget would grant reruns the
+	// documented limit already accounted for.
+	s.loadRerunBudget(sctx)
 	ctx := sctx.Ctx
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	provider := scm.DetectProvider(sctx.Repo.UpstreamURL)
-	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
-		provider = scm.DetectProvider(*sctx.Run.PRURL)
-	}
+	provider := resolvedProvider(sctx)
 	host, skipReason := buildHost(sctx, provider)
 	if host == nil {
 		sctx.Log(fmt.Sprintf("skipping CI: %s", skipReason))
@@ -311,16 +174,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if err := host.Available(ctx); err != nil {
 		sctx.Log(fmt.Sprintf("skipping CI: %v", err))
 		return &pipeline.StepOutcome{Skipped: true}, nil
-	}
-
-	// reviewLoop is the post-PR review loop (Devin). It is inert unless both the
-	// config flag and the host's review capability are present; per-run disable
-	// and cross-owner applicability skips disable only Devin while preserving CI
-	// monitoring.
-	loop := reviewLoopForRun(sctx, host)
-	loopActive := loop.active
-	if loop.reason != "" {
-		sctx.Log(loop.reason)
 	}
 
 	// Get PR URL from run record
@@ -346,6 +199,18 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, fmt.Errorf("extract PR number: %w", err)
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
+	baseBranch := effectivePRBaseBranch(sctx)
+	// A resumed run may have a different trusted configuration than the run
+	// that created this PR. Re-read the forge record without a base filter so
+	// conflict repair and tip monitoring follow the PR's actual target.
+	if reader, ok := host.(scm.PRBaseBranchReader); ok {
+		if actual, readErr := reader.GetPRBaseBranch(ctx, pr); readErr == nil {
+			pr.BaseBranch = actual
+		}
+	}
+	if strings.TrimSpace(pr.BaseBranch) != "" {
+		baseBranch = strings.TrimSpace(pr.BaseBranch)
+	}
 
 	// CITimeout semantics: <0 (or "unlimited" in config) means never
 	// self-terminate; 0 means the value was never configured, so fall back
@@ -368,7 +233,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	baseBranchTip := s.baseBranchTip
 	if baseBranchTip == nil {
 		baseBranchTip = func(ctx context.Context) (string, bool) {
-			return resolveDefaultBranchTip(ctx, sctx.WorkDir, sctx.Repo.UpstreamURL, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+			return resolveRunDefaultBranchTip(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 		}
 	}
 	started := now()
@@ -381,19 +246,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	mergeabilityBlockedReason := ""
 	timeoutFailingChecks := []string{}
 	timeoutMergeConflict := false
-	timeoutDevinManualReviewReason := ""
 	lastMonitorLog := ""
+	consecutiveCheckErrs := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
-			outcome := ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present")
-			return withDevinManualVerify(outcome, timeoutDevinManualReviewReason), nil
+			return ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present"), nil
 		}
 		if mergeabilityBlockedReason != "" {
-			outcome := ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason)
-			return withDevinManualVerify(outcome, timeoutDevinManualReviewReason), nil
+			return ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason), nil
 		}
-		return withDevinManualVerify(ciMonitoringTimeoutOutcome(), timeoutDevinManualReviewReason), nil
+		return ciMonitoringTimeoutOutcome(), nil
 	}
 
 	for {
@@ -427,7 +290,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 		}
 
-		elapsed := now().Sub(started)
 		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
 			return timeoutOutcome()
 		}
@@ -439,11 +301,25 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			sctx.Log(fmt.Sprintf("warning: could not check PR state: %v", err))
 			prStateKnown = false
 		} else if state == scm.PRStateMerged {
+			if err := verifyMergedProof(ctx, host, pr, sctx.Run.HeadSHA); err != nil {
+				return nil, err
+			}
+			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
+				return nil, err
+			}
+			notifyPRMerged(sctx)
 			sctx.Log("PR has been merged!")
 			return &pipeline.StepOutcome{}, nil
 		} else if state == scm.PRStateClosed {
+			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
+				return nil, err
+			}
 			sctx.Log("PR has been closed")
 			return &pipeline.StepOutcome{}, nil
+		} else if state == scm.PRStateOpen {
+			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+				return nil, err
+			}
 		}
 
 		// Check mergeable state if the provider supports it
@@ -470,74 +346,134 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 		// Check CI status - wait for all checks to complete before fixing
 		ciFixLimit := sctx.Config.AutoFix.CI
+		pr.HeadSHA = sctx.Run.HeadSHA
 		checks, err := host.GetChecks(ctx, pr)
 		if err != nil {
+			clearCIMonitorReady(sctx)
 			lastMonitorLog = ""
 			sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
+			consecutiveCheckErrs++
+			// A provider read that keeps failing (e.g. gh < v2.50 rejecting
+			// `gh pr checks --json`) must become an actionable stop, not an
+			// invisible spin to ci_timeout. The PR state check above returned
+			// already for merged/closed, so reaching here means the PR is open.
+			if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
+				sctx.Log(fmt.Sprintf("CI checks could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
+				return ciCheckReadFailureOutcome(err), nil
+			}
 		} else {
-			pending := hasPendingChecks(checks)
+			consecutiveCheckErrs = 0
+			// A failure the provider produced before the repository's own steps
+			// ran (a setup/action-resolution outage) is infrastructure, not a
+			// verdict on the code. Re-bucket those into the transient path before
+			// anything reads the failing set, so they are re-run rather than sent
+			// to the fix agent. Gated on the transient budget, so an opted-out
+			// repo pays no extra provider calls and keeps the prior behavior.
+			markPreRunInfraFailures(sctx, host, checks)
+			// checksPending is the narrow execution state: only checks that are
+			// actively running or queued block a rerun or issue escalation. A
+			// provider-cancelled check is terminal enough to enter the transient
+			// rerun policy, even though it is not a verdict on the code.
+			checksPending := hasPendingChecks(checks)
+			// readinessPending is deliberately broader: any state that is not a
+			// conclusive pass, failure, or skip must keep the PR non-ready. This
+			// includes cancelled and unknown provider states.
+			readinessPending := checksPending || hasUnresolvedChecks(checks)
 			failing := failingCheckNames(checks)
-			sort.Strings(failing)
-			hasFailures := len(failing) > 0
 
-			// Post-PR review loop: read the bot's verdict for the current head.
-			// Only consults the host when the loop is active, so behavior is
-			// unchanged otherwise. A "not green" verdict is folded into hasIssues
-			// so the existing fix machinery (no-mistakes is the fixer) runs.
-			devinDecision := devinDecisionDisabled
-			var devinFindings []scm.ReviewComment
-			var devinPrints []string
-			if loopActive {
-				devinDecision, devinFindings = s.evalDevinReview(sctx, host, pr)
-				devinPrints = devinFindingFingerprints(devinFindings)
-				// When Devin has not posted a verdict for the current head yet
-				// (NONE/PENDING), explicitly (re-)trigger a review via the Devin API:
-				// its auto-review is rate-limited / pausable, so this kicks a paused
-				// initial review. Once-per-head guarded + best-effort (never alters
-				// control flow); inert unless cfg.Retrigger and a key resolves.
-				if devinDecision == devinDecisionPending {
-					s.maybeRetriggerDevin(sctx, pr, sctx.Run.HeadSHA)
-				}
-			}
-			devinNotGreen := devinDecision == devinDecisionNotGreen
-			// The review body reports findings on this head but no file-scoped
-			// threads loaded to fix: the gate owner must verify. Folded into
-			// hasIssues so it is not mistaken for "checks passed, ready to merge",
-			// but routed to a park (never the fixer) below.
-			devinManualReview := devinDecision == devinDecisionManualReview
-			// The pre-grace form of the same body-only not-green signal. It does NOT
-			// force a park on its own (we keep polling for threads to propagate), but
-			// it MUST still contribute the manual-verify reason so an earlier CI gate
-			// or timeout that parks during the grace window never hides it (ruling #3).
-			devinManualReviewPending := devinDecision == devinDecisionManualReviewPending
-			// The manual-verify reason is combined into any CI-failure/mergeability
-			// park (and the timeout outcome) so it is never hidden behind a CI-only
-			// gate that fires in the same poll (ruling #3). Both the escalated and the
-			// still-pending manual-review states carry a reason; the pending one uses
-			// its own message so a park during grace reads as "awaiting" not "failed".
-			devinManualReviewReason := ""
-			switch {
-			case devinManualReview:
-				devinManualReviewReason = cimonitor.ReviewManualVerifyMsg
-			case devinManualReviewPending:
-				devinManualReviewReason = cimonitor.ReviewManualVerifyPendingMsg
+			// A rerun the provider has answered is no longer outstanding. This
+			// runs before anything reads the rerun bookkeeping so a resolved
+			// rerun cannot be re-opened by a later poll that no longer reports
+			// the check, which would park a green head on a cancellation the
+			// provider already replaced.
+			if _, err := s.retireResolvedReruns(sctx, checks); err != nil {
+				sctx.Log(fmt.Sprintf("warning: could not persist the retired rerun state: %v", err))
 			}
 
-			hasIssues := hasFailures || mergeConflict || devinNotGreen || devinManualReview
-			timeoutFailingChecks = append(timeoutFailingChecks[:0], failing...)
-			timeoutDevinManualReviewReason = devinManualReviewReason
-
-			// If a failing check completed after our last fix push, CI has
-			// already re-run since we pushed (possibly too fast to observe
-			// as pending between polls). Treat this as a new iteration so
-			// the retry path can fire rather than looping on "fix already
+			// If a terminally failed check completed after our last fix push,
+			// CI has already re-run since we pushed (possibly too fast to
+			// observe as pending between polls). Treat this as a new iteration
+			// so the retry path can fire rather than looping on "fix already
 			// attempted" until timeout.
-			if failingCheckCompletedAfter(checks, s.lastFixedCompletedAt) {
+			if terminalFailureCompletedAfter(checks, s.lastFixedCompletedAt) {
 				s.lastFixedChecks = ""
 				s.lastFixedCompletedAt = nil
 			}
 
-			if hasIssues && pending {
+			// Before any failure reaches the fix agent, re-run the checks the
+			// provider itself reported as cancelled rather than as a job
+			// failure. A rerun costs another provider-side workflow run;
+			// escalating one costs an agent round that can edit code which was
+			// never broken.
+			// Genuine failures never take this path, and a merge conflict is
+			// excluded outright: no rerun can ever clear one, so it must reach
+			// the fix agent on its first observation.
+			rerunIssued := false
+			if !checksPending && !mergeConflict {
+				issued, rerunOutcome := s.rerunTransientChecks(sctx, host, pr, checks)
+				if rerunOutcome != nil {
+					// The published head moved, so this run never delivered the
+					// commit whose checks were observed: nothing here may leave
+					// a ready-to-merge signal behind on the way out.
+					clearCIMonitorReady(sctx)
+					return rerunOutcome, nil
+				}
+				rerunIssued = issued
+			}
+			// A cancelled check is unresolved, not green, and it is not a job
+			// failure either: it reaches its own approval gate below rather
+			// than the fix agent. A check whose rerun the provider has not
+			// published yet is neither, so the monitor keeps waiting for it.
+			var unresolvedCancelled, awaitingRerun []string
+			if !rerunIssued {
+				unresolvedCancelled, awaitingRerun = s.transientReruns.cancelledAfterRerun(checks)
+				// A cancelled check this run never re-ran is just as unresolved,
+				// and just as final: the provider published a conclusion for it,
+				// and with no rerun outstanding nothing this run is waiting on
+				// will ever replace it. It has to reach the same gate, or a
+				// repository on the default rerun budget of 0 polls a rollup
+				// that has already stopped moving until its idle timeout.
+				// Checks that can still finish on their own are excluded, so a
+				// cancellation observed alongside a running check keeps waiting.
+				// Beyond that there is no settling window, for the same reason
+				// a genuine failure gets none: a status rollup is per commit,
+				// so a cancellation in it belongs to the commit under test and
+				// cannot be a leftover from a head this run already replaced.
+				//
+				// Only the cancel bucket qualifies. A check whose state this
+				// version does not recognize is not known to be terminal, so it
+				// stays on the wait-then-timeout path rather than being
+				// escalated as a conclusion the provider never reported.
+				if !checksPending {
+					unresolvedCancelled = mergeCheckNames(unresolvedCancelled, s.transientReruns.cancelledWithoutRerun(checks))
+				}
+			}
+			sort.Strings(failing)
+			sort.Strings(unresolvedCancelled)
+			sort.Strings(awaitingRerun)
+			hasFailures := len(failing) > 0
+			hasIssues := hasFailures || mergeConflict || len(unresolvedCancelled) > 0
+			// reportedIssues is what the step tells the user about; failing
+			// stays the set the fix agent is asked to repair.
+			reportedIssues := mergeCheckNames(failing, unresolvedCancelled)
+			timeoutFailingChecks = append(timeoutFailingChecks[:0], mergeCheckNames(reportedIssues, awaitingRerun)...)
+
+			if hasIssues || len(awaitingRerun) > 0 {
+				if err := setCIMonitorReadiness(sctx, false, false); err != nil {
+					return nil, err
+				}
+			}
+			if rerunIssued || (!hasIssues && len(awaitingRerun) > 0) {
+				// The re-run checks are running again for the same commit, so
+				// the monitor waits rather than escalating. This also clears any
+				// previous passed-checks signal, which matters for a cancelled
+				// check: it never counted as a failing check, so nothing above
+				// cleared it.
+				lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+			} else if hasIssues && checksPending {
+				// Issue handling waits only for checks that can still complete on
+				// their own. A cancelled check whose rerun budget is exhausted must
+				// reach the approval gate instead of waiting forever.
 				lastMonitorLog = ""
 				if pendingCheckMatchesLastFixed(checks, s.lastFixedChecks) {
 					s.lastFixedChecks = ""
@@ -546,15 +482,27 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				sctx.Log("issues detected but checks still pending, waiting for all checks to complete...")
 			} else if hasIssues {
 				lastMonitorLog = ""
-				// All checks done, issues present - fix or report. The CI-check
-				// identity and the review-loop identity are kept as separate
-				// anti-thrash dimensions (see ciFixAlreadyAttempted) so a push
-				// that flips the review verdict to pending does not reset the CI
-				// anti-thrash and re-run the fixer against still-stale checks.
-				ciKey := encodeLastFixedChecks(failing, mergeConflict)
-				devinKey := encodeDevinFixKey(nil, false, sctx.Run.HeadSHA, devinPrints)
-				fixCompletedAt := failingCheckCompletionTimes(checks)
-				issueDesc := strings.Join(failing, ", ")
+				if !hasFailures && !mergeConflict && !sctx.Fixing {
+					// Every remaining issue is a transient check rather than a
+					// verdict on the code. No fix can clear one,
+					// so this parks for a decision instead of spending a
+					// fix-agent round on a run that never tested anything. The
+					// CI step's outcomes are never auto-fixable, so sctx.Fixing
+					// here means the user answered that gate with "fix": that
+					// deliberate override is honored rather than re-parked.
+					return ciUnresolvedCancelledOutcome(unresolvedCancelled, checks, s.transientReruns.used), nil
+				}
+				// All checks done, issues present - fix or report.
+				// The fix agent is asked to repair job failures; a check the
+				// provider cancelled again is not one, so it joins the request
+				// only in a round the user asked for.
+				fixTargets := failing
+				if sctx.Fixing {
+					fixTargets = reportedIssues
+				}
+				fixKey := encodeLastFixedChecks(fixTargets, mergeConflict)
+				fixCompletedAt := terminalFailureCompletionTimes(checks)
+				issueDesc := strings.Join(fixTargets, ", ")
 				if mergeConflict {
 					if issueDesc != "" {
 						issueDesc += " + merge conflict"
@@ -562,62 +510,48 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						issueDesc = "merge conflict"
 					}
 				}
-				if loopActive && devinManualReview && !hasFailures && !mergeConflict {
-					// Checks are clean but the review bot reported findings on this
-					// head that we could not load as file-scoped threads. There is
-					// nothing concrete to auto-fix, so park for gate-owner judgment
-					// with an explicit reason instead of running the fixer (which would
-					// fabricate changes for a problem it cannot see, ruling #11).
-					lastMonitorLog = ""
-					sctx.Log(cimonitor.ReviewManualVerifyMsg)
-					return devinManualReviewOutcome(cimonitor.ReviewManualVerifyMsg), nil
-				} else if loopActive && devinNotGreen && !hasFailures && !mergeConflict {
-					// Checks are clean but the review bot requested changes:
-					// run a bounded review-loop fix round. Anti-thrash keys on
-					// (headSHA, finding fingerprints) so a pushed fix waits for
-					// the bot to re-review the new commit before re-evaluating.
-					// A user/agent `fix` response after the loop parked forces one
-					// more round past the bounded guard; gate it to once per
-					// execution (manualFixAttempted) so it cannot thrash the loop.
-					forcedDevinFix := sctx.Fixing && !manualFixAttempted
-					if forcedDevinFix {
-						manualFixAttempted = true
-					}
-					if outcome := s.handleDevinFixRound(sctx, host, pr, devinFindings, devinKey, fixCompletedAt, forcedDevinFix); outcome != nil {
-						return outcome, nil
-					}
-				} else if sctx.Fixing && !manualFixAttempted {
+				if sctx.Fixing && !manualFixAttempted {
 					manualFixAttempted = true
 					sctx.Log(fmt.Sprintf("issues detected: %s - manual fix requested...", issueDesc))
 					previousHeadSHA := sctx.Run.HeadSHA
-					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict, devinFindings)
+					changed, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict)
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI manual fix failed: %v", err))
-					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
-						s.recordCIFix(ciKey, devinKey, devinNotGreen, fixCompletedAt)
+					} else if changed || sctx.Run.HeadSHA != previousHeadSHA {
+						s.lastFixedChecks = fixKey
+						s.lastFixedCompletedAt = fixCompletedAt
+						return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
 					} else {
 						sctx.Log("CI fix produced no changes, returning for manual intervention...")
-						return withDevinManualVerify(ciFailureOutcome(failing, mergeConflict, "CI fix produced no changes - failures require manual intervention"), devinManualReviewReason), nil
+						return ciFailureOutcome(reportedIssues, mergeConflict, "CI fix produced no changes - failures require manual intervention"), nil
 					}
-				} else if sctx.Fixing && s.ciFixAlreadyAttempted(ciKey, devinKey, devinNotGreen) {
+				} else if sctx.Fixing && fixKey == s.lastFixedChecks {
 					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
 				} else if ciFixLimit <= 0 {
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fix disabled, waiting for manual intervention...", issueDesc))
-					return withDevinManualVerify(ciFailureOutcome(failing, mergeConflict, "CI failures require manual intervention"), devinManualReviewReason), nil
+					return ciFailureOutcome(reportedIssues, mergeConflict, "CI failures require manual intervention"), nil
 				} else if s.ciFixAttempts >= ciFixLimit {
 					sctx.Log(fmt.Sprintf("issues detected: %s - max auto-fix attempts (%d) reached, waiting for manual intervention...", issueDesc, ciFixLimit))
-					return withDevinManualVerify(ciFailureOutcome(failing, mergeConflict, "CI failures still present after auto-fix attempts"), devinManualReviewReason), nil
-				} else if s.ciFixAlreadyAttempted(ciKey, devinKey, devinNotGreen) {
+					return ciFailureOutcome(reportedIssues, mergeConflict, "CI failures still present after auto-fix attempts"), nil
+				} else if fixKey == s.lastFixedChecks {
 					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
 				} else {
-					s.ciFixAttempts++
+					nextAttempt := s.ciFixAttempts + 1
+					if sctx.StepResultID != "" {
+						if err := sctx.DB.SetCIFixAttempts(sctx.StepResultID, nextAttempt); err != nil {
+							return nil, fmt.Errorf("persist CI auto-fix attempt: %w", err)
+						}
+					}
+					s.ciFixAttempts = nextAttempt
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fixing (attempt %d/%d)...", issueDesc, s.ciFixAttempts, ciFixLimit))
 					previousHeadSHA := sctx.Run.HeadSHA
-					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict, devinFindings)
+					changed, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict)
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI auto-fix failed: %v", err))
-					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
-						s.recordCIFix(ciKey, devinKey, devinNotGreen, fixCompletedAt)
+					} else if changed || sctx.Run.HeadSHA != previousHeadSHA {
+						s.lastFixedChecks = fixKey
+						s.lastFixedCompletedAt = fixCompletedAt
+						return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
 					} else {
 						// No changes produced - don't set lastFixedChecks so next
 						// poll treats this as a new failure and retries if attempts remain.
@@ -627,63 +561,38 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			} else {
 				s.lastFixedChecks = ""
 				s.lastFixedCompletedAt = nil
-				passedMsg := ciChecksPassedMsg
-				if len(checks) == 0 {
-					passedMsg = ciNoChecksPassedMsg
-				}
 				switch {
 				case !prStateKnown || !mergeabilityKnown:
+					clearCIMonitorReady(sctx)
 					lastMonitorLog = ""
-				case pending:
+				case readinessPending:
 					// Checks are (re-)running with no failures yet. Surface this
 					// so a PR that passed checks and starts re-running clears the
 					// previous passed-checks signal instead of looking stale.
+					// The broader readiness state is intentional here: cancelled
+					// and unknown checks must never be promoted as green.
+					// Applies even when no_ci is declared: registered checks are
+					// never waived.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
-				case loopActive && devinDecision == devinDecisionPending:
-					// Checks are clean but the review bot has not posted a verdict
-					// for the current head yet: not ready to merge. Surfacing this
-					// (instead of "checks passed") keeps the agent from declaring
-					// the run done before the review lands.
-					reviewMsg := cimonitor.WaitingOnReviewMsg
-					if s.devinRounds() > 0 {
-						reviewMsg = cimonitor.ReReviewingMsg
-					}
-					lastMonitorLog = logCIMonitorStatus(sctx, reviewMsg, lastMonitorLog)
-				case loopActive && devinDecision == devinDecisionPendingAmbiguous:
-					// Checks are clean and the bot reviewed the current head, but its
-					// body carried no recognizable verdict. Not ready to merge; the
-					// explicit reason lets an agent tell this apart from "no review
-					// yet" (it still fails open past the grace window per config).
-					lastMonitorLog = logCIMonitorStatus(sctx, cimonitor.ReviewBodyAmbiguousMsg, lastMonitorLog)
-				case loopActive && devinDecision == devinDecisionManualReviewPending:
-					// Checks are clean and the bot's body reports findings on the
-					// current head, but its file-scoped threads have not loaded yet and
-					// the grace window has not elapsed. Keep polling (the threads may
-					// still propagate), but surface the body-only not-green signal so it
-					// is never mistaken for a ready-to-merge review; once the grace
-					// window elapses this escalates to devinDecisionManualReview and the
-					// run parks for gate-owner judgment. This NEVER fails open to green.
-					lastMonitorLog = logCIMonitorStatus(sctx, cimonitor.ReviewManualVerifyPendingMsg, lastMonitorLog)
-				case len(checks) == 0 && elapsed < s.gracePeriod():
-					// CI checks may not be registered yet, keep polling.
-					lastMonitorLog = ""
-					sctx.Log("no CI checks reported yet, waiting for checks to register...")
-				case loopActive && devinDecision == devinDecisionFailOpen:
-					// The bot stayed silent past the grace window and fail-open is
-					// configured: fall back to checks-only green, but loudly.
-					if passedMsg != lastMonitorLog {
-						sctx.Log("WARNING: Devin posted no review within the grace window; proceeding on checks-only green (review_loop.fail_open=true)")
-					}
-					lastMonitorLog = logCIMonitorStatus(sctx, passedMsg, lastMonitorLog)
 				case len(checks) == 0:
-					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
-				default:
+					// Empty forge results are ready ONLY with positive durable
+					// evidence from trusted default-branch config (no_ci: true).
+					// Without that declaration, keep waiting - delayed registration
+					// is common and must never look green. Elapsed time is not
+					// evidence; there is no grace-period promotion path.
+					if sctx.Config != nil && sctx.Config.NoCI {
+						lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
+					} else {
+						clearCIMonitorReady(sctx)
+						lastMonitorLog = ""
+						sctx.Log("no CI checks reported yet, waiting for checks to register...")
+					}
+				case allChecksPassed(checks):
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+				default:
+					clearCIMonitorReady(sctx)
+					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
 				}
-				// Persist the first review-ready moment for this head so a
-				// read-only external observer can detect it without parsing
-				// monitor logs (UpdateRunHeadSHA clears it on head advance).
-				stampReviewReadyIfPassed(sctx, lastMonitorLog)
 			}
 		}
 
@@ -717,22 +626,36 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {
 	if message != previous {
+		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
+		declaredNoCI := message == ciNoChecksPassedMsg
+		if err := setCIMonitorReadiness(sctx, ready, declaredNoCI); err != nil {
+			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
+		}
 		sctx.Log(message)
 	}
 	return message
 }
 
-// stampReviewReadyIfPassed records the run's first review-ready moment for the
-// current head when the CI monitor's latest state is "checks passed" — green CI
-// or the canonical zero-CI state. It reuses cimonitor's readiness decision (the
-// same one the agent client uses) rather than re-deriving it, and is safe to
-// call every poll because MarkRunReviewReady only stamps while the marker is
-// NULL. UpdateRunHeadSHA clears the marker on a head advance, so it rearms.
-func stampReviewReadyIfPassed(sctx *pipeline.StepContext, lastMonitorLog string) {
-	if !cimonitor.ChecksPassed([]string{lastMonitorLog}) {
+func clearCIMonitorReady(sctx *pipeline.StepContext) {
+	if err := setCIMonitorReadiness(sctx, false, false); err != nil {
+		sctx.Log(fmt.Sprintf("warning: could not clear CI readiness: %v", err))
+	}
+}
+
+func setCIMonitorReadiness(sctx *pipeline.StepContext, ready, declaredNoCI bool) error {
+	declaredNoCI = ready && declaredNoCI
+	if err := sctx.DB.SetRunCIReadyWithReason(sctx.Run.ID, ready, declaredNoCI); err != nil {
+		return err
+	}
+	if sctx.CIReadinessChanged != nil {
+		sctx.CIReadinessChanged(ready, declaredNoCI)
+	}
+	return nil
+}
+
+func notifyPRMerged(sctx *pipeline.StepContext) {
+	if sctx == nil || sctx.OnPRMerged == nil || sctx.Run == nil {
 		return
 	}
-	if err := sctx.DB.MarkRunReviewReady(sctx.Run.ID); err != nil {
-		sctx.Log(fmt.Sprintf("failed to record review-ready marker: %v", err))
-	}
+	sctx.OnPRMerged(sctx.Ctx, sctx.Run.ID)
 }

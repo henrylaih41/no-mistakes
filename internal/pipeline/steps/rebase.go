@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -27,38 +28,14 @@ const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
-	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
-	// Fetch and rebase against the run's EFFECTIVE base/push URLs (which a
-	// selected route may have set to something other than the gate's "origin"
-	// remote), not the literal "origin" remote. Otherwise a route whose base
-	// differs from the gate origin would rebase/validate against one repo while
-	// the push/PR steps target another. baseRemote feeds the default-branch and
-	// (non-fork) pushed-branch fetches; a fork route pulls the pushed branch
-	// from the fork instead.
-	baseRemote := remoteOrURL(sctx.Repo.UpstreamURL)
-	forkRouted := strings.TrimSpace(sctx.Repo.ForkURL) != ""
-	// A non-fork route can point baseRemote at a base repo other than the gate
-	// "origin" remote. When it does, the pushed branch must NOT be written into
-	// the shared refs/remotes/origin/* namespace: that base is a different repo,
-	// so origin/<branch> would carry a misleading ref state and feed a wrong
-	// force-push-detection fallback. We detect this by comparing the effective
-	// base URL against origin's configured URL; baseRemote == "origin" is the
-	// pre-routes (empty UpstreamURL) path and always uses origin/<branch>.
-	routeBaseDiffersFromOrigin := !forkRouted && baseRemote != "origin" &&
-		baseRemote != originRemoteURL(ctx, sctx.WorkDir)
+	defaultBranch := effectivePRBaseBranch(sctx)
 	branchTarget := ""
-	pushRemote := baseRemote
+	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
 		branchTarget = "origin/" + branch
-		if forkRouted {
+		if strings.TrimSpace(sctx.Repo.ForkURL) != "" {
 			pushRemote = sctx.Repo.PushURL()
 			branchTarget = forkBranchTrackingRef(branch)
-		} else if routeBaseDiffersFromOrigin {
-			// Per-worktree ref, mirroring baseTrackingRef/forkBranchTrackingRef.
-			branchTarget = routeBranchTrackingRef(branch)
 		}
 	}
 
@@ -68,10 +45,9 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// state on the remote.
 	forcePush := isForcePushAgainstRemote(ctx, sctx.WorkDir, pushRemote, branch, branchTarget, sctx.Run.BaseSHA)
 
-	baseDefaultRef := baseTrackingRef(defaultBranch)
 	sctx.Log("fetching latest upstream state...")
-	if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, baseRemote, defaultBranch, baseDefaultRef); err != nil {
-		sctx.LogFile(fmt.Sprintf("warning: could not fetch %s: %v", baseDefaultRef, err))
+	if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
+		sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", defaultBranch, err))
 	}
 	// Sync the push branch's remote-tracking ref only when we are about to rebase
 	// onto it (a normal push). On a force push we deliberately skip both the fetch
@@ -84,19 +60,12 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// (the original #281/#305 hazard, in the force-push path). Leaving it stale is
 	// what lets the push step's content check catch that case.
 	if !forcePush && branch != "" && branch != defaultBranch {
-		switch {
-		case forkRouted:
-			if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, pushRemote, branch, branchTarget); err != nil {
-				sctx.LogFile(fmt.Sprintf("warning: could not fetch %s: %v", branchTarget, err))
-			}
-		case routeBaseDiffersFromOrigin:
-			if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, baseRemote, branch, branchTarget); err != nil {
-				sctx.LogFile(fmt.Sprintf("warning: could not fetch %s: %v", branchTarget, err))
-			}
-		default:
-			if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, baseRemote, branch, "refs/remotes/origin/"+branch); err != nil {
+		if strings.TrimSpace(sctx.Repo.ForkURL) == "" {
+			if err := fetchRunUpstreamBranch(ctx, sctx, branch); err != nil {
 				sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", branch, err))
 			}
+		} else if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, pushRemote, branch, branchTarget); err != nil {
+			sctx.LogFile(fmt.Sprintf("warning: could not fetch %s: %v", branchTarget, err))
 		}
 	}
 
@@ -104,7 +73,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// the contributor's local default branch but were never pushed to
 	// origin/<default>. Rebasing onto the fresh remote default keeps those
 	// commits in the branch's history, so the PR would silently bundle another
-	// workstream's unpushed work. Surface it for gate-owner judgment instead.
+	// workstream's unpushed work. Surface it for a human decision instead.
 	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
 		return outcome, nil
 	}
@@ -147,13 +116,12 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			return nil, err
 		}
 		if len(conflictFiles) > 0 {
-			label := rebaseTargetLabel(target, defaultBranch)
-			conflictTargets = append(conflictTargets, label)
+			conflictTargets = append(conflictTargets, target)
 			for _, file := range conflictFiles {
 				conflictFindings = append(conflictFindings, Finding{
 					Severity:    "warning",
 					File:        file,
-					Description: fmt.Sprintf("merge conflict rebasing onto %s", label),
+					Description: fmt.Sprintf("merge conflict rebasing onto %s", target),
 				})
 			}
 		}
@@ -172,33 +140,20 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	return updateHeadSHA(ctx, sctx)
 }
 
+// rebaseTargets returns the ordered list of refs to rebase onto.
+func rebaseTargets(branch, defaultBranch string) []string {
+	return rebaseTargetsForBranch(branch, defaultBranch, "origin/"+branch)
+}
+
 func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string {
 	var targets []string
 	if branch != "" && branch != defaultBranch {
 		targets = append(targets, branchTarget)
 	}
 	if branch != defaultBranch {
-		targets = append(targets, baseTrackingRef(defaultBranch))
+		targets = append(targets, "origin/"+defaultBranch)
 	}
 	return targets
-}
-
-// rebaseTargetLabel maps an internal rebase target ref to a user-facing name so
-// conflict findings and summaries never leak the private per-worktree/fork ref
-// namespaces. The base ref becomes origin/<default>; fork and route pushed-branch
-// refs become fork:<branch> and route:<branch>. Anything else (already a
-// user-facing origin/<branch>) is returned unchanged.
-func rebaseTargetLabel(target, defaultBranch string) string {
-	switch {
-	case target == baseTrackingRef(defaultBranch):
-		return "origin/" + defaultBranch
-	case strings.HasPrefix(target, forkBranchRefPrefix):
-		return "fork:" + strings.TrimPrefix(target, forkBranchRefPrefix)
-	case strings.HasPrefix(target, routeBranchRefPrefix):
-		return "route:" + strings.TrimPrefix(target, routeBranchRefPrefix)
-	default:
-		return target
-	}
 }
 
 // forcePushRebaseTargets returns rebase targets for a force push. The pushed
@@ -208,7 +163,21 @@ func forcePushRebaseTargets(branch, defaultBranch string) []string {
 	if branch == defaultBranch {
 		return nil
 	}
-	return []string{baseTrackingRef(defaultBranch)}
+	return []string{"origin/" + defaultBranch}
+}
+
+// effectivePRBaseBranch resolves the branch used as the integration base for
+// rebases. The repository default remains the fallback for configurations that
+// do not select a separate PR target branch.
+func effectivePRBaseBranch(sctx *pipeline.StepContext) string {
+	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
+	if sctx.Config != nil && strings.TrimSpace(sctx.Config.PR.BaseBranch) != "" {
+		defaultBranch = strings.TrimSpace(sctx.Config.PR.BaseBranch)
+	}
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	return defaultBranch
 }
 
 // detectBundledLocalDefaultCommits returns a blocking finding when the gated
@@ -240,16 +209,7 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 	if localTip == "" {
 		return nil
 	}
-	// Compare against the base default branch the run actually rebases onto
-	// (baseTrackingRef), not the gate's origin/<default>. A selected route can
-	// point the base at a repo other than the gate origin; using origin/<default>
-	// there would miss commits already on origin but absent from the routed base
-	// and silently bundle them into the routed PR. baseTrackingRef is fetched
-	// fresh from the effective base remote earlier in Execute and is exactly what
-	// rebaseTargetsForBranch rebases onto, so the bundling check stays aligned
-	// with the real rebase target. For the common non-route case it carries the
-	// same commits as origin/<default>.
-	remoteRef := baseTrackingRef(defaultBranch)
+	remoteRef := "origin/" + defaultBranch
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", remoteRef+"^{commit}"); err != nil {
 		return nil
 	}
@@ -278,27 +238,17 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		firstFile = files[0]
 	}
 
-	// Phrase the remediation in terms of the effective base the run rebases onto
-	// (the route base when a route is selected, otherwise the gate origin), not a
-	// hardcoded origin/<default>. For a routed run the bundling check compares
-	// against the route base tracking ref, so advising "rebase onto origin/<default>"
-	// would not clear the finding.
-	baseLabel := strings.TrimSpace(sctx.Repo.UpstreamURL)
-	if baseLabel == "" {
-		baseLabel = "origin"
-	}
 	description := fmt.Sprintf(
-		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to the base %s branch (%s); rebasing would bundle this unrelated work (%d file(s)) into the PR:\n- %s\n\nPush %s to the base, or rebase your branch onto the base %s branch (%s), before gating.",
-		len(commits), defaultBranch, defaultBranch, baseLabel, len(files), strings.Join(commits, "\n- "), defaultBranch, defaultBranch, baseLabel,
+		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to origin/%s; rebasing would bundle this unrelated work (%d file(s)) into the PR:\n- %s\n\nPush %s to origin, or rebase your branch onto origin/%s, before gating.",
+		len(commits), defaultBranch, defaultBranch, len(files), strings.Join(commits, "\n- "), defaultBranch, defaultBranch,
 	)
 	findingsJSON, _ := json.Marshal(Findings{
 		Items: []Finding{{
 			Severity:    "warning",
 			File:        firstFile,
 			Description: description,
-			// Bundling another workstream's unpushed commits is a workflow call
-			// the gate owner must make (push <default>, rebase, or proceed); it
-			// needs non-local context but does not change product behavior.
+			// Bundling another workstream's unpushed commits needs non-local
+			// workflow context, but does not change product behavior.
 			Action: types.ActionAskMaster,
 		}},
 		Summary: fmt.Sprintf("branch bundles %d unpushed %s commit(s)", len(commits), defaultBranch),
@@ -319,11 +269,22 @@ func remoteDefaultBranchAdvanced(ctx context.Context, workDir, defaultBranch, ba
 	if baseSHA == "" || git.IsZeroSHA(baseSHA) {
 		return false
 	}
-	remoteSHA, err := git.Run(ctx, workDir, "rev-parse", "--verify", baseTrackingRef(defaultBranch))
+	remoteSHA, err := git.Run(ctx, workDir, "rev-parse", "--verify", "origin/"+defaultBranch)
 	if err != nil {
 		return false
 	}
 	return strings.TrimSpace(remoteSHA) != baseSHA
+}
+
+// isForcePush returns true when the current push is non-fast-forward relative
+// to the previous push (baseSHA). This indicates the user explicitly rewrote
+// history and the pipeline should treat the new HEAD as authoritative.
+func isForcePush(ctx context.Context, workDir, branch, baseSHA string) bool {
+	localRef := ""
+	if branch != "" {
+		localRef = "origin/" + branch
+	}
+	return isForcePushAgainstRemote(ctx, workDir, "origin", branch, localRef, baseSHA)
 }
 
 func isForcePushAgainstRemote(ctx context.Context, workDir, remote, branch, localRef, baseSHA string) bool {
@@ -361,42 +322,6 @@ func isForcePushAgainstRemote(ctx context.Context, workDir, remote, branch, loca
 
 func forkBranchTrackingRef(branch string) string {
 	return forkBranchRefPrefix + branch
-}
-
-// routeBranchRefPrefix namespaces the pushed-branch refs a run fetches when a
-// non-fork route's base URL differs from the gate origin. Like
-// baseTrackingRefPrefix these are PER-WORKTREE (refs/worktree/*): the route's
-// base may be an entirely different repo than the gate origin, so its branch
-// must not be written into the shared refs/remotes/origin/* namespace where it
-// would clobber the gate origin's view (and feed a wrong force-push fallback).
-const routeBranchRefPrefix = "refs/worktree/no-mistakes-route/"
-
-func routeBranchTrackingRef(branch string) string {
-	return routeBranchRefPrefix + branch
-}
-
-// remoteOrURL returns the explicit remote URL when set, otherwise the gate's
-// "origin" remote name. Fetching by URL (rather than the "origin" remote)
-// keeps the rebase aligned with a selected route's base, which may differ from
-// the gate origin; when the URL is empty it degrades to the pre-routes
-// behavior of using the origin remote.
-func remoteOrURL(url string) string {
-	if u := strings.TrimSpace(url); u != "" {
-		return u
-	}
-	return "origin"
-}
-
-// originRemoteURL returns the configured URL of the gate's "origin" remote, or
-// "" when it cannot be resolved. It lets the rebase distinguish a route base
-// that merely equals the gate origin (default path) from one that points at a
-// different repo, so only the latter is isolated into a per-worktree ref.
-func originRemoteURL(ctx context.Context, workDir string) string {
-	url, err := git.GetRemoteURL(ctx, workDir, "origin")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(url)
 }
 
 func isRemoteBranchRewritten(ctx context.Context, workDir, remoteRef string) bool {
@@ -477,8 +402,10 @@ Instructions:
 	}
 	prompt += userIntentPromptSection(sctx)
 	prompt += designContextPromptSection(sctx)
+	prompt += executionContextPromptSection(sctx.WorkDir)
+	prompt = testguidance.LateRepairPrompt(string(types.StepRebase), prompt)
 
-	_, err = sctx.Agent.Run(ctx, agent.RunOpts{
+	_, err = sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: commitSummarySchema,
@@ -589,6 +516,8 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
+		oldHead := sctx.Run.HeadSHA
+		pipeline.RemapUncertifiedPipelineRangeAfterRebase(sctx, oldHead, headSHA)
 		sctx.Run.HeadSHA = headSHA
 		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
 			return nil, err
@@ -598,10 +527,7 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 
 	// Check if the branch has any diff against the default branch.
 	// If the diff is empty (e.g. branch was already merged), skip remaining steps.
-	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
+	defaultBranch := effectivePRBaseBranch(sctx)
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, defaultBranch)
 	diff, err := git.Diff(ctx, sctx.WorkDir, baseSHA, "HEAD")
 	if err == nil && strings.TrimSpace(diff) == "" {

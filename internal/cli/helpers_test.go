@@ -45,6 +45,18 @@ func init() {
 		}
 		os.Exit(0)
 	}
+	if os.Getenv("NM_DAEMON_HELPER_PROCESS") == "bootstrap-sink" {
+		root, ok := explicitDaemonLogSinkRootFromArgs(os.Args[1:])
+		if !ok {
+			os.Exit(1)
+		}
+		_ = os.Setenv("NM_HOME", root)
+		if err := daemon.RunBootstrapLogSink(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv("NM_TEST_START_DAEMON") != "1" {
 		return
 	}
@@ -106,6 +118,13 @@ func explicitDaemonRunRootFromArgs(args []string) (string, bool) {
 		return args[3], true
 	}
 	return "", false
+}
+
+func explicitDaemonLogSinkRootFromArgs(args []string) (string, bool) {
+	if len(args) != 4 || args[0] != "daemon" || args[1] != "log-sink" || args[2] != "--root" || args[3] == "" {
+		return "", false
+	}
+	return args[3], true
 }
 
 // setupTestRepo creates a git repo with an origin remote in a temp dir and
@@ -355,7 +374,10 @@ func startTestDaemon(t *testing.T, p *paths.Paths, d *db.DB) {
 		errCh <- daemon.RunWithResources(p, d)
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
+	// Cold startup includes bounded recovery work, and production allows it up
+	// to 45 seconds. Do not fail a healthy in-process daemon before that same
+	// readiness budget expires.
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if alive, _ := daemon.IsRunning(p); alive {
 			break

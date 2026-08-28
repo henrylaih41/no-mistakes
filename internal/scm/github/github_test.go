@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -84,11 +85,22 @@ func TestHostPrefixedSlug(t *testing.T) {
 	}
 }
 
+func TestHostPrefixedSlugForHost_SSHAlias(t *testing.T) {
+	remote := "git@github-personal:owner/repo.git"
+	if got := HostPrefixedSlugForHost(remote, "github.com"); got != "owner/repo" {
+		t.Fatalf("HostPrefixedSlugForHost() = %q, want owner/repo", got)
+	}
+	if got := HostPrefixedSlugForHost(remote, "ghe.example.com"); got != "ghe.example.com/owner/repo" {
+		t.Fatalf("HostPrefixedSlugForHost() = %q, want ghe.example.com/owner/repo", got)
+	}
+}
+
 func TestGetChecksPassesRepoFlag(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt": {
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
 			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass"}]` + "\n",
 		},
 	}), nil, "", "test/repo")
@@ -99,6 +111,672 @@ func TestGetChecksPassesRepoFlag(t *testing.T) {
 	}
 	if len(checks) != 1 || checks[0].Name != "build" {
 		t.Fatalf("checks = %+v, want single build check", checks)
+	}
+}
+
+// A failing gh must surface its stderr in the error: a broken gh (e.g. < v2.50
+// rejecting `pr checks --json`) is only diagnosable from the step log if the
+// provider message survives the error. See the #644 hardening intent.
+func TestGetChecksSurfacesGHErrorStderr(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stderr: "flag needs an argument: --json",
+			code:   1,
+		},
+	}), nil, "", "test/repo")
+
+	_, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
+	if err == nil {
+		t.Fatal("GetChecks() expected the gh failure to propagate")
+	}
+	if !strings.Contains(err.Error(), "flag needs an argument: --json") {
+		t.Fatalf("GetChecks() error = %v, want gh stderr in the error", err)
+	}
+}
+
+func TestGetChecksIncludesFailedWorkflowRunMissingFromPRRollup(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stdout: `[
+				{"name":"clippy","state":"SUCCESS","bucket":"pass"},
+				{"name":"request-owner-review","state":"SUCCESS","bucket":"pass"}
+			]` + "\n",
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":1,"workflow_runs":[
+				{"id":101,"name":"workflow-validation","display_title":"","status":"completed","conclusion":"failure","updated_at":"2026-07-30T12:34:56Z"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 3 {
+		t.Fatalf("GetChecks() returned %d checks, want 3: %+v", len(checks), checks)
+	}
+	got := checks[2]
+	if got.Name != "workflow-validation" || got.Bucket != scm.CheckBucketFail {
+		t.Fatalf("workflow run check = %+v, want workflow-validation/fail", got)
+	}
+	wantCompletedAt := time.Date(2026, 7, 30, 12, 34, 56, 0, time.UTC)
+	if !got.CompletedAt.Equal(wantCompletedAt) {
+		t.Fatalf("workflow run CompletedAt = %v, want %v", got.CompletedAt, wantCompletedAt)
+	}
+}
+
+func TestGetChecksIncludesFailedWorkflowRunWhenPRHasNoChecks(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stderr: "no checks reported on the 'feature' branch\n",
+			code:   1,
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":1,"workflow_runs":[
+				{"id":101,"name":"workflow-validation","display_title":"","status":"completed","conclusion":"failure","updated_at":"2026-07-30T12:34:56Z"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("GetChecks() returned %d checks, want 1: %+v", len(checks), checks)
+	}
+	if got := checks[0]; got.Name != "workflow-validation" || got.Bucket != scm.CheckBucketFail {
+		t.Fatalf("workflow run check = %+v, want workflow-validation/fail", got)
+	}
+}
+
+func TestGetChecksUsesLivePRHeadForWorkflowDiscovery(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "live-head\n"},
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass"}]` + "\n",
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=live-head -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":0,"workflow_runs":[]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	pr := &scm.PR{Number: "123", HeadSHA: "stale-head"}
+	checks, err := host.GetChecks(context.Background(), pr)
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 1 || checks[0].Name != "build" {
+		t.Fatalf("checks = %+v, want live-head build rollup", checks)
+	}
+	if pr.HeadSHA != "live-head" {
+		t.Fatalf("PR HeadSHA = %q, want live-head", pr.HeadSHA)
+	}
+}
+
+func TestGetChecksBindsRollupAcrossABAHeadMovement(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "h1\n"},
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stdout: `[{"name":"h2-build","state":"SUCCESS","bucket":"pass"}]` + "\n",
+		},
+		githubCommitChecksCommand("", "test/repo", "h1"): {
+			stdout: githubCommitChecksResponse(`[{"__typename":"CheckRun","name":"h1-build","status":"COMPLETED","conclusion":"FAILURE"}]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=h1 -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":0,"workflow_runs":[]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "stale"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 1 || checks[0].Name != "h1-build" || checks[0].Bucket != scm.CheckBucketFail {
+		t.Fatalf("checks = %+v, want exact-H1 failed rollup", checks)
+	}
+}
+
+func TestGetChecksWorkflowCancellationKeepsRerunIdentity(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stdout: "[]\n",
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":1,"workflow_runs":[{"id":101,"name":"build","status":"completed","conclusion":"cancelled"}]}]` + "\n",
+		},
+		"gh run rerun 101 --repo test/repo": {},
+	}), nil, "", "test/repo")
+
+	pr := &scm.PR{Number: "123", HeadSHA: "deadbeef"}
+	checks, err := host.GetChecks(context.Background(), pr)
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("checks = %+v, want one cancelled workflow", checks)
+	}
+	check := checks[0]
+	if check.Bucket != scm.CheckBucketCancel || check.State != "CANCELLED" || check.Link != "https://github.com/test/repo/actions/runs/101" {
+		t.Fatalf("workflow check = %+v, want rerunnable cancelled run", check)
+	}
+	if err := host.RerunCheck(context.Background(), pr, check); err != nil {
+		t.Fatalf("RerunCheck() error = %v", err)
+	}
+}
+
+func TestGetChecksDoesNotDuplicateWorkflowRunsRepresentedByRollup(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stdout: `[{"name":"build","state":"CANCELLED","bucket":"cancel","link":"https://github.com/test/repo/actions/runs/101/job/201"}]` + "\n",
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":2,"workflow_runs":[
+				{"id":101,"name":"represented-workflow","status":"completed","conclusion":"cancelled"},
+				{"id":102,"name":"workflow-only","status":"completed","conclusion":"failure"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("checks = %+v, want rollup job plus unrepresented workflow", checks)
+	}
+	if checks[0].Name != "build" || checks[1].Name != "workflow-only" {
+		t.Fatalf("checks = %+v, want build and workflow-only", checks)
+	}
+}
+
+// The raw commit statusCheckRollup keeps every check run a commit ever had,
+// including a same-named run a later run has already superseded (e.g. a CI
+// monitor auto-fix push re-triggering the same gate check). Without a
+// latest-wins collapse the stale FAILURE stays visible forever even though a
+// later SUCCESS at the same head replaced it, which manufactures an
+// unrecoverable auto-fix loop. GetChecks must collapse to the newest
+// startedAt so the caller sees zero failing checks.
+func TestGetChecksCollapsesSupersededSameNameCheckToLatestAtOneHead(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":2,"workflow_runs":[
+				{"id":101,"workflow_id":1001,"name":"gate","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"},
+				{"id":102,"workflow_id":1001,"name":"gate","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "stale"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("GetChecks() returned %d checks, want the superseded run collapsed away: %+v", len(checks), checks)
+	}
+	if got := checks[0]; got.Name != "gate" || got.Bucket != scm.CheckBucketPass {
+		t.Fatalf("checks[0] = %+v, want the latest SUCCESS run to win", got)
+	}
+	for _, c := range checks {
+		if c.Bucket == scm.CheckBucketFail {
+			t.Fatalf("checks = %+v, want zero failing checks after collapse", checks)
+		}
+	}
+}
+
+// Order matters: appendUnrepresentedWorkflowRuns dedupes the Actions-run
+// union against the checks slice by run ID. If collapseLatestByName ran
+// BEFORE that union, the superseded run's ID would drop out of the
+// "represented" set and the union would re-add the exact same stale run
+// under its own workflow run name - resurrecting the failure the collapse
+// was supposed to hide. This test pins the union-then-collapse order: both
+// the superseded and the winning run are independently visible to the
+// workflow-run API (as they would be on a real repo), and the union must
+// recognize both as already represented rather than re-adding either.
+func TestGetChecksCollapseOrderingDoesNotLetWorkflowRunUnionResurrectSupersededCheck(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":2,"workflow_runs":[
+				{"id":101,"workflow_id":1001,"name":"gate - synchronize - event 1 (run 101)","status":"completed","conclusion":"failure"},
+				{"id":102,"workflow_id":1001,"name":"gate - edited - event 2 (run 102)","status":"completed","conclusion":"success"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("GetChecks() returned %d checks, want the union to add nothing and the collapse to leave one: %+v", len(checks), checks)
+	}
+	if got := checks[0]; got.Name != "gate" || got.Bucket != scm.CheckBucketPass {
+		t.Fatalf("checks[0] = %+v, want the latest SUCCESS run to win with no resurrected failure", got)
+	}
+}
+
+func TestGetChecksPreservesIndependentSameNameWorkflows(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":2,"workflow_runs":[
+				{"id":102,"workflow_id":1002,"name":"build","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z"},
+				{"id":103,"workflow_id":1003,"name":"build","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("GetChecks() returned %d checks, want both independent same-name workflows: %+v", len(checks), checks)
+	}
+	buckets := map[scm.CheckBucket]int{}
+	for _, check := range checks {
+		buckets[check.Bucket]++
+	}
+	if buckets[scm.CheckBucketPass] != 1 || buckets[scm.CheckBucketFail] != 1 {
+		t.Fatalf("GetChecks() buckets = %v, want independent passing and failing workflows", buckets)
+	}
+}
+
+func TestGetChecksPreservesSameNameJobsWithinOneWorkflowRun(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/201"},
+				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":1,"workflow_runs":[
+				{"id":102,"workflow_id":1001,"name":"build","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("GetChecks() returned %d checks, want both same-name jobs from one workflow run: %+v", len(checks), checks)
+	}
+	buckets := map[scm.CheckBucket]int{}
+	for _, check := range checks {
+		buckets[check.Bucket]++
+	}
+	if buckets[scm.CheckBucketPass] != 1 || buckets[scm.CheckBucketFail] != 1 {
+		t.Fatalf("GetChecks() buckets = %v, want independent passing and failing jobs", buckets)
+	}
+}
+
+func TestGetChecksPreservesIndependentSameNameExternalCheckRuns(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://ci-one.example.com/build/42"},
+				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://ci-two.example.com/build/99"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":0,"workflow_runs":[]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("GetChecks() returned %d checks, want both independent external checks: %+v", len(checks), checks)
+	}
+	buckets := map[scm.CheckBucket]int{}
+	for _, check := range checks {
+		buckets[check.Bucket]++
+	}
+	if buckets[scm.CheckBucketPass] != 1 || buckets[scm.CheckBucketFail] != 1 {
+		t.Fatalf("GetChecks() buckets = %v, want independent passing and failing external checks", buckets)
+	}
+}
+
+func TestGetChecksCollapseComparesNewestRunWithEverySameNameCandidate(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"gate","status":"QUEUED","conclusion":null,"startedAt":null,"completedAt":null,"detailsUrl":"https://checks.example.com/runs/pending"},
+				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":2,"workflow_runs":[
+				{"id":101,"workflow_id":1001,"name":"gate","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"},
+				{"id":102,"workflow_id":1001,"name":"gate","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("GetChecks() returned %d checks, want unordered pending plus newest ordered run: %+v", len(checks), checks)
+	}
+	buckets := map[scm.CheckBucket]int{}
+	for _, check := range checks {
+		buckets[check.Bucket]++
+	}
+	if buckets[scm.CheckBucketPending] != 1 || buckets[scm.CheckBucketPass] != 1 || buckets[scm.CheckBucketFail] != 0 {
+		t.Fatalf("GetChecks() buckets = %v, want pending external check plus latest passing Actions run", buckets)
+	}
+}
+
+func TestGetChecksPreservesSameNameStatusContextAndCheckRun(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"},
+				{"__typename":"StatusContext","context":"build","state":"FAILURE","targetUrl":"https://ci.example.com/build/42"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":1,"workflow_runs":[
+				{"id":102,"name":"build","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z","updated_at":"2026-08-26T08:39:50Z"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("GetChecks() returned %d checks, want both same-name records: %+v", len(checks), checks)
+	}
+	if checks[0].Kind != scm.CheckKindRun || checks[0].Bucket != scm.CheckBucketPass {
+		t.Fatalf("checks[0] = %+v, want passing check run", checks[0])
+	}
+	if checks[1].Kind != scm.CheckKindStatus || checks[1].Bucket != scm.CheckBucketFail {
+		t.Fatalf("checks[1] = %+v, want failing commit status", checks[1])
+	}
+}
+
+func TestGetChecksKeepsQueuedReplacementWithEqualStartTime(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","name":"CI","status":"QUEUED","conclusion":null,"startedAt":null,"completedAt":null,"detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":2,"workflow_runs":[
+				{"id":101,"workflow_id":1001,"name":"CI","status":"completed","conclusion":"failure","created_at":"2026-08-26T08:25:45Z","updated_at":"2026-08-26T08:25:56Z"},
+				{"id":102,"workflow_id":1001,"name":"CI","status":"queued","conclusion":null,"created_at":"2026-08-26T08:25:50Z","updated_at":"2026-08-26T08:25:50Z"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("GetChecks() returned %d checks, want one: %+v", len(checks), checks)
+	}
+	if got := checks[0]; got.Name != "CI" || got.Bucket != scm.CheckBucketPending {
+		t.Fatalf("checks[0] = %+v, want the queued replacement to supersede the old failure", got)
+	}
+	wantStartedAt := time.Date(2026, 8, 26, 8, 25, 50, 0, time.UTC)
+	if !checks[0].StartedAt.Equal(wantStartedAt) {
+		t.Fatalf("checks[0].StartedAt = %v, want workflow creation time %v", checks[0].StartedAt, wantStartedAt)
+	}
+}
+
+func TestGetChecksPreservesUnorderedExternalPendingReplacement(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[
+				{"__typename":"CheckRun","name":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","name":"CI","status":"QUEUED","conclusion":null,"startedAt":null,"completedAt":null,"detailsUrl":"https://checks.example.com/runs/replacement"}
+			]`),
+		},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[{"total_count":1,"workflow_runs":[
+				{"id":101,"name":"CI","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z","updated_at":"2026-08-26T08:25:56Z"}
+			]}]` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("GetChecks() returned %d checks, want both unordered records: %+v", len(checks), checks)
+	}
+	buckets := map[scm.CheckBucket]int{}
+	for _, check := range checks {
+		buckets[check.Bucket]++
+	}
+	if buckets[scm.CheckBucketFail] != 1 || buckets[scm.CheckBucketPending] != 1 {
+		t.Fatalf("GetChecks() buckets = %v, want one failure and one pending replacement", buckets)
+	}
+}
+
+func TestGetChecksUsesWorkflowRunStartTimeWhenCollapsingSameNameChecks(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		timestamp string
+	}{
+		{name: "run_started_at", timestamp: `"run_started_at":"2026-08-26T08:39:44Z"`},
+		{name: "created_at fallback", timestamp: `"created_at":"2026-08-26T08:39:44Z"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+				githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+					stdout: githubCommitChecksResponse(`[
+						{"__typename":"CheckRun","name":"CI","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"}
+					]`),
+				},
+				"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+					stdout: `[{"total_count":2,"workflow_runs":[
+						{"id":101,"workflow_id":1001,"name":"CI","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:25:50Z","updated_at":"2026-08-26T08:25:56Z"},
+						{"id":102,"workflow_id":1001,"name":"CI","status":"completed","conclusion":"failure",` + tc.timestamp + `,"updated_at":"2026-08-26T08:39:50Z"}
+					]}]` + "\n",
+				},
+			}), nil, "", "test/repo")
+
+			checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+			if err != nil {
+				t.Fatalf("GetChecks() error = %v", err)
+			}
+			if len(checks) != 1 {
+				t.Fatalf("GetChecks() returned %d checks, want one: %+v", len(checks), checks)
+			}
+			if got := checks[0]; got.Name != "CI" || got.Bucket != scm.CheckBucketFail {
+				t.Fatalf("checks[0] = %+v, want the newer failed workflow run to win", got)
+			}
+			wantStartedAt := time.Date(2026, 8, 26, 8, 39, 44, 0, time.UTC)
+			if !checks[0].StartedAt.Equal(wantStartedAt) {
+				t.Fatalf("checks[0].StartedAt = %v, want %v", checks[0].StartedAt, wantStartedAt)
+			}
+		})
+	}
+}
+
+func TestGetChecksDoesNotTrustUnrelatedWorkflowRunLinks(t *testing.T) {
+	t.Parallel()
+
+	for name, link := range map[string]string{
+		"third-party host": "https://ci.example.com/test/repo/actions/runs/101/job/201",
+		"wrong repository": "https://github.com/other/repo/actions/runs/101/job/201",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+				"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+					stdout: `[{"name":"external","state":"SUCCESS","bucket":"pass","link":"` + link + `"}]` + "\n",
+				},
+				"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+					stdout: `[{"total_count":1,"workflow_runs":[{"id":101,"name":"failed-workflow","status":"completed","conclusion":"failure"}]}]` + "\n",
+				},
+			}), nil, "", "test/repo")
+
+			checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+			if err != nil {
+				t.Fatalf("GetChecks() error = %v", err)
+			}
+			if len(checks) != 2 || checks[1].Name != "failed-workflow" || checks[1].Bucket != scm.CheckBucketFail {
+				t.Fatalf("checks = %+v, want unrelated rollup plus failed workflow", checks)
+			}
+		})
+	}
+}
+
+func TestGetChecksIncludesWorkflowRunsFromEveryPage(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo ghe.example.com/test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+		"gh pr checks 123 --repo ghe.example.com/test/repo --json name,state,bucket,completedAt,link": {
+			stdout: `[{"name":"clippy","state":"SUCCESS","bucket":"pass"}]` + "\n",
+		},
+		"gh api --hostname ghe.example.com --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+			stdout: `[
+				{"total_count":2,"workflow_runs":[{"id":101,"name":"first-page","status":"completed","conclusion":"success"}]},
+				{"total_count":2,"workflow_runs":[{"id":102,"name":"second-page-failure","status":"completed","conclusion":"failure"}]}
+			]` + "\n",
+		},
+	}), nil, "ghe.example.com", "ghe.example.com/test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 3 {
+		t.Fatalf("GetChecks() returned %d checks, want 3: %+v", len(checks), checks)
+	}
+	if got := checks[2]; got.Name != "second-page-failure" || got.Bucket != scm.CheckBucketFail {
+		t.Fatalf("last workflow run check = %+v, want second-page-failure/fail", got)
+	}
+}
+
+func TestGetChecksRejectsIncompleteWorkflowPagination(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		response   string
+		wantErrSub string
+	}{
+		{
+			name:       "truncated",
+			response:   `[{"total_count":2,"workflow_runs":[{"id":101,"name":"visible","status":"completed","conclusion":"success"}]}]`,
+			wantErrSub: "returned 1 unique runs, want 2",
+		},
+		{
+			name: "inconsistent totals",
+			response: `[
+				{"total_count":2,"workflow_runs":[{"id":101,"name":"first","status":"completed","conclusion":"success"}]},
+				{"total_count":3,"workflow_runs":[{"id":102,"name":"second","status":"completed","conclusion":"success"}]}
+			]`,
+			wantErrSub: "total_count is 3, want 2",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+				"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+					stdout: `[{"name":"clippy","state":"SUCCESS","bucket":"pass"}]` + "\n",
+				},
+				"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+					stdout: tc.response + "\n",
+				},
+			}), nil, "", "test/repo")
+
+			_, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Fatalf("GetChecks() error = %v, want containing %q", err, tc.wantErrSub)
+			}
+		})
 	}
 }
 
@@ -166,11 +844,54 @@ func TestUpdatePRStreamsBodyThroughStdin(t *testing.T) {
 	}
 }
 
+// UpdatePR shares the same explicit-PR selector boundary as the read methods:
+// when the number is absent it must target the canonical PR URL, never an empty
+// positional that makes `gh pr edit` resolve the cwd branch (main) from the
+// detached bare gate repo and edit the wrong PR.
+func TestUpdatePRTargetsKnownPRByURLWhenNumberMissing(t *testing.T) {
+	t.Parallel()
+
+	var recorded [][]string
+	host := New(recordingCmdFactory("", &recorded), nil, "", "test/repo")
+
+	prURL := "https://github.com/test/repo/pull/123"
+	if _, err := host.UpdatePR(context.Background(), &scm.PR{URL: prURL}, scm.PRContent{
+		Title: "fix: cap body",
+		Body:  "body",
+	}); err != nil {
+		t.Fatalf("UpdatePR() error = %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("expected exactly one gh invocation, got %d: %v", len(recorded), recorded)
+	}
+	got := recorded[0]
+	// argv is: gh pr edit <selector> --repo ...
+	if len(got) < 4 || got[1] != "pr" || got[2] != "edit" {
+		t.Fatalf("unexpected argv: %v", got)
+	}
+	if selector := got[3]; selector != prURL {
+		t.Fatalf("edit selector = %q, want the known PR URL %q (empty selector makes gh resolve the cwd branch)", selector, prURL)
+	}
+}
+
+// UpdatePR must fail closed exactly like the read methods: with neither number
+// nor URL it refuses to shell out rather than running an argument-less
+// `gh pr edit` that would edit the inferred cwd branch's PR.
+func TestUpdatePRFailsClosedWithoutIdentity(t *testing.T) {
+	t.Parallel()
+
+	host := New(failIfInvokedCmdFactory(t), nil, "", "test/repo")
+
+	if _, err := host.UpdatePR(context.Background(), &scm.PR{}, scm.PRContent{Title: "t", Body: "b"}); err == nil {
+		t.Fatal("UpdatePR() with no PR identity: expected error, got nil")
+	}
+}
+
 func TestGetChecksFallsBackToStateWhenBucketMissing(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --json name,state,bucket,completedAt": {
+		"gh pr checks 123 --json name,state,bucket,completedAt,link": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":""},{"name":"tests","state":"PENDING","bucket":""}]` + "\n",
 		},
 	}), nil, "", "")
@@ -190,11 +911,140 @@ func TestGetChecksFallsBackToStateWhenBucketMissing(t *testing.T) {
 	}
 }
 
+// recordingCmdFactory captures the argv of every gh invocation into recorded
+// and replies with a fixed successful stdout, so tests can assert exactly which
+// PR selector reached gh instead of matching a whole command string.
+func recordingCmdFactory(stdout string, recorded *[][]string) CmdFactory {
+	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		*recorded = append(*recorded, append([]string{name}, args...))
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestGitHubHelperProcess", "--", "recorded")
+		cmd.Env = append(os.Environ(),
+			"GITHUB_TEST_HELPER=1",
+			"GITHUB_TEST_STDOUT="+stdout,
+			"GITHUB_TEST_EXIT_CODE=0",
+		)
+		return cmd
+	}
+}
+
+// failIfInvokedCmdFactory fails the test if gh is invoked at all. It proves that
+// a PR-targeting call fails closed (never shelling out) when the PR identity is
+// unknown, instead of running an argument-less gh that infers the cwd branch.
+func failIfInvokedCmdFactory(t *testing.T) CmdFactory {
+	t.Helper()
+	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		t.Fatalf("gh should not be invoked without a known PR identity; got: %s %s", name, strings.Join(args, " "))
+		return nil
+	}
+}
+
+// The final CI check lookup must target the exact PR the pipeline already knows.
+//
+// Trigger: the CI monitor calls GetChecks with a PR the pipeline identifies by
+// URL (Number can be empty when the identity was carried as a URL only).
+// Masking condition: the daemon runs gh from the detached bare gate repo whose
+// HEAD is the default branch (main).
+// Symptom: appending an empty pr.Number produced an argument-less
+// `gh pr checks --repo <slug>`, so gh fell back to resolving the cwd branch
+// (main) and reported "no pull requests found for branch main" even though the
+// feature PR's exact-head checks are green — certification could never finish.
+//
+// The fix passes the canonical PR URL as the explicit selector when the number
+// is absent, so the target is always the known PR, never an inferred branch.
+func TestGetChecksTargetsKnownPRByURLWhenNumberMissing(t *testing.T) {
+	t.Parallel()
+
+	var recorded [][]string
+	host := New(recordingCmdFactory("[]\n", &recorded), nil, "", "test/repo")
+
+	prURL := "https://github.com/test/repo/pull/123"
+	if _, err := host.GetChecks(context.Background(), &scm.PR{URL: prURL}); err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("expected exactly one gh invocation, got %d: %v", len(recorded), recorded)
+	}
+	got := recorded[0]
+	// argv is: gh pr checks <selector> --repo ...
+	if len(got) < 4 || got[1] != "pr" || got[2] != "checks" {
+		t.Fatalf("unexpected argv: %v", got)
+	}
+	selector := got[3]
+	if selector != prURL {
+		t.Fatalf("check selector = %q, want the known PR URL %q (empty selector makes gh resolve the cwd branch)", selector, prURL)
+	}
+}
+
+// Compare with the proven explicit-PR invocation: when the number is known it is
+// passed verbatim as the selector, exactly as before.
+func TestGetChecksTargetsKnownPRByNumber(t *testing.T) {
+	t.Parallel()
+
+	var recorded [][]string
+	host := New(recordingCmdFactory("[]\n", &recorded), nil, "", "test/repo")
+
+	if _, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", URL: "https://github.com/test/repo/pull/123"}); err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(recorded) != 1 || len(recorded[0]) < 4 {
+		t.Fatalf("unexpected invocations: %v", recorded)
+	}
+	if selector := recorded[0][3]; selector != "123" {
+		t.Fatalf("check selector = %q, want %q", selector, "123")
+	}
+}
+
+// Missing/invalid PR identity must stop safely rather than checking main or some
+// other PR: with neither number nor URL, the PR-targeting reads refuse to shell
+// out at all.
+func TestPRTargetingReadsFailClosedWithoutIdentity(t *testing.T) {
+	t.Parallel()
+
+	host := New(failIfInvokedCmdFactory(t), nil, "", "test/repo")
+	pr := &scm.PR{}
+
+	if _, err := host.GetChecks(context.Background(), pr); err == nil {
+		t.Fatal("GetChecks() with no PR identity: expected error, got nil")
+	}
+	if _, err := host.GetPRState(context.Background(), pr); err == nil {
+		t.Fatal("GetPRState() with no PR identity: expected error, got nil")
+	}
+	if _, err := host.GetMergeableState(context.Background(), pr); err == nil {
+		t.Fatal("GetMergeableState() with no PR identity: expected error, got nil")
+	}
+}
+
+// GetPRState and GetMergeableState share the same selector boundary as
+// GetChecks, so a URL-only PR must target the URL there too.
+func TestPRStateAndMergeableTargetKnownPRByURL(t *testing.T) {
+	t.Parallel()
+
+	prURL := "https://github.com/test/repo/pull/123"
+
+	var stateArgs [][]string
+	stateHost := New(recordingCmdFactory("OPEN\n", &stateArgs), nil, "", "test/repo")
+	if _, err := stateHost.GetPRState(context.Background(), &scm.PR{URL: prURL}); err != nil {
+		t.Fatalf("GetPRState() error = %v", err)
+	}
+	if len(stateArgs) != 1 || len(stateArgs[0]) < 4 || stateArgs[0][3] != prURL {
+		t.Fatalf("GetPRState selector = %v, want %q at argv[3]", stateArgs, prURL)
+	}
+
+	var mergeArgs [][]string
+	mergeHost := New(recordingCmdFactory("MERGEABLE\n", &mergeArgs), nil, "", "test/repo")
+	if _, err := mergeHost.GetMergeableState(context.Background(), &scm.PR{URL: prURL}); err != nil {
+		t.Fatalf("GetMergeableState() error = %v", err)
+	}
+	if len(mergeArgs) != 1 || len(mergeArgs[0]) < 4 || mergeArgs[0][3] != prURL {
+		t.Fatalf("GetMergeableState selector = %v, want %q at argv[3]", mergeArgs, prURL)
+	}
+}
+
 func TestGetChecksParsesCompletedAt(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --json name,state,bucket,completedAt": {
+		"gh pr checks 123 --json name,state,bucket,completedAt,link": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":"fail","completedAt":"2026-04-24T04:15:00Z"},{"name":"tests","state":"SUCCESS","bucket":"pass","completedAt":"not-a-time"}]` + "\n",
 		},
 	}), nil, "", "")
@@ -213,6 +1063,165 @@ func TestGetChecksParsesCompletedAt(t *testing.T) {
 	}
 	if !checks[1].CompletedAt.IsZero() {
 		t.Fatalf("checks[1].CompletedAt = %v, want zero time for invalid timestamp", checks[1].CompletedAt)
+	}
+}
+
+func TestGetChecksParsesStateAndLink(t *testing.T) {
+	t.Parallel()
+
+	const link = "https://github.com/test/repo/actions/runs/900/job/901"
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr checks 123 --json name,state,bucket,completedAt,link": {
+			stdout: `[{"name":"build","state":"cancelled","bucket":"cancel","link":"` + link + `"}]` + "\n",
+		},
+	}), nil, "", "")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("len(checks) = %d, want 1", len(checks))
+	}
+	// The state is what tells a cancelled check apart from a failed one, and the
+	// link is what identifies the job to re-run. Both are normalized: the state
+	// upper-cased so callers can compare it, the link trimmed.
+	if checks[0].State != "CANCELLED" {
+		t.Fatalf("checks[0].State = %q, want CANCELLED", checks[0].State)
+	}
+	if checks[0].Link != link {
+		t.Fatalf("checks[0].Link = %q, want %q", checks[0].Link, link)
+	}
+}
+
+// A rerun must target the exact job behind the check so a genuinely failing job
+// in the same workflow run is not re-run along with it. Real details URLs carry
+// a query (?check_suite_focus=true) or a step fragment (#step:4:12), and neither
+// is part of the job identity, so every one of these shapes must reach the same
+// single job.
+func TestRerunCheckTargetsJobFromCheckLink(t *testing.T) {
+	t.Parallel()
+
+	for name, link := range map[string]string{
+		"plain":              "https://github.com/test/repo/actions/runs/900/job/901",
+		"query string":       "https://github.com/test/repo/actions/runs/900/job/901?check_suite_focus=true",
+		"step fragment":      "https://github.com/test/repo/actions/runs/900/job/901#step:4:12",
+		"query and fragment": "https://github.com/test/repo/actions/runs/900/job/901?check_suite_focus=true#step:4:12",
+		"trailing slash":     "https://github.com/test/repo/actions/runs/900/job/901/",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var recorded [][]string
+			host := New(recordingCmdFactory("", &recorded), nil, "", "test/repo")
+
+			check := scm.Check{
+				Name:   "build (ubuntu-latest)",
+				Bucket: scm.CheckBucketCancel,
+				State:  "CANCELLED",
+				Link:   link,
+			}
+			if err := host.RerunCheck(context.Background(), &scm.PR{Number: "123"}, check); err != nil {
+				t.Fatalf("RerunCheck() error = %v", err)
+			}
+			if len(recorded) != 1 {
+				t.Fatalf("expected exactly one gh invocation, got %d: %v", len(recorded), recorded)
+			}
+			want := []string{"gh", "run", "rerun", "--job", "901", "--repo", "test/repo"}
+			if strings.Join(recorded[0], " ") != strings.Join(want, " ") {
+				t.Fatalf("rerun argv = %v, want %v", recorded[0], want)
+			}
+		})
+	}
+}
+
+func TestRerunCheckTargetsWholeCancelledRun(t *testing.T) {
+	t.Parallel()
+
+	for name, link := range map[string]string{
+		"run only":       "https://github.com/test/repo/actions/runs/900",
+		"trailing slash": "https://github.com/test/repo/actions/runs/900/",
+		"with a query":   "https://github.com/test/repo/actions/runs/900?check_suite_focus=true",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var recorded [][]string
+			host := New(recordingCmdFactory("", &recorded), nil, "", "test/repo")
+
+			check := scm.Check{
+				Name:   "build",
+				Bucket: scm.CheckBucketCancel,
+				State:  "CANCELLED",
+				Link:   link,
+			}
+			if err := host.RerunCheck(context.Background(), &scm.PR{Number: "123"}, check); err != nil {
+				t.Fatalf("RerunCheck() error = %v", err)
+			}
+			if len(recorded) != 1 {
+				t.Fatalf("expected exactly one gh invocation, got %d: %v", len(recorded), recorded)
+			}
+			want := []string{"gh", "run", "rerun", "900", "--repo", "test/repo"}
+			if strings.Join(recorded[0], " ") != strings.Join(want, " ") {
+				t.Fatalf("rerun argv = %v, want %v", recorded[0], want)
+			}
+		})
+	}
+}
+
+// A link this backend cannot resolve to one job must not be downgraded into a
+// whole-run rerun: that would re-run every failed job in the run, including
+// genuinely failing ones, on the strength of a link it could not read. It fails
+// closed instead, so the check escalates exactly as it would without the policy.
+//
+// The browser's plural ".../jobs/<n>" form is one of these: that number is a
+// per-run display index the API answers with 404, not the job databaseId
+// `gh run rerun --job` needs.
+func TestRerunCheckFailsClosedWithoutAnActionsJob(t *testing.T) {
+	t.Parallel()
+
+	for name, link := range map[string]string{
+		"external dashboard":       "https://ci.example.com/builds/17",
+		"third-party Actions path": "https://ci.example.com/test/repo/actions/runs/900/job/901",
+		"wrong Actions repository": "https://github.com/other/repo/actions/runs/900/job/901",
+		"no link":                  "",
+		"non-numeric run":          "https://github.com/test/repo/actions/runs/latest",
+		"browser display number":   "https://github.com/test/repo/actions/runs/900/jobs/3",
+		"display number with args": "https://github.com/test/repo/actions/runs/900/jobs/3?pr=1",
+		"non-numeric job segment":  "https://github.com/test/repo/actions/runs/900/job/latest",
+		"job segment with a step":  "https://github.com/test/repo/actions/runs/900/job/latest#step:1:1",
+		"unknown run subpath":      "https://github.com/test/repo/actions/runs/900/attempts/2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := New(failIfInvokedCmdFactory(t), nil, "", "test/repo")
+			err := host.RerunCheck(context.Background(), &scm.PR{Number: "123"}, scm.Check{Name: "build", Bucket: scm.CheckBucketFail, State: "TIMED_OUT", Link: link})
+			if err == nil {
+				t.Fatal("RerunCheck() expected an error for a check with no Actions job")
+			}
+		})
+	}
+}
+
+// The provider refusing the rerun must reach the caller: the CI step decides
+// what to do with a failed request, and silently reporting success would make it
+// wait for a re-run that never happens.
+func TestRerunCheckPropagatesProviderError(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh run rerun --job 901 --repo test/repo": {
+			stderr: "HTTP 403: Unable to retry this workflow run",
+			code:   1,
+		},
+	}), nil, "", "test/repo")
+
+	err := host.RerunCheck(context.Background(), &scm.PR{Number: "123"}, scm.Check{
+		Name:   "build",
+		Bucket: scm.CheckBucketFail,
+		State:  "TIMED_OUT",
+		Link:   "https://github.com/test/repo/actions/runs/900/job/901",
+	})
+	if err == nil {
+		t.Fatal("RerunCheck() expected the provider error to propagate")
+	}
+	if !strings.Contains(err.Error(), "Unable to retry this workflow run") {
+		t.Fatalf("RerunCheck() error = %v, want the provider message", err)
 	}
 }
 
@@ -243,12 +1252,67 @@ func TestFetchFailedCheckLogsSelectsMatchingRunForHeadSHA(t *testing.T) {
 	}
 }
 
+// A GitHub Actions action-download outage fails a job inside "Set up job",
+// before any repository step runs. PreRunFailures must flag exactly that job -
+// read structurally from the setup step's conclusion, never from log text - and
+// must never flag a job that cleared setup and failed a later (repository) step.
+// The two directions together are the masking-safety contract.
+func TestPreRunFailures_FlagsSetupFailureNotGenuine(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh run view 1 --repo test/repo --json jobs": {
+			stdout: `{"jobs":[` +
+				`{"databaseId":2,"name":"build","conclusion":"failure","steps":[{"name":"Set up job","number":1,"conclusion":"failure"}]},` +
+				`{"databaseId":3,"name":"unit","conclusion":"failure","steps":[{"name":"Set up job","number":1,"conclusion":"success"},{"name":"Run tests","number":2,"conclusion":"failure"}]}` +
+				`]}` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	infra, err := host.PreRunFailures(context.Background(), []scm.Check{
+		{Name: "build", Bucket: scm.CheckBucketFail, State: "FAILURE", Link: "https://github.com/test/repo/actions/runs/1/job/2"},
+		{Name: "unit", Bucket: scm.CheckBucketFail, State: "FAILURE", Link: "https://github.com/test/repo/actions/runs/1/job/3"},
+	})
+	if err != nil {
+		t.Fatalf("PreRunFailures() error = %v", err)
+	}
+	if len(infra) != 2 {
+		t.Fatalf("PreRunFailures returned %d results, want 2 parallel to the checks", len(infra))
+	}
+	if !infra[0] {
+		t.Error("PreRunFailures did not flag the setup/action-download failure")
+	}
+	if infra[1] {
+		t.Error("PreRunFailures flagged a genuine test failure that cleared setup (masking)")
+	}
+}
+
+// A run the provider cannot report on must leave every check unflagged, so an
+// unreadable job stays a genuine failure rather than being masked.
+func TestPreRunFailures_FailsClosedOnUnreadableRun(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh run view 9 --repo test/repo --json jobs": {stderr: "HTTP 404\n", code: 1},
+	}), nil, "", "test/repo")
+
+	infra, err := host.PreRunFailures(context.Background(), []scm.Check{
+		{Name: "build", Bucket: scm.CheckBucketFail, State: "FAILURE", Link: "https://github.com/test/repo/actions/runs/9/job/2"},
+	})
+	if err != nil {
+		t.Fatalf("PreRunFailures() error = %v", err)
+	}
+	if len(infra) != 1 || infra[0] {
+		t.Fatalf("PreRunFailures = %v, want nothing flagged when the run is unreadable", infra)
+	}
+}
+
 func TestFindPRFiltersByBaseBranch(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head feature/refactor --base release/1.0 --state open --json number,url": {
-			stdout: `[{"number":42,"url":"https://github.example.com/org/repo/pull/42"}]` + "\n",
+		"gh pr list --head feature/refactor --base release/1.0 --state open --json number,url,baseRefName": {
+			stdout: `[{"number":42,"url":"https://github.example.com/org/repo/pull/42","baseRefName":"release/1.0"}]` + "\n",
 		},
 	}), nil, "", "")
 
@@ -272,14 +1336,14 @@ func TestFindPRForkUsesBareHeadAndFiltersOwner(t *testing.T) {
 
 	branch := "feature/refactor"
 	host := NewWithFork(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head fork-owner:" + branch + " --base main --repo parent/repo --state open --json number,url,headRefName,headRepositoryOwner": {
+		"gh pr list --head fork-owner:" + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,headRefName,headRepositoryOwner": {
 			stderr: `invalid argument: "--head" does not support "<owner>:<branch>"` + "\n",
 			code:   1,
 		},
-		"gh pr list --head " + branch + " --base main --repo parent/repo --state open --json number,url,headRefName,headRepositoryOwner": {
+		"gh pr list --head " + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,headRefName,headRepositoryOwner": {
 			stdout: `[` +
-				`{"number":40,"url":"https://github.com/parent/repo/pull/40","headRefName":"feature/refactor","headRepositoryOwner":{"login":"other-owner"}},` +
-				`{"number":42,"url":"https://github.com/parent/repo/pull/42","headRefName":"feature/refactor","headRepositoryOwner":{"login":"fork-owner"}}` +
+				`{"number":40,"url":"https://github.com/parent/repo/pull/40","baseRefName":"main","headRefName":"feature/refactor","headRepositoryOwner":{"login":"other-owner"}},` +
+				`{"number":42,"url":"https://github.com/parent/repo/pull/42","baseRefName":"main","headRefName":"feature/refactor","headRepositoryOwner":{"login":"fork-owner"}}` +
 				`]` + "\n",
 		},
 	}), nil, "", "parent/repo", "fork-owner/repo")
@@ -303,7 +1367,7 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head feature/refactor --base main --state open --json number,url": {
+		"gh pr list --head feature/refactor --base main --state open --json number,url,baseRefName": {
 			stderr: "api unavailable\n",
 			code:   1,
 		},
@@ -318,6 +1382,103 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 	}
 	if pr != nil {
 		t.Fatalf("FindPR() PR = %+v, want nil", pr)
+	}
+}
+
+func TestFindPRRejectsURLForDifferentRepository(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr list --head feature/refactor --base main --repo parent/repo --state open --json number,url,baseRefName": {
+			stdout: `[{"number":42,"url":"https://github.com/other/repo/pull/42","baseRefName":"main"}]` + "\n",
+		},
+	}), nil, "github.com", "parent/repo")
+
+	pr, err := host.FindPR(context.Background(), "feature/refactor", "main")
+	if err == nil {
+		t.Fatal("FindPR() error = nil, want repository mismatch error")
+	}
+	if !strings.Contains(err.Error(), "parse gh pr list") {
+		t.Fatalf("FindPR() error = %v, want parse context", err)
+	}
+	if pr != nil {
+		t.Fatalf("FindPR() PR = %+v, want nil", pr)
+	}
+}
+
+func TestFindPRReturnsJSONError(t *testing.T) {
+	t.Parallel()
+
+	const findPRListCommand = "gh pr list --head feature/refactor --base main --state open --json number,url,baseRefName"
+	valid := `{"number":42,"url":"https://github.example.com/org/repo/pull/42","baseRefName":"main"}`
+	for _, output := range []string{
+		"[{\n",
+		"null\n",
+		"[{}]\n",
+		"[" + valid + ",{}]\n",
+		`[{"number":42,"url":"https://github.example.com/org/repo/pull/43","baseRefName":"main"}]` + "\n",
+		`[{"number":-1,"url":"https://github.example.com/org/repo/pull/-1","baseRefName":"main"}]` + "\n",
+		`[{"number":0,"url":"https://github.example.com/org/repo/pull/42","baseRefName":"main"}]` + "\n",
+		`[{"number":42,"url":"42","baseRefName":"main"}]` + "\n",
+		`[{"number":42,"url":"https://github.example.com/org/repo/pull/42?view=files","baseRefName":"main"}]` + "\n",
+		`[{"number":42,"url":"https://github.example.com/org/repo/pull/42#discussion","baseRefName":"main"}]` + "\n",
+		`[{"number":42,"url":"https://github.example.com/org/repo/pull/%34%32","baseRefName":"main"}]` + "\n",
+	} {
+		host := New(githubTestCmdFactory(map[string]githubTestResponse{
+			findPRListCommand: {
+				stdout: output,
+			},
+		}), nil, "", "")
+
+		pr, err := host.FindPR(context.Background(), "feature/refactor", "main")
+		if err == nil {
+			t.Fatal("FindPR() error = nil, want JSON error")
+		}
+		if !strings.Contains(err.Error(), "parse gh pr list") {
+			t.Fatalf("FindPR() error = %v, want parse context", err)
+		}
+		if pr != nil {
+			t.Fatalf("FindPR() PR = %+v, want nil", pr)
+		}
+	}
+}
+
+func TestFindPRForkRejectsMissingHeadIdentity(t *testing.T) {
+	t.Parallel()
+
+	branch := "feature/refactor"
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{
+			name:   "missing head ref",
+			output: `[{"number":42,"url":"https://github.com/parent/repo/pull/42","headRepositoryOwner":{"login":"fork-owner"}}]`,
+		},
+		{
+			name:   "missing head owner",
+			output: `[{"number":42,"url":"https://github.com/parent/repo/pull/42","headRefName":"feature/refactor","headRepositoryOwner":null}]`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			host := NewWithFork(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh pr list --head " + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,headRefName,headRepositoryOwner": {
+					stdout: tc.output + "\n",
+				},
+			}), nil, "", "parent/repo", "fork-owner/repo")
+
+			pr, err := host.FindPR(context.Background(), branch, "main")
+			if err == nil {
+				t.Fatal("FindPR() error = nil, want head identity error")
+			}
+			if !strings.Contains(err.Error(), "parse gh pr list") {
+				t.Fatalf("FindPR() error = %v, want parse context", err)
+			}
+			if pr != nil {
+				t.Fatalf("FindPR() PR = %+v, want nil", pr)
+			}
+		})
 	}
 }
 
@@ -352,990 +1513,6 @@ func TestAvailableFallsBackToUnscopedAuthWhenHostUnknown(t *testing.T) {
 	}
 }
 
-// Canned `gh api graphql` data modeled on a real Devin PR. The read layer now
-// reads review THREADS (not flat REST comments) so it can honor each thread's
-// isResolved/isOutdated state: GitHub re-anchors a bot's old comments onto the
-// head, so a REST read reports already-addressed comments as live and the
-// verdict never clears. Only live (unresolved AND not-outdated) bot threads are
-// findings.
-const (
-	headSHA = "abc123def"
-	// botUser is the REST-form bot login (with "[bot]" suffix), used for REST
-	// review mocks and as the configured botLogin in tests that exercise the
-	// default config form.
-	botUser = "devin-ai-integration[bot]"
-	// botSlug is the REAL GraphQL-form bot login (bare app slug, no "[bot]"
-	// suffix). GraphQL's reviewThreads API returns this for a Bot actor. Tests
-	// that mock GraphQL thread authors use this so they exercise the actual
-	// API shape rather than the REST form the buggy code assumed.
-	botSlug = "devin-ai-integration"
-)
-
-// graphqlThreadsKey is the cmd-factory key for the `gh api graphql` reviewThreads
-// read GetBotFindings issues. It is derived from the same args builder the
-// production code uses, so the canned response is keyed byte-for-byte as the call
-// site emits it (the query string carries spaces, so hand-writing the key is
-// brittle).
-func graphqlThreadsKey(repo string, prNumber int, cursor ...string) string {
-	h := &Host{repo: repo}
-	c := ""
-	if len(cursor) > 0 {
-		c = cursor[0]
-	}
-	args, err := h.reviewThreadsArgs(prNumber, c)
-	if err != nil {
-		panic(err)
-	}
-	return strings.TrimSpace("gh " + strings.Join(args, " "))
-}
-
-// reviewThreadsResponse wraps thread nodes in the graphql envelope the production
-// parser expects. It models a SINGLE page (hasNextPage:false); use
-// reviewThreadsPage to model a paginated response.
-func reviewThreadsResponse(nodes ...string) githubTestResponse {
-	return reviewThreadsPage(false, "", nodes...)
-}
-
-// reviewThreadsPage renders one page of the reviewThreads envelope, including the
-// pageInfo{hasNextPage endCursor} the production cursor-pagination loop consumes.
-func reviewThreadsPage(hasNextPage bool, endCursor string, nodes ...string) githubTestResponse {
-	return githubTestResponse{
-		stdout: fmt.Sprintf(
-			`{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":%t,"endCursor":%q},"nodes":[`,
-			hasNextPage, endCursor,
-		) + strings.Join(nodes, ",") + `]}}}}}` + "\n",
-	}
-}
-
-// threadID renders one reviewThreads node: its resolution/outdated flags plus a
-// single anchoring comment (author/databaseId/path/line/body). The author's
-// __typename is inferred from the login: a "[bot]"-suffixed login OR the known
-// bot slug (real GraphQL returns the slug without the suffix) is a Bot; anything
-// else is a User. This mirrors what real GraphQL returns — a Bot actor's
-// __typename is "Bot" and its login is the bare app slug.
-func threadID(databaseID int64, resolved, outdated bool, author, path string, line int, body string) string {
-	typename := "User"
-	if strings.HasSuffix(strings.ToLower(author), "[bot]") || strings.EqualFold(author, botSlug) {
-		typename = "Bot"
-	}
-	return fmt.Sprintf(
-		`{"isResolved":%t,"isOutdated":%t,"comments":{"nodes":[{"author":{"login":%q,"__typename":%q},"databaseId":%d,"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/7#discussion"}]}}`,
-		resolved, outdated, author, typename, databaseID, path, line, line, body,
-	)
-}
-
-// thread is threadID with a zero databaseId, for tests that don't exercise the id.
-func thread(resolved, outdated bool, author, path string, line int, body string) string {
-	return threadID(0, resolved, outdated, author, path, line, body)
-}
-
-// threadWithCommit is threadID with an explicit originalCommit { oid } field on
-// the first comment, modeling the real GraphQL API shape. The oid is the head
-// SHA the thread was originally posted on. GetBotFindings must filter threads
-// whose originalCommit.oid does not match the current headSHA so stale threads
-// from old heads (already fixed but not marked outdated) don't drive redundant
-// fix rounds or get redundant "Addressed in" replies.
-func threadWithCommit(databaseID int64, resolved, outdated bool, author, path string, line int, body, commitOID string) string {
-	typename := "User"
-	if strings.HasSuffix(strings.ToLower(author), "[bot]") || strings.EqualFold(author, botSlug) {
-		typename = "Bot"
-	}
-	return fmt.Sprintf(
-		`{"isResolved":%t,"isOutdated":%t,"comments":{"nodes":[{"author":{"login":%q,"__typename":%q},"databaseId":%d,"path":%q,"line":%d,"originalLine":%d,"body":%q,"url":"https://github.com/test/repo/pull/7#discussion","originalCommit":{"oid":%q}}]}}`,
-		resolved, outdated, author, typename, databaseID, path, line, line, body, commitOID,
-	)
-}
-
-// liveThreads is the MIX used across the read-layer tests: two LIVE bot findings
-// (🔴 high + 🚩 medium), one OUTDATED bot finding (the anchored code changed =
-// addressed), one RESOLVED bot finding (someone closed it), and one LIVE
-// human-authored thread (fails the bot-login filter). Only the two live bot
-// threads are findings.
-//
-// The bot threads use the REAL GraphQL login (botSlug, no "[bot]" suffix) so
-// the fixtures exercise the actual API shape: prior to the login-normalization
-// fix the mock used the REST form ("devin-ai-integration[bot]"), which real
-// GraphQL never returns, so the mock agreed with the buggy comparison and hid
-// the false-green bug.
-func liveThreads() []string {
-	return []string{
-		thread(false, false, botSlug, "internal/batch/download.go", 42, "🔴 **Batch download crashes on empty manifest**"),
-		thread(false, false, botSlug, "internal/batch/path.go", 17, "🚩 **Batch path swallows the second error**"),
-		thread(false, true, botSlug, "internal/old/outdated.go", 3, "🔴 **Outdated: the code this anchored to changed**"),
-		thread(true, false, botSlug, "internal/old/resolved.go", 5, "🔴 **Resolved: someone marked this done**"),
-		thread(false, false, "some-human", "internal/human/note.go", 9, "🔴 high severity concern from a human"),
-	}
-}
-
-func TestGetBotFindingsReturnsOnlyLiveBotThreads(t *testing.T) {
-	t.Parallel()
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...),
-	}), nil, "", "test/repo")
-
-	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetBotFindings() error = %v", err)
-	}
-	// Only the two LIVE bot threads survive: the outdated and resolved bot threads
-	// are addressed, and the human thread fails the first-comment-author filter.
-	if len(findings) != 2 {
-		t.Fatalf("len(findings) = %d, want 2 (live bot threads only; outdated/resolved/human dropped): %+v", len(findings), findings)
-	}
-
-	// Every returned finding must be file-scoped (a thread with a path anchor).
-	for i, f := range findings {
-		if f.Path == "" {
-			t.Errorf("findings[%d] = %+v, want a file-scoped finding", i, f)
-		}
-	}
-
-	// findings[0]: 🔴 -> high, file-scoped, with the thread comment URL preserved.
-	if findings[0].Severity != "high" {
-		t.Errorf("findings[0].Severity = %q, want high", findings[0].Severity)
-	}
-	if findings[0].Path != "internal/batch/download.go" {
-		t.Errorf("findings[0].Path = %q, want internal/batch/download.go", findings[0].Path)
-	}
-	if findings[0].Line != 42 {
-		t.Errorf("findings[0].Line = %d, want 42", findings[0].Line)
-	}
-	if findings[0].URL == "" {
-		t.Errorf("findings[0].URL is empty, want the discussion URL")
-	}
-
-	// findings[1]: 🚩 -> medium.
-	if findings[1].Severity != "medium" {
-		t.Errorf("findings[1].Severity = %q, want medium", findings[1].Severity)
-	}
-
-	// No outdated/resolved finding may leak in: none of the addressed paths appear.
-	for _, f := range findings {
-		switch f.Path {
-		case "internal/old/outdated.go", "internal/old/resolved.go", "internal/human/note.go":
-			t.Errorf("addressed/non-bot thread leaked as a finding: %+v", f)
-		}
-	}
-}
-
-func TestGetBotFindingsUnresolvedRepoFailsClosed(t *testing.T) {
-	t.Parallel()
-
-	unresolvedKey := strings.TrimSpace("gh " + strings.Join([]string{
-		"api", "graphql",
-		"-f", "query=" + reviewThreadsQuery,
-		"-f", "owner={owner}",
-		"-f", "name={repo}",
-		"-F", "number=7",
-	}, " "))
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		unresolvedKey: {stdout: `{"data":{"repository":null}}` + "\n"},
-	}), nil, "", "")
-
-	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
-	if err == nil || !strings.Contains(err.Error(), "repository slug") {
-		t.Fatalf("GetBotFindings() = (%v, %v), want unresolved repository slug error", findings, err)
-	}
-}
-
-func TestGetBotFindingsNullRepositoryFailsClosed(t *testing.T) {
-	t.Parallel()
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		graphqlThreadsKey("test/repo", 7): {stdout: `{"data":{"repository":null}}` + "\n"},
-	}), nil, "", "test/repo")
-
-	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
-	if err == nil || !strings.Contains(err.Error(), "repository is null") {
-		t.Fatalf("GetBotFindings() = (%v, %v), want null repository error", findings, err)
-	}
-}
-
-func TestGetReviewVerdictChangesRequested(t *testing.T) {
-	t.Parallel()
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
-		},
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(liveThreads()...)}), nil, "", "test/repo")
-
-	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict != scm.VerdictChangesRequested {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (a live severe finding remains)", verdict, scm.VerdictChangesRequested)
-	}
-	// The verdict path returns the findings it read so the caller need not refetch:
-	// two LIVE findings (the outdated/resolved bot threads and the human thread are
-	// excluded).
-	if len(findings) != 2 {
-		t.Fatalf("GetReviewVerdict() findings = %d, want 2 (live findings returned alongside the verdict)", len(findings))
-	}
-}
-
-func TestDecodePaginatedArray(t *testing.T) {
-	t.Parallel()
-
-	// Empty / whitespace body decodes to nil without error.
-	for _, in := range []string{"", "  \n"} {
-		got, err := decodePaginatedArray[ghReview]([]byte(in))
-		if err != nil {
-			t.Fatalf("decodePaginatedArray(%q) error = %v", in, err)
-		}
-		if got != nil {
-			t.Fatalf("decodePaginatedArray(%q) = %v, want nil", in, got)
-		}
-	}
-
-	// A single page (one JSON array) decodes as one value.
-	single := `[{"state":"APPROVED","commit_id":"a"}]`
-	got, err := decodePaginatedArray[ghReview]([]byte(single))
-	if err != nil {
-		t.Fatalf("single-page decode error = %v", err)
-	}
-	if len(got) != 1 || got[0].State != "APPROVED" {
-		t.Fatalf("single-page decode = %+v, want one APPROVED", got)
-	}
-
-	// Multiple pages: `gh api --paginate` (no --slurp) emits each page as its own
-	// top-level array document concatenated back-to-back. They must all be read.
-	multi := `[{"state":"COMMENTED","commit_id":"a"}]` + "\n" +
-		`[{"state":"CHANGES_REQUESTED","commit_id":"b"},{"state":"APPROVED","commit_id":"c"}]` + "\n"
-	got, err = decodePaginatedArray[ghReview]([]byte(multi))
-	if err != nil {
-		t.Fatalf("multi-page decode error = %v", err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("multi-page decode = %d reviews, want 3 (pages must be flattened)", len(got))
-	}
-	if got[1].State != "CHANGES_REQUESTED" || got[1].CommitID != "b" {
-		t.Fatalf("multi-page decode lost page-2 content: %+v", got)
-	}
-}
-
-// TestGetReviewVerdictReadsAllReviewPages guards the false-green path: when the
-// head's CHANGES_REQUESTED review lands on a second pagination page, the verdict
-// read must still surface it instead of failing to parse the multi-document
-// `gh api --paginate` output and degrading to VerdictNone.
-func TestGetReviewVerdictReadsAllReviewPages(t *testing.T) {
-	t.Parallel()
-
-	page1 := `[{"state":"COMMENTED","commit_id":"older","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n"
-	page2 := `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n"
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: page1 + page2,
-		},
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
-	}), nil, "", "test/repo")
-
-	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict != scm.VerdictChangesRequested {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (head review on page 2 must be read)", verdict, scm.VerdictChangesRequested)
-	}
-}
-
-func TestGetReviewVerdictHonorsChangesRequestedState(t *testing.T) {
-	t.Parallel()
-
-	// A native CHANGES_REQUESTED review on the head with NO inline finding that
-	// parses as severe must still be not-green: the explicit request-changes state
-	// is authoritative on its own.
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
-		},
-		// One LIVE thread whose body parses as a non-severe nit, so only the native
-		// CHANGES_REQUESTED state can be driving the verdict.
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
-			thread(false, false, botUser, "a.go", 1, "nit: please follow up here"),
-		)}), nil, "", "test/repo")
-
-	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict != scm.VerdictChangesRequested {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (native CHANGES_REQUESTED state honored)", verdict, scm.VerdictChangesRequested)
-	}
-}
-
-// TestGetReviewVerdictUsesMostRecentHeadReview verifies the verdict follows the
-// MOST RECENT bot review on the head (by submitted_at), not the OR of every
-// state in the head's review history: a bot that requested changes and then
-// re-reviewed the SAME SHA as APPROVED must clear (and vice versa).
-func TestGetReviewVerdictUsesMostRecentHeadReview(t *testing.T) {
-	t.Parallel()
-
-	// Earlier CHANGES_REQUESTED, later APPROVED on the same head, no severe inline
-	// findings: the most recent review approves, so the verdict clears.
-	approvedLast := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
-		},
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
-	}), nil, "", "test/repo")
-
-	verdict, _, err := approvedLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict != scm.VerdictApproved {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (most recent head review approved)", verdict, scm.VerdictApproved)
-	}
-
-	// Reverse order (timestamps deliberately out of array order): a later
-	// CHANGES_REQUESTED after an earlier APPROVED stays not-green.
-	changesLast := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"CHANGES_REQUESTED","commit_id":"abc123def","submitted_at":"2026-01-01T02:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}},{"state":"APPROVED","commit_id":"abc123def","submitted_at":"2026-01-01T01:00:00Z","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
-		},
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(),
-	}), nil, "", "test/repo")
-
-	verdict2, _, err := changesLast.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict2 != scm.VerdictChangesRequested {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (most recent head review requested changes)", verdict2, scm.VerdictChangesRequested)
-	}
-}
-
-// TestGetReviewVerdictConvergesWhenSevereThreadsAddressed is the convergence
-// case: the bot reviewed the head and its only severe threads are now outdated
-// (code changed) or resolved. With no LIVE severe finding and no native
-// CHANGES_REQUESTED state, the verdict must clear to APPROVED so the post-PR
-// review loop can finally converge — Devin re-anchors old comments onto the head,
-// so a REST read would still count these as live and the loop would never clear.
-func TestGetReviewVerdictConvergesWhenSevereThreadsAddressed(t *testing.T) {
-	t.Parallel()
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","body":"## ✅ Devin Review: No Issues Found","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
-		},
-		// Two severe bot threads, but both are addressed: one outdated, one resolved.
-		// No live severe finding remains.
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
-			thread(false, true, botUser, "internal/old/outdated.go", 3, "🔴 **Outdated severe finding**"),
-			thread(true, false, botUser, "internal/old/resolved.go", 5, "🔴 **Resolved severe finding**"),
-		)}), nil, "", "test/repo")
-
-	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict != scm.VerdictApproved {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (all severe threads outdated/resolved)", verdict, scm.VerdictApproved)
-	}
-	if len(findings) != 0 {
-		t.Fatalf("GetReviewVerdict() findings = %d, want 0 (no live findings remain): %+v", len(findings), findings)
-	}
-}
-
-func TestGetReviewVerdictCommentedReviewBodyVerdict(t *testing.T) {
-	t.Parallel()
-
-	// A realistic full-length (40 hex char) head SHA plus the 7-char abbreviation
-	// GitHub's REST API sometimes reports as a review's commit_id. sameCommitSHA
-	// must recognize the abbreviation as the same commit.
-	fullHeadSHA := "abc123def" + strings.Repeat("0", 31)
-	abbrevCommitID := fullHeadSHA[:7]
-
-	tests := []struct {
-		name    string
-		body    string
-		want    scm.ReviewVerdict
-		head    string
-		commit  string
-		threads []string
-	}{
-		{
-			name:   "no issues body marks commented review green (abbreviated review commit_id)",
-			body:   "## ✅ Devin Review: No Issues Found",
-			want:   scm.VerdictApproved,
-			head:   fullHeadSHA,
-			commit: abbrevCommitID,
-		},
-		{
-			// The zero-count complement of the "found N potential issues" findings
-			// template: an explicit "Found 0" is unambiguously clean and must green,
-			// not fall through to an ambiguous/pending verdict.
-			name:   "found zero potential issues body marks commented review green",
-			body:   "## ✅ Devin Review: Found 0 potential issues",
-			want:   scm.VerdictApproved,
-			head:   headSHA,
-			commit: headSHA,
-		},
-		{
-			// The body reports findings but no file-scoped threads loaded: not
-			// green, but routed to a manual-review gate (never the auto-fixer)
-			// so the fixer cannot fabricate changes for a problem it cannot see.
-			name:   "findings body with no loaded threads needs manual review",
-			body:   "## ⚠️ Devin Review: Found 2 potential issues",
-			want:   scm.VerdictManualReview,
-			head:   headSHA,
-			commit: headSHA,
-		},
-		{
-			// The body reports findings AND severe file-scoped threads loaded:
-			// this is actionable, so it stays CHANGES_REQUESTED (the fixer runs
-			// with real findings), never the manual-review gate.
-			name:    "findings body with severe threads is changes requested",
-			body:    "## ⚠️ Devin Review: Found 2 potential issues",
-			want:    scm.VerdictChangesRequested,
-			head:    headSHA,
-			commit:  headSHA,
-			threads: liveThreads(),
-		},
-		{
-			name:   "ambiguous body stays pending (ambiguous)",
-			body:   "## Devin Review\nI looked at this change.",
-			want:   scm.VerdictPendingAmbiguous,
-			head:   headSHA,
-			commit: headSHA,
-		},
-		{
-			name:   "stale clean body stays pending",
-			body:   "## ✅ Devin Review: No Issues Found",
-			want:   scm.VerdictPending,
-			head:   headSHA,
-			commit: "0000oldsha",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			host := New(githubTestCmdFactory(map[string]githubTestResponse{
-				"gh api repos/test/repo/pulls/7/reviews --paginate": {
-					stdout: fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"body":%q,"user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, tt.commit, tt.body) + "\n",
-				},
-				graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(tt.threads...),
-			}), nil, "", "test/repo")
-
-			verdict, _, err := host.GetReviewVerdict(context.Background(), 7, tt.head, botUser)
-			if err != nil {
-				t.Fatalf("GetReviewVerdict() error = %v", err)
-			}
-			if verdict != tt.want {
-				t.Fatalf("GetReviewVerdict() = %q, want %q", verdict, tt.want)
-			}
-		})
-	}
-}
-
-// TestSameCommitSHA locks the safe-abbreviation semantics: an exact match or a
-// genuine git abbreviation of a full-length object id is the same commit, but two
-// arbitrary partial strings sharing a prefix (or non-hex text) never are — a
-// false positive would scope the review verdict to the wrong commit.
-func TestSameCommitSHA(t *testing.T) {
-	t.Parallel()
-
-	full := "abc123def" + strings.Repeat("0", 31)       // 40 hex (SHA-1)
-	otherFull := "abc123def" + strings.Repeat("1", 31)  // shares 9-char prefix with full
-	full256 := "abc123def456" + strings.Repeat("0", 52) // 64 hex (SHA-256)
-
-	cases := []struct {
-		name      string
-		reviewSHA string
-		headSHA   string
-		want      bool
-	}{
-		{"exact full match", full, full, true},
-		{"exact short match", "abc123def", "abc123def", true},
-		{"abbreviated review commit_id prefixes full head", full[:7], full, true},
-		{"abbreviated head prefixes full review commit_id", full, full[:7], true},
-		{"sha256 abbreviation of full head", full256[:12], full256, true},
-		{"case and whitespace insensitive", "  ABC123DEF" + strings.Repeat("0", 31) + " ", full, true},
-		{"two distinct full SHAs sharing a prefix never match", full, otherFull, false},
-		{"two mid-length partials sharing a 7-char prefix never match", "abc123def12", "abc123def99", false},
-		{"non-hex prefix of a full head never matches", "abc123z", full, false},
-		{"prefix shorter than 7 never matches", full[:6], full, false},
-		{"long side not a full-length SHA never matches", "abc123def", "abc123def999999", false},
-		{"empty review sha", "", full, false},
-		{"empty head sha", full, "", false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := sameCommitSHA(tc.reviewSHA, tc.headSHA); got != tc.want {
-				t.Fatalf("sameCommitSHA(%q, %q) = %v, want %v", tc.reviewSHA, tc.headSHA, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestDevinReviewBodyVerdict locks the body → verdict mapping, including the
-// zero-count clean complement of the "found N potential issues" template.
-func TestDevinReviewBodyVerdict(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		body string
-		want reviewBodyVerdict
-	}{
-		{"no issues found is clean", "## ✅ Devin Review: No Issues Found", reviewBodyClean},
-		{"found zero potential issues is clean", "## ✅ Devin Review: Found 0 potential issues", reviewBodyClean},
-		{"found N potential issues is findings", "## ⚠️ Devin Review: Found 2 potential issues", reviewBodyFindings},
-		{"found one potential issue is findings", "Found 1 potential issue", reviewBodyFindings},
-		{"unrecognized body is unknown", "## Devin Review\nI looked at this change.", reviewBodyUnknown},
-		{"empty body is unknown", "", reviewBodyUnknown},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := devinReviewBodyVerdict(tc.body); got != tc.want {
-				t.Fatalf("devinReviewBodyVerdict(%q) = %v, want %v", tc.body, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestGetReviewVerdictFindingsBodyWithReadErrorNeedsManualReview locks the
-// fail-safe for the literal "threads failed to load" case: the review body
-// reports findings on the current head but the GetBotFindings read errors. That
-// must NOT collapse to a raw error (which the CI loop treats as "not yet
-// reviewed" and can fail open on) — it must surface VerdictManualReview so the
-// run parks for a human instead of silently dropping a not-green signal.
-func TestGetReviewVerdictFindingsBodyWithReadErrorNeedsManualReview(t *testing.T) {
-	t.Parallel()
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: fmt.Sprintf(`[{"state":"COMMENTED","commit_id":%q,"body":"## ⚠️ Devin Review: Found 3 potential issues","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]`, headSHA) + "\n",
-		},
-		// The reviewThreads read fails (non-zero exit) -> GetBotFindings errors.
-		graphqlThreadsKey("test/repo", 7): {stderr: "graphql: rate limited\n", code: 1},
-	}), nil, "", "test/repo")
-
-	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v, want nil (findings read error with a findings body must not propagate)", err)
-	}
-	if verdict != scm.VerdictManualReview {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (findings body + unreadable threads -> manual review)", verdict, scm.VerdictManualReview)
-	}
-	if len(findings) != 0 {
-		t.Fatalf("GetReviewVerdict() findings = %d, want 0 (none could be loaded)", len(findings))
-	}
-}
-
-func TestGetReviewVerdictPendingWhenHeadNotYetReviewed(t *testing.T) {
-	t.Parallel()
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		// Bot has reviewed before, but only an older commit - not headSHA.
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"0000oldsha","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
-		},
-		// No live review threads remain on the head.
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse()}), nil, "", "test/repo")
-
-	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict != scm.VerdictPending {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (bot reviewed an older sha, not headSHA)", verdict, scm.VerdictPending)
-	}
-}
-
-func TestGetReviewVerdictNoneWhenBotNeverReviewed(t *testing.T) {
-	t.Parallel()
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		// Only a human review exists; the bot has never reviewed.
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"APPROVED","commit_id":"abc123def","user":{"login":"some-human"}}]` + "\n",
-		},
-	}), nil, "", "test/repo")
-
-	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict != scm.VerdictNone {
-		t.Fatalf("GetReviewVerdict() = %q, want %q (bot never reviewed)", verdict, scm.VerdictNone)
-	}
-}
-
-// TestGetReviewVerdictEmptyHeadSHAIsNotYetReviewed verifies the fail-safe for an
-// empty (or whitespace-only) head SHA: without a head to scope to, the verdict
-// must be VerdictNone with no findings instead of treating the empty SHA as a
-// wildcard that matches every review/comment in the PR's history. It must also
-// short-circuit before any `gh` round-trip, so the cmd factory is given no
-// responses (any call would fail the command).
-func TestGetReviewVerdictEmptyHeadSHAIsNotYetReviewed(t *testing.T) {
-	t.Parallel()
-
-	for _, head := range []string{"", "   "} {
-		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "", "test/repo")
-		verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, head, botUser)
-		if err != nil {
-			t.Fatalf("GetReviewVerdict(head=%q) error = %v", head, err)
-		}
-		if verdict != scm.VerdictNone {
-			t.Fatalf("GetReviewVerdict(head=%q) = %q, want %q (can't scope to a head)", head, verdict, scm.VerdictNone)
-		}
-		if len(findings) != 0 {
-			t.Fatalf("GetReviewVerdict(head=%q) findings = %d, want 0", head, len(findings))
-		}
-	}
-}
-
-// TestGetBotFindingsEmptyHeadSHAIsFailSafe verifies the empty-head fail-safe:
-// with no head SHA the read layer reports no findings and short-circuits before
-// any gh round-trip (the cmd factory is given no responses, so any call would
-// fail the command). This mirrors GetReviewVerdict's empty-head behavior.
-func TestGetBotFindingsEmptyHeadSHAIsFailSafe(t *testing.T) {
-	t.Parallel()
-
-	for _, head := range []string{"", "   "} {
-		host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "", "test/repo")
-
-		findings, err := host.GetBotFindings(context.Background(), 7, head, botUser)
-		if err != nil {
-			t.Fatalf("GetBotFindings(head=%q) error = %v", head, err)
-		}
-		if len(findings) != 0 {
-			t.Fatalf("GetBotFindings(head=%q) = %d findings, want 0 (fail-safe, no gh call)", head, len(findings))
-		}
-	}
-}
-
-// TestGetBotFindingsCollectsAllLiveThreadsAndSevereFlipsVerdict models a busy PR:
-// many live low/nit threads plus one live severe thread, interleaved with
-// addressed (outdated/resolved) severe threads that must NOT count. The read
-// layer must return every live thread and the verdict must be CHANGES_REQUESTED
-// because a live severe finding remains.
-func TestGetBotFindingsCollectsAllLiveThreadsAndSevereFlipsVerdict(t *testing.T) {
-	t.Parallel()
-
-	var nodes []string
-	for i := 0; i < 30; i++ {
-		nodes = append(nodes, thread(false, false, botUser, fmt.Sprintf("p%d.go", i), i+1, "nit: minor style"))
-	}
-	// Addressed severe threads (must be excluded) and one live severe thread.
-	nodes = append(nodes,
-		thread(false, true, botUser, "addressed/outdated.go", 7, "🔴 **Outdated severe finding**"),
-		thread(true, false, botUser, "addressed/resolved.go", 8, "🔴 **Resolved severe finding**"),
-		thread(false, false, botUser, "deep/live.go", 99, "🔴 **Live severe bug**"),
-	)
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
-		},
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(nodes...)}), nil, "", "test/repo")
-
-	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetBotFindings() error = %v", err)
-	}
-	// 30 live nits + 1 live severe = 31; the two addressed severe threads drop out.
-	if len(findings) != 31 {
-		t.Fatalf("GetBotFindings() = %d findings, want 31 (all live threads, addressed excluded)", len(findings))
-	}
-	sawLiveSevere := false
-	for _, f := range findings {
-		switch f.Path {
-		case "deep/live.go":
-			sawLiveSevere = true
-			if f.Severity != "high" {
-				t.Errorf("live severe finding severity = %q, want high", f.Severity)
-			}
-		case "addressed/outdated.go", "addressed/resolved.go":
-			t.Errorf("addressed thread leaked as a finding: %+v", f)
-		}
-	}
-	if !sawLiveSevere {
-		t.Fatal("live severe finding was dropped")
-	}
-
-	// The live severe finding must flip the verdict to changes-requested.
-	verdict, _, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict != scm.VerdictChangesRequested {
-		t.Fatalf("GetReviewVerdict() = %q, want CHANGES_REQUESTED (a live severe finding remains)", verdict)
-	}
-}
-
-// TestGetReviewVerdictPaginatesReviewThreads guards the false-APPROVED risk: when
-// the PR's review threads span more than one page, a live severe finding that
-// lands on page 2 must still be seen. reviewThreads returns threads oldest-first
-// and counts addressed/resolved threads toward the first:100 window, so without
-// cursor pagination the newest severe finding could be truncated past page 1 and
-// the verdict would wrongly read APPROVED.
-func TestGetReviewVerdictPaginatesReviewThreads(t *testing.T) {
-	t.Parallel()
-
-	// Page 1 carries only non-severe / already-addressed threads, so on its own it
-	// would read APPROVED. The cursor advances to page 2.
-	page1 := []string{
-		thread(false, false, botUser, "p1-nit.go", 1, "nit: minor style"),
-		thread(false, true, botUser, "p1-outdated.go", 2, "🔴 **Outdated severe (addressed)**"),
-	}
-	// Page 2 carries the LIVE severe finding that must flip the verdict.
-	page2 := []string{
-		thread(false, false, botUser, "p2-live.go", 9, "🔴 **Live severe bug on page 2**"),
-	}
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
-		},
-		graphqlThreadsKey("test/repo", 7):            reviewThreadsPage(true, "CURSOR1", page1...),
-		graphqlThreadsKey("test/repo", 7, "CURSOR1"): reviewThreadsPage(false, "", page2...),
-	}), nil, "", "test/repo")
-
-	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict() error = %v", err)
-	}
-	if verdict != scm.VerdictChangesRequested {
-		t.Fatalf("verdict = %q, want CHANGES_REQUESTED (the live severe finding on page 2 must be seen, not truncated)", verdict)
-	}
-	sawPage2 := false
-	for _, f := range findings {
-		if f.Path == "p2-live.go" {
-			sawPage2 = true
-		}
-	}
-	if !sawPage2 {
-		t.Fatalf("page-2 live severe finding missing from accumulated findings: %+v", findings)
-	}
-}
-
-// TestGetBotFindingsPopulatesCommentID asserts the graphql databaseId is surfaced
-// as ReviewComment.ID, which the review loop needs to thread a reply on a finding.
-func TestGetBotFindingsPopulatesCommentID(t *testing.T) {
-	t.Parallel()
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
-			threadID(987654321, false, false, botUser, "a.go", 3, "🔴 **bug**"),
-		)}), nil, "", "test/repo")
-
-	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetBotFindings() error = %v", err)
-	}
-	if len(findings) != 1 {
-		t.Fatalf("len(findings) = %d, want 1", len(findings))
-	}
-	if findings[0].ID != 987654321 {
-		t.Fatalf("findings[0].ID = %d, want 987654321 (the comment databaseId)", findings[0].ID)
-	}
-}
-
-// TestReplyToReviewComment asserts the POST is issued to the replies endpoint with
-// the body passed as a raw -f field.
-func TestReplyToReviewComment(t *testing.T) {
-	t.Parallel()
-
-	const body = "Addressed in deadbeef by no-mistakes."
-	key := "gh api repos/test/repo/pulls/7/comments/4242/replies -f body=" + body
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		key: {stdout: `{"id":1}` + "\n"},
-	}), nil, "", "test/repo")
-
-	if err := host.ReplyToReviewComment(context.Background(), 7, 4242, body); err != nil {
-		t.Fatalf("ReplyToReviewComment() error = %v", err)
-	}
-}
-
-// TestReplyToReviewCommentSurfacesError asserts a failed gh call returns an error
-// (so the caller can log it best-effort).
-func TestReplyToReviewCommentSurfacesError(t *testing.T) {
-	t.Parallel()
-
-	// No canned response => the factory returns a non-zero exit for the call.
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{}), nil, "", "test/repo")
-	if err := host.ReplyToReviewComment(context.Background(), 7, 4242, "body"); err == nil {
-		t.Fatal("expected an error when the gh api replies call fails")
-	}
-}
-
-func TestSeverityFromBody(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		body string
-		want string
-	}{
-		// high requires the explicit 🔴 marker; 🚩 marks medium.
-		{"🔴 **Batch download crashes**", "high"},
-		{"🚩 **Batch path swallows error**", "medium"},
-		{"low severity issue", "low"},
-		{"nit: rename this", "low"},
-		{"some unmarked observation", "medium"},
-		// The keyword fallback never escalates to high: bare/negated/contextual
-		// mentions of severe words must NOT register as high (they default to the
-		// conservative medium, which still gates).
-		{"This is a clear bug in the loop", "medium"},
-		{"this is not a bug", "medium"},
-		{"no critical issues here", "medium"},
-		{"high severity issue", "medium"},
-		{"medium severity issue", "medium"},
-		// Word-boundary matching: "low" as a substring of these words must not
-		// downgrade an otherwise-unmarked (default medium) finding to low.
-		{"please follow up on this", "medium"},
-		{"we should allow this pattern", "medium"},
-		{"this sits just below the limit", "medium"},
-		{"the data should flow through here", "medium"},
-	}
-	for _, tc := range cases {
-		if got := severityFromBody(tc.body); got != tc.want {
-			t.Errorf("severityFromBody(%q) = %q, want %q", tc.body, got, tc.want)
-		}
-	}
-}
-
-// TestGetBotFindingsRealGraphQLLogin is the Bug 1 regression test: with the
-// REAL GraphQL login (bare slug "devin-ai-integration", no "[bot]" suffix) and
-// __typename "Bot", GetBotFindings must return the bot's live findings. Before
-// the login-normalization fix, the bare-slug login never matched the configured
-// "devin-ai-integration[bot]", so every thread was skipped and 0 findings were
-// returned — the false-green root cause.
-func TestGetBotFindingsRealGraphQLLogin(t *testing.T) {
-	t.Parallel()
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
-			thread(false, false, botSlug, "internal/batch/download.go", 42, "🔴 **crash on empty manifest**"),
-		),
-	}), nil, "", "test/repo")
-
-	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetBotFindings: %v", err)
-	}
-	if len(findings) != 1 {
-		t.Fatalf("len(findings) = %d, want 1 (real GraphQL slug login must match [bot]-form config): %v", len(findings), findings)
-	}
-}
-
-// TestGetReviewVerdictSlugFormConfig asserts a slug-form config login
-// ("devin-ai-integration", no "[bot]") still matches a REST "[bot]"-form review
-// author — the symmetric direction of the normalization. A maintainer who
-// configures the bare slug must not get a false "never reviewed" verdict.
-func TestGetReviewVerdictSlugFormConfig(t *testing.T) {
-	t.Parallel()
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh api repos/test/repo/pulls/7/reviews --paginate": {
-			stdout: `[{"state":"COMMENTED","commit_id":"abc123def","user":{"login":"devin-ai-integration[bot]","type":"Bot"}}]` + "\n",
-		},
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
-			thread(false, false, botSlug, "internal/batch/download.go", 42, "🔴 **crash**"),
-		),
-	}), nil, "", "test/repo")
-
-	verdict, findings, err := host.GetReviewVerdict(context.Background(), 7, headSHA, botSlug)
-	if err != nil {
-		t.Fatalf("GetReviewVerdict: %v", err)
-	}
-	if verdict != scm.VerdictChangesRequested {
-		t.Fatalf("verdict = %q, want %q (slug-form config must match REST [bot]-form review)", verdict, scm.VerdictChangesRequested)
-	}
-	if len(findings) != 1 {
-		t.Fatalf("len(findings) = %d, want 1", len(findings))
-	}
-}
-
-// TestGetBotFindingsRejectsHuman asserts a human-authored thread (even one whose
-// body parses as severe) is never counted as a bot finding. The actorKind
-// positive-bot check (not just login matching) enforces this: a human's
-// __typename is "User", so the thread is skipped regardless of login.
-func TestGetBotFindingsRejectsHuman(t *testing.T) {
-	t.Parallel()
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(
-			thread(false, false, "some-human", "internal/human/note.go", 9, "🔴 **human high severity**"),
-		),
-	}), nil, "", "test/repo")
-
-	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetBotFindings: %v", err)
-	}
-	if len(findings) != 0 {
-		t.Fatalf("len(findings) = %d, want 0 (human thread must be rejected by actorKind)", len(findings))
-	}
-}
-
-// TestNormalizeBotLogin covers the login normalization helper directly: both
-// REST and GraphQL forms normalize to the same bare slug, and humans pass
-// through unchanged.
-func TestNormalizeBotLogin(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		in, want string
-	}{
-		{"devin-ai-integration[bot]", "devin-ai-integration"},
-		{"devin-ai-integration", "devin-ai-integration"},
-		{"Devin-AI-Integration[bot]", "devin-ai-integration"},
-		{"  devin-ai-integration[bot]  ", "devin-ai-integration"},
-		{"some-human", "some-human"},
-		{"", ""},
-	}
-	for _, c := range cases {
-		if got := normalizeBotLogin(c.in); got != c.want {
-			t.Errorf("normalizeBotLogin(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
-// TestBotLoginMatch covers the cross-form matching that the false-green bug
-// broke: a GraphQL bare-slug author must match a REST "[bot]"-form config, and
-// vice versa, while a human never matches the bot config.
-func TestBotLoginMatch(t *testing.T) {
-	t.Parallel()
-	if !botLoginMatch("devin-ai-integration", "devin-ai-integration[bot]") {
-		t.Error(`botLoginMatch("devin-ai-integration", "devin-ai-integration[bot]") = false, want true (GraphQL slug vs REST config)`)
-	}
-	if !botLoginMatch("devin-ai-integration[bot]", "devin-ai-integration") {
-		t.Error(`botLoginMatch("devin-ai-integration[bot]", "devin-ai-integration") = false, want true (REST author vs slug config)`)
-	}
-	if !botLoginMatch("devin-ai-integration[bot]", "devin-ai-integration[bot]") {
-		t.Error(`botLoginMatch("devin-ai-integration[bot]", "devin-ai-integration[bot]") = false, want true (REST vs REST)`)
-	}
-	if botLoginMatch("some-human", "devin-ai-integration[bot]") {
-		t.Error(`botLoginMatch("some-human", "devin-ai-integration[bot]") = true, want false`)
-	}
-}
-
-// TestActorKind covers the bot-vs-human discriminator across both API shapes:
-// GraphQL __typename and REST user.type.
-func TestActorKind(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		typename, restType, want string
-	}{
-		{"Bot", "", "bot"},
-		{"", "Bot", "bot"},
-		{"User", "", "human"},
-		{"", "User", "human"},
-		{"", "", ""},
-		{"bot", "", "bot"}, // case-insensitive
-		{"", "user", "human"},
-	}
-	for _, c := range cases {
-		if got := actorKind(c.typename, c.restType); got != c.want {
-			t.Errorf("actorKind(%q, %q) = %q, want %q", c.typename, c.restType, got, c.want)
-		}
-	}
-}
-
 type githubTestResponse struct {
 	stdout    string
 	stderr    string
@@ -1347,6 +1524,15 @@ func githubTestCmdFactory(responses map[string]githubTestResponse) CmdFactory {
 	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		key := strings.TrimSpace(name + " " + strings.Join(args, " "))
 		response, ok := responses[key]
+		if !ok && strings.HasPrefix(key, "gh api ") && strings.Contains(key, " graphql ") {
+			for candidate, prResponse := range responses {
+				if strings.Contains(candidate, "gh pr checks ") {
+					response = normalizedChecksResponse(prResponse)
+					ok = true
+					break
+				}
+			}
+		}
 		if !ok {
 			response = githubTestResponse{stderr: "unexpected command: " + key, code: 1}
 		}
@@ -1360,6 +1546,76 @@ func githubTestCmdFactory(responses map[string]githubTestResponse) CmdFactory {
 		)
 		return cmd
 	}
+}
+
+func githubCommitChecksCommand(host, repo, headSHA string) string {
+	parts := strings.Split(repo, "/")
+	args := []string{"gh", "api"}
+	if host != "" {
+		args = append(args, "--hostname", host)
+	}
+	args = append(args, "graphql", "-f", "query="+commitChecksQuery,
+		"-F", "owner="+parts[0], "-F", "name="+parts[1], "-F", "oid="+headSHA)
+	return strings.Join(args, " ")
+}
+
+func githubCommitChecksResponse(nodes string) string {
+	response := map[string]any{
+		"data": map[string]any{
+			"repository": map[string]any{
+				"object": map[string]any{
+					"statusCheckRollup": map[string]any{
+						"contexts": map[string]any{
+							"nodes":    json.RawMessage(nodes),
+							"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
+						},
+					},
+				},
+			},
+		},
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return nodes
+	}
+	return string(encoded) + "\n"
+}
+
+func normalizedChecksResponse(response githubTestResponse) githubTestResponse {
+	if response.code != 0 && strings.Contains(response.stderr, "no checks reported") {
+		return githubTestResponse{stdout: githubCommitChecksResponse("[]")}
+	}
+	if response.code != 0 {
+		return response
+	}
+	var raw []struct {
+		Name        string `json:"name"`
+		State       string `json:"state"`
+		Bucket      string `json:"bucket"`
+		CompletedAt string `json:"completedAt"`
+		Link        string `json:"link"`
+	}
+	if err := json.Unmarshal([]byte(response.stdout), &raw); err != nil {
+		return githubTestResponse{stdout: response.stdout}
+	}
+	nodes := make([]map[string]string, 0, len(raw))
+	for _, check := range raw {
+		status := "COMPLETED"
+		conclusion := check.State
+		if check.Bucket == "pending" {
+			status = "IN_PROGRESS"
+			conclusion = ""
+		}
+		nodes = append(nodes, map[string]string{
+			"__typename": "CheckRun", "name": check.Name, "status": status,
+			"conclusion": conclusion, "completedAt": check.CompletedAt, "detailsUrl": check.Link,
+		})
+	}
+	encoded, err := json.Marshal(nodes)
+	if err != nil {
+		return githubTestResponse{stdout: response.stdout}
+	}
+	return githubTestResponse{stdout: githubCommitChecksResponse(string(encoded))}
 }
 
 func TestGitHubHelperProcess(t *testing.T) {
@@ -1388,131 +1644,4 @@ func TestGitHubHelperProcess(t *testing.T) {
 		os.Exit(1)
 	}
 	os.Exit(0)
-}
-
-// TestGetBotFindingsFiltersStaleThreadsByHeadSHA is the multi-reply regression
-// test. On a real PR (robinhood-tracker#4), Devin posted findings on headA, the
-// loop fixed and pushed headB, Devin re-reviewed headB with NEW findings
-// (CHANGES_REQUESTED), and the loop fixed again — but the OLD threads from
-// headA (not resolved, not outdated because the fix touched different lines)
-// were still returned by GetBotFindings and got redundant "Addressed in <sha>"
-// replies on every round (4 replies across 4 commits on the same thread).
-//
-// The fix: GetBotFindings must filter threads by originalCommit.oid == headSHA
-// so only findings posted on the CURRENT head are live. Threads from older
-// heads are stale (the loop already fixed them; Devin chose not to re-post on
-// the new head) and must not drive fixes or receive replies.
-//
-// This test creates threads with explicit originalCommit { oid } fields:
-//   - 2 threads on the current head (headSHA) → must be returned as findings
-//   - 2 threads on an old head ("oldSHA123") → must be filtered out
-//   - 1 thread with empty originalCommit.oid → must be returned (fail-safe:
-//     a thread without commit metadata is treated as current-head, matching
-//     the existing behavior for APIs that don't expose originalCommit)
-func TestGetBotFindingsFiltersStaleThreadsByHeadSHA(t *testing.T) {
-	t.Parallel()
-
-	threads := []string{
-		// Live bot threads on the CURRENT head — must be returned.
-		threadWithCommit(101, false, false, botSlug, "internal/batch/download.go", 42, "🔴 **Bug on current head**", headSHA),
-		threadWithCommit(102, false, false, botSlug, "internal/batch/path.go", 17, "🚩 **Medium on current head**", headSHA),
-		// Live bot threads on an OLD head (not resolved, not outdated, but
-		// originalCommit.oid != headSHA) — must be filtered out.
-		threadWithCommit(201, false, false, botSlug, "internal/old/stale1.go", 10, "🔴 **Stale finding from old head**", "oldSHA123"),
-		threadWithCommit(202, false, false, botSlug, "internal/old/stale2.go", 20, "🚩 **Stale medium from old head**", "oldSHA123"),
-		// Live bot thread with empty originalCommit.oid — fail-safe: treat as
-		// current-head (don't filter) so a host that doesn't expose the field
-		// doesn't accidentally suppress all findings.
-		threadWithCommit(301, false, false, botSlug, "internal/no/commit_meta.go", 5, "🔴 **No commit metadata**", ""),
-	}
-
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(threads...),
-	}), nil, "", "test/repo")
-
-	findings, err := host.GetBotFindings(context.Background(), 7, headSHA, botUser)
-	if err != nil {
-		t.Fatalf("GetBotFindings() error = %v", err)
-	}
-
-	// 2 current-head threads + 1 empty-commit fail-safe thread = 3 findings.
-	// The 2 stale threads from "oldSHA123" must be filtered out.
-	if len(findings) != 3 {
-		t.Fatalf("len(findings) = %d, want 3 (2 current-head + 1 empty-commit fail-safe; 2 stale filtered): %+v", len(findings), findings)
-	}
-
-	// Verify no stale thread (from oldSHA123) is in the results.
-	for _, f := range findings {
-		if f.ID == 201 || f.ID == 202 {
-			t.Fatalf("stale thread from old head was not filtered out: %+v", f)
-		}
-	}
-
-	// Verify the current-head and empty-commit findings are present.
-	gotIDs := map[int64]bool{}
-	for _, f := range findings {
-		gotIDs[f.ID] = true
-	}
-	if !gotIDs[101] || !gotIDs[102] {
-		t.Fatalf("current-head findings missing, got IDs: %v", gotIDs)
-	}
-	if !gotIDs[301] {
-		t.Fatalf("empty-commit fail-safe finding missing, got IDs: %v", gotIDs)
-	}
-}
-
-// TestGetBotFindingsHeadSHANormalization guards the two defensive normalizations
-// in the stale-thread filter: the head-SHA comparison is case-insensitive
-// (strings.EqualFold), and the headSHA argument is trimmed before comparison so
-// a caller passing a whitespace-padded SHA still matches a clean originalCommit.
-// oid. A regression that swaps EqualFold for == (mixed-case false-negative) or
-// drops the headSHA trim (padded false-negative) would silently filter a
-// current-head finding as stale, dropping a live finding.
-func TestGetBotFindingsHeadSHANormalization(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		commitOID string // originalCommit.oid on the thread
-		argSHA    string // headSHA passed to GetBotFindings
-	}{
-		{
-			// Thread's oid is upper-case but the head is lower-case: EqualFold
-			// must still treat them as the same commit.
-			name:      "mixed_case_oid_matches_via_EqualFold",
-			commitOID: strings.ToUpper(headSHA),
-			argSHA:    headSHA,
-		},
-		{
-			// Caller passes a whitespace-padded head SHA: the trim in
-			// GetBotFindings must normalize it so it matches the clean oid.
-			name:      "whitespace_padded_headSHA_matches_after_trim",
-			commitOID: headSHA,
-			argSHA:    "  " + headSHA + "  ",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			threads := []string{
-				threadWithCommit(101, false, false, botSlug, "internal/batch/download.go", 42, "🔴 **Bug on current head**", tt.commitOID),
-			}
-			host := New(githubTestCmdFactory(map[string]githubTestResponse{
-				graphqlThreadsKey("test/repo", 7): reviewThreadsResponse(threads...),
-			}), nil, "", "test/repo")
-
-			findings, err := host.GetBotFindings(context.Background(), 7, tt.argSHA, botUser)
-			if err != nil {
-				t.Fatalf("GetBotFindings() error = %v", err)
-			}
-			if len(findings) != 1 {
-				t.Fatalf("len(findings) = %d, want 1 (current-head thread must not be filtered as stale): %+v", len(findings), findings)
-			}
-			if findings[0].ID != 101 {
-				t.Fatalf("finding ID = %d, want 101", findings[0].ID)
-			}
-		})
-	}
 }

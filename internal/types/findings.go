@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -14,12 +15,57 @@ const (
 	ActionAskUser   = "ask-user"
 )
 
-// Finding source constants. Source attributes who produced a finding. The two
-// sentinels below are special-cased by the UI (agent-authored and user-authored
-// findings). Any other non-empty value is a free-form provenance label - in
-// particular a reviewer's model/family name (e.g. "codex", "claude") stamped by
-// the multi-reviewer panel so each finding's origin is visible at the gate. An
-// empty Source is treated as agent-produced.
+// Finding severity constants: the vocabulary the review prompt instructs
+// agents to use, ordered most to least severe.
+const (
+	FindingSeverityError   = "error"
+	FindingSeverityWarning = "warning"
+	FindingSeverityInfo    = "info"
+)
+
+// This package owns the finding severity and action vocabularies. Callers that
+// accept a severity or action from outside a pipeline agent - a hand-written
+// eval miss, an IPC payload - validate against these rather than keeping their
+// own copy of the list.
+var (
+	knownFindingSeverities = []string{FindingSeverityError, FindingSeverityWarning, FindingSeverityInfo}
+	knownFindingActions    = []string{ActionAutoFix, ActionAskMaster, ActionAskUser, ActionNoOp}
+)
+
+// NormalizeFindingSeverity trims and lower-cases one severity so equivalent
+// spellings compare equal. It does not check membership; see
+// IsKnownFindingSeverity.
+func NormalizeFindingSeverity(severity string) string {
+	return strings.ToLower(strings.TrimSpace(severity))
+}
+
+// NormalizeFindingAction trims and lower-cases one action. It does not check
+// membership; see IsKnownFindingAction.
+func NormalizeFindingAction(action string) string {
+	return strings.ToLower(strings.TrimSpace(action))
+}
+
+// IsKnownFindingSeverity reports whether severity, once normalized, is part of
+// the review severity vocabulary.
+func IsKnownFindingSeverity(severity string) bool {
+	return slices.Contains(knownFindingSeverities, NormalizeFindingSeverity(severity))
+}
+
+// IsKnownFindingAction reports whether action, once normalized, is part of the
+// finding action vocabulary.
+func IsKnownFindingAction(action string) bool {
+	return slices.Contains(knownFindingActions, NormalizeFindingAction(action))
+}
+
+// KnownFindingSeverities returns the severity vocabulary, for error messages
+// that have to name what they accept.
+func KnownFindingSeverities() []string { return slices.Clone(knownFindingSeverities) }
+
+// KnownFindingActions returns the action vocabulary, for error messages that
+// have to name what they accept.
+func KnownFindingActions() []string { return slices.Clone(knownFindingActions) }
+
+// Finding source constants. An empty Source is treated as agent-produced.
 const (
 	FindingSourceAgent = "agent"
 	FindingSourceUser  = "user"
@@ -128,6 +174,8 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 	return Findings{Items: items, Summary: wire.Summary, Tested: wire.Tested, TestingSummary: wire.TestingSummary, Artifacts: wire.Artifacts, RiskLevel: wire.RiskLevel, RiskRationale: wire.RiskRationale, RiskScope: wire.RiskScope}, nil
 }
 
+// HasReviewVerdictEvidenceFinding recognizes only the reserved ID/source pair
+// emitted by the review gate itself, never a model-authored lookalike.
 func HasReviewVerdictEvidenceFinding(findings Findings) bool {
 	for _, finding := range findings.Items {
 		if finding.ID == FindingIDReviewVerdictEvidence && finding.Source == FindingSourceReviewGate {
@@ -193,7 +241,7 @@ func ExcludeFindings(findings Findings, ids []string) Findings {
 func AutoFixableFindings(findings Findings) Findings {
 	result := Findings{Summary: findings.Summary, Tested: findings.Tested, TestingSummary: findings.TestingSummary, Artifacts: findings.Artifacts, RiskLevel: findings.RiskLevel, RiskRationale: findings.RiskRationale, RiskScope: findings.RiskScope}
 	for _, item := range findings.Items {
-		if item.actionOrDefault() == ActionAutoFix {
+		if item.ActionOrDefault() == ActionAutoFix {
 			result.Items = append(result.Items, item)
 		}
 	}
@@ -255,7 +303,7 @@ func MergeUserOverrides(findings Findings, instructions map[string]string, added
 // ask-master instead, so they still park without being escalated to the user.
 func HasAskUserFindings(findings Findings) bool {
 	for _, item := range findings.Items {
-		if item.actionOrDefault() == ActionAskUser {
+		if item.ActionOrDefault() == ActionAskUser {
 			return true
 		}
 	}
@@ -293,7 +341,7 @@ func HasManualFindings(findings Findings) bool {
 // accept the step as-is.
 func HasActionableFindings(findings Findings) bool {
 	for _, item := range findings.Items {
-		if item.actionOrDefault() != ActionNoOp {
+		if item.ActionOrDefault() != ActionNoOp {
 			return true
 		}
 	}
@@ -390,13 +438,13 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// actionOrDefault resolves a finding's effective action. Missing and unknown
+// ActionOrDefault resolves a finding's effective action. Missing and unknown
 // values fail closed to ask-master (park), not auto-fix or no-op. This closes a
 // fail-open hole on non-schema and cross-version paths while keeping a typo or
 // future action from being misrepresented as a user-owned product decision.
 // (MergeUserOverrides still stamps user-*added* findings auto-fix explicitly -
 // a user who hand-adds a finding is asking for a fix.)
-func (f Finding) actionOrDefault() string {
+func (f Finding) ActionOrDefault() string {
 	return actionOrDefault(f.Action)
 }
 
@@ -406,36 +454,5 @@ func actionOrDefault(action string) string {
 		return action
 	default:
 		return ActionAskMaster
-	}
-}
-
-// RiskRank maps a risk level to a comparable rank where higher means riskier
-// (low < medium < high). Unknown or empty levels rank lowest. The multi-reviewer
-// panel uses it to reconcile each reviewer's risk_level into the maximum.
-func RiskRank(level string) int {
-	switch strings.ToLower(strings.TrimSpace(level)) {
-	case "high":
-		return 3
-	case "medium":
-		return 2
-	case "low":
-		return 1
-	default:
-		return 0
-	}
-}
-
-// SeverityRank maps a finding severity to a comparable rank where higher means
-// more severe (info < warning < error). Unknown or empty severities rank lowest.
-func SeverityRank(severity string) int {
-	switch strings.ToLower(strings.TrimSpace(severity)) {
-	case "error":
-		return 3
-	case "warning":
-		return 2
-	case "info":
-		return 1
-	default:
-		return 0
 	}
 }

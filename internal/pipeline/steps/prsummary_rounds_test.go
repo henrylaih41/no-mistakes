@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -20,7 +21,7 @@ func TestBuildPipelineSummary_AutoFix(t *testing.T) {
 			{Round: 2, Trigger: "auto_fix", DurationMS: 600},
 		},
 	}
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	// Should show wrench emoji for auto-fixed
 	if !strings.Contains(md, "🔧") {
@@ -46,6 +47,40 @@ func TestBuildPipelineSummary_AutoFix(t *testing.T) {
 	}
 }
 
+func TestBuildPipelineSummary_BitbucketCloudKeepsFixNarrativeWithoutHTML(t *testing.T) {
+	t.Parallel()
+	findings1 := `{"findings":[{"id":"lint-1","severity":"error","file":"pkg/foo.go","line":18,"description":"unused import"}],"summary":"1 issue"}`
+	findings2 := `{"findings":[{"id":"lint-2","severity":"warning","file":"pkg/bar.go","line":35,"description":"missing error check"}],"summary":"1 issue"}`
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepLint, Status: types.StepStatusCompleted, FindingsJSON: &findings2},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {
+			{Round: 1, Trigger: "initial", FindingsJSON: &findings1, DurationMS: 800},
+			{Round: 2, Trigger: "auto_fix", FindingsJSON: &findings2, DurationMS: 600},
+		},
+	}
+
+	md, _ := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, scm.ProviderBitbucket)
+
+	for _, want := range []string{
+		"### ⚠️ **Lint** - 1 warning",
+		"unused import",
+		"🔧 Fix applied.",
+		"1 warning still open:",
+		"missing error check",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expected %q in Bitbucket fix narrative, got:\n%s", want, md)
+		}
+	}
+	for _, leak := range []string{"<details>", "<summary>", "<!--", pipelineAttestationCommentPrefix} {
+		if strings.Contains(md, leak) {
+			t.Errorf("Bitbucket fix narrative leaked %q:\n%s", leak, md)
+		}
+	}
+}
+
 func TestBuildPipelineSummary_AutoFixShowsFixSummary(t *testing.T) {
 	t.Parallel()
 	findings1 := `{"findings":[{"id":"doc-1","severity":"warning","file":"internal/agent/server.go","line":129,"description":"waitForHealth doc comment still references the old 30s deadline"}],"summary":"1 warning"}`
@@ -59,7 +94,7 @@ func TestBuildPipelineSummary_AutoFixShowsFixSummary(t *testing.T) {
 			{Round: 2, Trigger: "auto_fix", FixSummary: &fixSummary, DurationMS: 600},
 		},
 	}
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	// The fix the agent actually applied must be surfaced - this is the data
 	// the old round-by-round layout dropped on the floor.
@@ -94,7 +129,7 @@ func TestBuildPipelineSummary_MultiRoundWithFollowUpFix(t *testing.T) {
 			{Round: 3, Trigger: "auto_fix", DurationMS: 700},
 		},
 	}
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	// Two fix attempts, the first leaving one issue open before the second
 	// cleared it - the narrative should show that chain.
@@ -127,7 +162,7 @@ func TestBuildPipelineSummary_LegacyUserFixRoundsRenderAsAutoFix(t *testing.T) {
 			{Round: 2, Trigger: "user_fix", DurationMS: 700},
 		},
 	}
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	if !strings.Contains(md, "auto-fixed") {
 		t.Errorf("expected legacy user_fix round to render as auto-fixed, got:\n%s", md)
@@ -155,7 +190,7 @@ func TestBuildPipelineSummary_MultiRoundStillFailing(t *testing.T) {
 			{Round: 2, Trigger: "auto_fix", FindingsJSON: &findings2, DurationMS: 600},
 		},
 	}
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	if strings.Contains(md, "auto-fixed") {
 		t.Errorf("did not expect fixed status when final round still has findings, got:\n%s", md)
@@ -179,7 +214,7 @@ func TestBuildPipelineSummary_UsesFinalFindingsWithoutInitialRoundData(t *testin
 			{Round: 1, Trigger: "initial", DurationMS: 1000},
 		},
 	}
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	if strings.Contains(md, "passed") {
 		t.Errorf("did not expect passed status when step result still has findings, got:\n%s", md)
@@ -207,7 +242,7 @@ func TestBuildPipelineSummary_FailedTestRoundIncludesTestedDetails(t *testing.T)
 		},
 	}
 
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	if !strings.Contains(md, "- `go test ./internal/cli -run '^TestDoctorBasic$' -count=1`") {
 		t.Fatalf("expected failed test round to include tested command details, got:\n%s", md)

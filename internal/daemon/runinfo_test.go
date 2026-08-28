@@ -8,6 +8,38 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestRunToInfoIncludesImmutableSubmittedHead(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "submitted-head", "base-head")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := d.UpdateRunHeadSHA(run.ID, "pipeline-fix-head"); err != nil {
+		t.Fatalf("advance run head: %v", err)
+	}
+	run, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("reload run: %v", err)
+	}
+
+	info := runToInfo(d, run, nil)
+	if info.HeadSHA != "pipeline-fix-head" {
+		t.Fatalf("head = %q, want pipeline-fix-head", info.HeadSHA)
+	}
+	if info.SubmittedHeadSHA == nil || *info.SubmittedHeadSHA != "submitted-head" {
+		t.Fatalf("submitted head = %v, want submitted-head", info.SubmittedHeadSHA)
+	}
+}
+
 func TestStepToInfoIncludesFixSummaries(t *testing.T) {
 	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -36,10 +68,16 @@ func TestStepToInfoIncludesFixSummaries(t *testing.T) {
 	if _, err := d.InsertStepRound(step.ID, 2, "auto_fix", nil, &sum, 100); err != nil {
 		t.Fatalf("insert round 2: %v", err)
 	}
+	if _, err := d.InsertStepRound(step.ID, 3, db.RoundTriggerAgentAutoRetry, nil, nil, 0); err != nil {
+		t.Fatalf("insert retry round: %v", err)
+	}
 
 	info := stepToInfo(d, step)
 	if len(info.FixSummaries) != 1 || info.FixSummaries[0] != sum {
 		t.Errorf("fix summaries = %v, want [%q]", info.FixSummaries, sum)
+	}
+	if info.AgentAutoRetries != 1 {
+		t.Errorf("agent auto retries = %d, want 1", info.AgentAutoRetries)
 	}
 }
 

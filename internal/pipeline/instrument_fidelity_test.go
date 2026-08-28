@@ -138,6 +138,25 @@ func TestPerfRecording_ResumedSessionRecordsPerRoundDeltas(t *testing.T) {
 	}
 }
 
+func TestPerfRecording_ReasoningDoesNotRequireActivityMetrics(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	recorder := &perfRecordingAgent{db: database, runID: run.ID, stepName: types.StepReview}
+	inv := &db.AgentInvocation{}
+	recorder.recordResult(inv, "", &agent.Result{
+		Usage: agent.TokenUsage{
+			InputTokens:       21,
+			OutputTokens:      8,
+			ReasoningTokens:   3,
+			ReasoningReported: true,
+		},
+		UsageReported: true,
+	})
+	assertPtr(t, "reasoning without activity metrics", inv.ReasoningTokens, 3)
+	if inv.ModelRoundtrips != nil || inv.ToolCalls != nil || inv.SubprocessWaitMS != nil {
+		t.Fatalf("missing activity metrics must stay unknown: %+v", inv)
+	}
+}
+
 // resumeFailingAgent starts a session cold, then fails any resume with an
 // exit-shaped error, then succeeds on the fresh fallback session.
 type resumeFailingAgent struct{ calls int }
@@ -243,45 +262,6 @@ func TestPerfRecording_MissingProviderUsageIsUnknown(t *testing.T) {
 	}
 	if inv.SubprocessWaitMS != nil {
 		t.Fatalf("subprocess wait must be unknown, got %d", *inv.SubprocessWaitMS)
-	}
-}
-
-type partialFidelityAgent struct{}
-
-func (partialFidelityAgent) Name() string { return "partial-fidelity" }
-func (partialFidelityAgent) Close() error { return nil }
-func (partialFidelityAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
-	return &agent.Result{
-		Usage:         agent.TokenUsage{InputTokens: 20, OutputTokens: 5, Reported: true},
-		UsageReported: true,
-		Metrics:       &agent.InvocationMetrics{ModelRoundtrips: 2, ToolCalls: 1},
-	}, nil
-}
-
-func TestPerfRecording_PartialFidelityKeepsUnreportedFieldsUnknown(t *testing.T) {
-	database, _, run, _ := setupTest(t)
-	wrapped := &perfRecordingAgent{
-		inner:    partialFidelityAgent{},
-		db:       database,
-		runID:    run.ID,
-		stepName: types.StepReview,
-		round:    func() int { return 1 },
-	}
-	if _, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review"}); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	invs, err := database.GetAgentInvocationsByRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(invs) != 1 {
-		t.Fatalf("got %d rows, want 1", len(invs))
-	}
-	inv := invs[0]
-	assertPtr(t, "model roundtrips", inv.ModelRoundtrips, 2)
-	assertPtr(t, "tool calls", inv.ToolCalls, 1)
-	if inv.ReasoningTokens != nil || inv.SubprocessWaitMS != nil || inv.CacheCreationTokens != nil {
-		t.Fatalf("unreported fidelity fields must stay NULL: reasoning=%v subprocess=%v cache_creation=%v", inv.ReasoningTokens, inv.SubprocessWaitMS, inv.CacheCreationTokens)
 	}
 }
 

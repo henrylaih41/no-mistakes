@@ -216,6 +216,19 @@ func TestOpencodeFixtureRewritesSessionIDsPerRequest(t *testing.T) {
 	}
 }
 
+func TestAddOpencodeReviewEvidenceAddsRepositoryRead(t *testing.T) {
+	raw := []byte("data: {\"payload\":{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"s1\"}}}\n\n")
+	patched, err := addOpencodeReviewEvidence(raw, "s1")
+	if err != nil {
+		t.Fatalf("addOpencodeReviewEvidence() error = %v", err)
+	}
+	for _, want := range []string{`"type":"tool"`, `"tool":"view_file"`, `"sessionID":"s1"`} {
+		if !bytes.Contains(patched, []byte(want)) {
+			t.Fatalf("review evidence missing %s:\n%s", want, patched)
+		}
+	}
+}
+
 func TestFakeOpencodeFixturePlainRunRewritesRecordedText(t *testing.T) {
 	t.Helper()
 

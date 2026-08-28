@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"os"
@@ -9,18 +10,30 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestNoMistakesRequiredWorkflowChecksPipelineSignature(t *testing.T) {
-	t.Parallel()
+const testPipelineHeadSHA = "0123456789abcdef0123456789abcdef01234567"
 
-	workflow, err := os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "no-mistakes-required.yml"))
-	if err != nil {
-		t.Fatalf("read required workflow: %v", err)
+func TestAwaitingApprovalDetailRoutesByFindingAuthority(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"ask-user", `{"findings":[{"action":"ask-user"}]}`, "Waiting for user approval."},
+		{"ask-master", `{"findings":[{"action":"ask-master"}]}`, "Waiting for master/gate-owner decision."},
+		{"unknown fails closed", `{"findings":[{"action":"future-owner"}]}`, "Waiting for master/gate-owner decision."},
+		{"unreadable fails closed", `{`, "Waiting for master/gate-owner decision."},
 	}
-	if !strings.Contains(string(workflow), "marker='"+noMistakesPRSignature+"'") {
-		t.Fatalf("required workflow does not check the generated PR signature %q", noMistakesPRSignature)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sr := &db.StepResult{FindingsJSON: &tt.raw}
+			if got := awaitingApprovalDetail(sr); got != tt.want {
+				t.Fatalf("awaitingApprovalDetail() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -36,7 +49,7 @@ func TestBuildPipelineSummary_AllClean(t *testing.T) {
 		"s2": {{Round: 1, Trigger: "initial", DurationMS: 300}},
 		"s3": {{Round: 1, Trigger: "initial", DurationMS: 200}},
 	}
-	md, risk := BuildPipelineSummary(steps, rounds)
+	md, risk := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	if !strings.Contains(md, "## Pipeline") {
 		t.Error("missing Pipeline heading")
@@ -62,6 +75,185 @@ func TestBuildPipelineSummary_AllClean(t *testing.T) {
 	}
 }
 
+func TestBuildPipelineSummary_BitbucketCloudOmitsHTMLAndAttestation(t *testing.T) {
+	t.Parallel()
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted},
+		{ID: "s2", StepName: types.StepTest, Status: types.StepStatusCompleted},
+		{ID: "s3", StepName: types.StepLint, Status: types.StepStatusCompleted},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", DurationMS: 500}},
+		"s2": {{Round: 1, Trigger: "initial", DurationMS: 300}},
+		"s3": {{Round: 1, Trigger: "initial", DurationMS: 200}},
+	}
+
+	md, risk := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, scm.ProviderBitbucket)
+
+	if !strings.Contains(md, "## Pipeline") {
+		t.Fatal("missing Pipeline heading")
+	}
+	if !strings.Contains(md, noMistakesPRSignature) {
+		t.Fatalf("expected human signature, got:\n%s", md)
+	}
+	for _, want := range []string{
+		"✅ **Review** - passed",
+		"✅ **Test** - passed",
+		"✅ **Lint** - passed",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expected %q in Bitbucket pipeline summary, got:\n%s", want, md)
+		}
+	}
+	for _, leak := range []string{
+		"<details>", "</details>", "<summary>", "</summary>",
+		"<!--", "-->", "<code>", "<video", "No issues found.",
+		pipelineAttestationCommentPrefix,
+	} {
+		if strings.Contains(md, leak) {
+			t.Errorf("Bitbucket pipeline leaked %q:\n%s", leak, md)
+		}
+	}
+	if risk != "" {
+		t.Errorf("expected empty risk for clean run, got: %q", risk)
+	}
+}
+
+func TestBuildPipelineSummary_FindingCannotSpoofFoldBoundary(t *testing.T) {
+	t.Parallel()
+	for _, field := range []struct {
+		name        string
+		file        string
+		description string
+		spoof       string
+	}{
+		{"description", "foo.py", "Update the header:\n### Configuration\nadd the missing key", "\n### Configuration"},
+		{"file", "src/app.py\n### Fake Heading", "add the missing key", "\n### Fake Heading"},
+	} {
+		t.Run(field.name, func(t *testing.T) {
+			t.Parallel()
+			findings := types.Findings{
+				Items: []types.Finding{{
+					ID:          "lint-1",
+					Severity:    "warning",
+					File:        field.file,
+					Line:        12,
+					Description: field.description,
+					Action:      types.ActionAutoFix,
+				}},
+			}
+			raw, err := types.MarshalFindingsJSON(findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			steps := []*db.StepResult{
+				{ID: "s1", StepName: types.StepLint, Status: types.StepStatusCompleted, FindingsJSON: &raw},
+			}
+			rounds := map[string][]*db.StepRound{
+				"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &raw, DurationMS: 200}},
+			}
+
+			for _, tc := range []struct {
+				name     string
+				provider scm.Provider
+			}{
+				{"github", scm.ProviderGitHub},
+				{"bitbucket", scm.ProviderBitbucket},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Parallel()
+					md, _ := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, tc.provider)
+					if strings.Contains(md, field.spoof) {
+						t.Fatalf("embedded finding %s was not escaped, spoofs the PR-body fold-boundary marker:\n%s", field.name, md)
+					}
+					if !strings.Contains(md, "add the missing key") {
+						t.Fatalf("expected the finding bullet to stay intact:\n%s", md)
+					}
+
+					_, updates := splitPipelineSectionHeader(md)
+					groups := parsePipelineUpdateGroups(updates)
+					if len(groups) != 1 {
+						t.Fatalf("expected exactly 1 step group, got %d - embedded finding %s was mistaken for a fold boundary:\n%s", len(groups), field.name, md)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestBuildPipelineSummary_EmitsStructuredStepAttestation(t *testing.T) {
+	t.Parallel()
+
+	steps := []*db.StepResult{
+		{ID: "ci", StepName: types.StepCI, Status: types.StepStatusPending},
+		{ID: "document", StepName: types.StepDocument, Status: types.StepStatusSkipped},
+		{ID: "review", StepName: types.StepReview, Status: types.StepStatusCompleted},
+		{ID: "test", StepName: types.StepTest, Status: types.StepStatusFailed},
+		{ID: "rebase", StepName: types.StepRebase, Status: types.StepStatusCompleted},
+		{ID: "lint", StepName: types.StepLint, Status: types.StepStatusAwaitingApproval},
+		{ID: "push", StepName: types.StepPush, Status: types.StepStatusCompleted},
+		{ID: "pr", StepName: types.StepPR, Status: types.StepStatusRunning},
+		{ID: "intent", StepName: types.StepIntent, Status: types.StepStatusSkipped},
+	}
+
+	got, _ := BuildPipelineSummary(steps, nil, testPipelineHeadSHA)
+	repeated, _ := BuildPipelineSummary(steps, nil, testPipelineHeadSHA)
+	if got != repeated {
+		t.Fatalf("attestation must be deterministic:\nfirst:\n%s\nsecond:\n%s", got, repeated)
+	}
+
+	const prefix = "<!-- no-mistakes-pipeline-attestation:v1 "
+	start := strings.Index(got, prefix)
+	if start < 0 {
+		t.Fatalf("pipeline summary missing attestation comment:\n%s", got)
+	}
+	end := strings.Index(got[start:], " -->")
+	if end < 0 {
+		t.Fatalf("attestation comment is not closed:\n%s", got)
+	}
+	var attestation struct {
+		HeadSHA string `json:"head_sha"`
+		Steps   []struct {
+			Step   types.StepName   `json:"step"`
+			Status types.StepStatus `json:"status"`
+		} `json:"steps"`
+	}
+	payload := got[start+len(prefix) : start+end]
+	if err := json.Unmarshal([]byte(payload), &attestation); err != nil {
+		t.Fatalf("attestation payload must be JSON: %v\n%s", err, payload)
+	}
+	if attestation.HeadSHA != testPipelineHeadSHA {
+		t.Fatalf("attested head = %q, want %q", attestation.HeadSHA, testPipelineHeadSHA)
+	}
+
+	want := []struct {
+		step   types.StepName
+		status types.StepStatus
+	}{
+		{types.StepIntent, types.StepStatusSkipped},
+		{types.StepRebase, types.StepStatusCompleted},
+		{types.StepReview, types.StepStatusCompleted},
+		{types.StepTest, types.StepStatusFailed},
+		{types.StepDocument, types.StepStatusSkipped},
+		{types.StepLint, types.StepStatusAwaitingApproval},
+		{types.StepPush, types.StepStatusCompleted},
+		{types.StepPR, types.StepStatusRunning},
+		{types.StepCI, types.StepStatusPending},
+	}
+	if len(attestation.Steps) != len(want) {
+		t.Fatalf("attested %d steps, want %d: %+v", len(attestation.Steps), len(want), attestation.Steps)
+	}
+	for i, wantStep := range want {
+		if gotStep := attestation.Steps[i]; gotStep.Step != wantStep.step || gotStep.Status != wantStep.status {
+			t.Errorf("attested step %d = (%q, %q), want (%q, %q)", i, gotStep.Step, gotStep.Status, wantStep.step, wantStep.status)
+		}
+	}
+
+	if signatureAt, attestationAt := strings.Index(got, noMistakesPRSignature), strings.Index(got, prefix); signatureAt < 0 || attestationAt < signatureAt {
+		t.Fatalf("attestation must follow the existing signature:\n%s", got)
+	}
+}
+
 func TestBuildPipelineSummary_IncludesAllPipelineSteps(t *testing.T) {
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepRebase, Status: types.StepStatusCompleted},
@@ -82,7 +274,7 @@ func TestBuildPipelineSummary_IncludesAllPipelineSteps(t *testing.T) {
 		"s6": {{Round: 1, Trigger: "initial", DurationMS: 700}},
 	}
 
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	for _, want := range []string{
 		"<summary>✅ **Rebase** - passed</summary>",
@@ -116,76 +308,13 @@ func TestBuildPipelineSummary_SkippedStep(t *testing.T) {
 		"s1": {},
 		"s2": {{Round: 1, Trigger: "initial", DurationMS: 300}},
 	}
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	if !strings.Contains(md, "⏭️") {
 		t.Errorf("expected skip emoji for skipped step, got:\n%s", md)
 	}
 	if !strings.Contains(md, "skipped") {
 		t.Errorf("expected 'skipped' text for skipped step, got:\n%s", md)
-	}
-}
-
-func TestBuildPipelineSummary_AwaitingApprovalUsesFindingAuthority(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		actions []string
-		want    string
-	}{
-		{
-			name:    "ask-master",
-			actions: []string{types.ActionAskMaster},
-			want:    "Waiting for master/gate-owner decision.",
-		},
-		{
-			name:    "ask-user",
-			actions: []string{types.ActionAskUser},
-			want:    "Waiting for user approval.",
-		},
-		{
-			name:    "mixed uses strictest authority",
-			actions: []string{types.ActionAskMaster, types.ActionAskUser},
-			want:    "Waiting for user approval.",
-		},
-		{
-			name:    "unknown fails closed to ask-master",
-			actions: []string{"future-owner"},
-			want:    "Waiting for master/gate-owner decision.",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			findings := types.Findings{Summary: "awaiting authority decision"}
-			for i, action := range tt.actions {
-				findings.Items = append(findings.Items, types.Finding{
-					ID:          fmt.Sprintf("finding-%d", i+1),
-					Severity:    "warning",
-					Description: "finding awaiting a decision",
-					Action:      action,
-				})
-			}
-			findingsJSON, err := types.MarshalFindingsJSON(findings)
-			if err != nil {
-				t.Fatalf("marshal findings: %v", err)
-			}
-
-			steps := []*db.StepResult{{
-				ID:           "s1",
-				StepName:     types.StepReview,
-				Status:       types.StepStatusAwaitingApproval,
-				FindingsJSON: &findingsJSON,
-			}}
-			md, _ := BuildPipelineSummary(steps, nil)
-
-			if !strings.Contains(md, tt.want) {
-				t.Fatalf("expected %q in pipeline summary, got:\n%s", tt.want, md)
-			}
-		})
 	}
 }
 
@@ -203,7 +332,7 @@ func TestBuildPipelineSummary_ExcludesPushPRCI(t *testing.T) {
 		"s3": {{Round: 1, Trigger: "initial", DurationMS: 200}},
 		"s4": {{Round: 1, Trigger: "initial", DurationMS: 300}},
 	}
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	for _, want := range []string{"**Push**"} {
 		if !strings.Contains(md, want) {
@@ -219,7 +348,7 @@ func TestBuildPipelineSummary_ExcludesPushPRCI(t *testing.T) {
 
 func TestBuildPipelineSummary_EmptySteps(t *testing.T) {
 	t.Parallel()
-	md, risk := BuildPipelineSummary(nil, nil)
+	md, risk := BuildPipelineSummary(nil, nil, testPipelineHeadSHA)
 	if md != "" {
 		t.Errorf("expected empty string for nil steps, got: %q", md)
 	}
@@ -237,7 +366,7 @@ func TestBuildPipelineSummary_RebaseWithConflicts(t *testing.T) {
 	rounds := map[string][]*db.StepRound{
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 2000}},
 	}
-	md, _ := BuildPipelineSummary(steps, rounds)
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
 	if !strings.Contains(md, "**Rebase**") {
 		t.Errorf("expected Rebase in output, got:\n%s", md)
@@ -291,45 +420,6 @@ func TestBuildTestingSummary_IncludesRecordedTestDetails(t *testing.T) {
 	}
 }
 
-func TestBuildPipelineSummary_AgentRetryRoundIsNotSyntheticPass(t *testing.T) {
-	t.Parallel()
-	steps := []*db.StepResult{
-		{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted},
-	}
-	rounds := map[string][]*db.StepRound{
-		"s1": {
-			{Round: 1, Trigger: db.RoundTriggerAgentAutoRetry},
-			{Round: 2, Trigger: "initial"},
-		},
-	}
-
-	md, _ := BuildPipelineSummary(steps, rounds)
-
-	if got := strings.Count(md, "✅ No issues found."); got != 1 {
-		t.Fatalf("a transient retry attribution round must not read as a synthetic pass; expected exactly one 'No issues found.' from the single real round, got %d in:\n%s", got, md)
-	}
-}
-
-func TestBuildTestingSummary_ExcludesAgentRetryRoundsFromRunCount(t *testing.T) {
-	t.Parallel()
-	findings := "{\"findings\":[],\"summary\":\"\",\"testing_summary\":\"All tests passed.\"}"
-	steps := []*db.StepResult{
-		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
-	}
-	rounds := map[string][]*db.StepRound{
-		"s1": {
-			{Round: 1, Trigger: db.RoundTriggerAgentAutoRetry, DurationMS: 0},
-			{Round: 2, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300},
-		},
-	}
-
-	md := BuildTestingSummary(steps, rounds)
-
-	if !strings.Contains(md, "- Outcome: ✅ passed across 1 run (300ms)") {
-		t.Fatalf("a transient retry attribution round must not count as a test run, got:\n%s", md)
-	}
-}
-
 func TestBuildTestingSummaryForPR_OmitsRecordedTestDetails(t *testing.T) {
 	t.Parallel()
 	findings := "{\"findings\":[],\"summary\":\"\",\"testing_summary\":\"Validated the CLI doctor path and config loading; both passed.\",\"tested\":[\"`go test ./internal/cli -run '^TestDoctorBasic$' -count=1`\",\"`make e2e`\"]}"
@@ -340,7 +430,7 @@ func TestBuildTestingSummaryForPR_OmitsRecordedTestDetails(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil)
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "## Testing\n\nValidated the CLI doctor path and config loading; both passed.") {
@@ -369,7 +459,7 @@ func TestBuildTestingSummaryForPR_SummarizesBaselineOnlyTests(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil)
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "## Testing\n\nCompleted 1 recorded test check.") {
@@ -396,7 +486,7 @@ func TestBuildTestingSummaryForPR_KeepsFailedOutcomeForCompactTestedSummary(t *t
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil)
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "Completed 1 recorded test check.") {
@@ -417,7 +507,7 @@ func TestBuildTestingSummaryForPR_KeepsOutcomeForArtifactOnlyEvidence(t *testing
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil)
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "Outcome:") {
@@ -456,7 +546,7 @@ func TestBuildTestingSummaryForPR_KeepsInlineCodeProseAsPlainText(t *testing.T) 
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil)
 
 	if strings.Contains(md, "<code>") {
 		t.Fatalf("prose summary with inline code spans should not be wrapped in <code>, got:\n%s", md)
@@ -538,6 +628,59 @@ func TestBuildTestingSummary_RejectsUnsafeArtifactTargets(t *testing.T) {
 	}
 }
 
+func TestBuildTestingSummary_ArtifactContentCannotSpoofFoldBoundary(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"log","label":"Server log","content":"line one\n### Fake Heading\nline two"}]}`
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	md := BuildTestingSummary(steps, rounds)
+	t.Logf("rendered testing markdown:\n%s", md)
+
+	if strings.Contains(md, "\n### Fake Heading") {
+		t.Fatalf("embedded artifact content was not escaped, spoofs the PR-body fold-boundary marker:\n%s", md)
+	}
+	if !strings.Contains(md, "line one") || !strings.Contains(md, "line two") {
+		t.Fatalf("expected the artifact content to stay intact:\n%s", md)
+	}
+}
+
+func TestBuildTestingSummaryForPR_ArtifactContentCannotSpoofFoldBoundary(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"log","label":"Server log","content":"line one\n### Fake Heading\nline two"}]}`
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	for _, tc := range []struct {
+		name     string
+		provider scm.Provider
+	}{
+		{"github", scm.ProviderGitHub},
+		{"bitbucket", scm.ProviderBitbucket},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			md := BuildTestingSummaryForPRWithProvider(steps, rounds, "https://github.com/example/widgets.git", "abc123", t.TempDir(), "", nil, tc.provider)
+			t.Logf("rendered PR testing markdown:\n%s", md)
+
+			if strings.Contains(md, "\n### Fake Heading") {
+				t.Fatalf("embedded artifact content was not escaped, spoofs the PR-body fold-boundary marker:\n%s", md)
+			}
+			if !strings.Contains(md, "line one") || !strings.Contains(md, "line two") {
+				t.Fatalf("expected the artifact content to stay intact:\n%s", md)
+			}
+		})
+	}
+}
+
 func TestBuildTestingSummaryForPR_RendersEvidenceArtifactsCompactly(t *testing.T) {
 	t.Parallel()
 	findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"screenshot","label":"Checkout screenshot","path":"artifacts/checkout.png"},{"kind":"log","label":"Server log","path":"artifacts/server.log"},{"kind":"log","label":"Placement rectangle evidence","content":"{\"button\":{\"top\":169,\"left\":248,\"right\":272,\"bottom\":193}}"}]}`
@@ -548,7 +691,7 @@ func TestBuildTestingSummaryForPR_RendersEvidenceArtifactsCompactly(t *testing.T
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil)
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "- Evidence: [Checkout screenshot](https://github.com/example/widgets/blob/abc123/artifacts/checkout.png)") {
@@ -567,10 +710,90 @@ func TestBuildTestingSummaryForPR_RendersEvidenceArtifactsCompactly(t *testing.T
 	}
 }
 
+func TestBuildTestingSummaryForPR_SeparatesMixedEvidenceBlocks(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"log","label":"Inline first","content":"first output"},{"kind":"log","label":"Linked first","url":"https://example.com/first.log"},{"kind":"log","label":"Inline second","content":"second output"},{"kind":"log","label":"Linked second","url":"https://example.com/second.log"},{"kind":"log","label":"Linked third","url":"https://example.com/third.log"}]}`
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil)
+
+	for _, want := range []string{
+		"</details>\n\n- Evidence: [Linked first]",
+		"- Evidence: [Linked first](https://example.com/first.log)\n\n<details>",
+		"</details>\n\n- Evidence: [Linked second]",
+		"- Evidence: [Linked second](https://example.com/second.log)\n- Evidence: [Linked third]",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expected mixed evidence boundary %q, got:\n%s", want, md)
+		}
+	}
+}
+
+func TestBuildTestingSummaryForPR_BitbucketCloudOmitsHTMLAndKeepsEvidence(t *testing.T) {
+	t.Parallel()
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
+	localPath := writeTempEvidenceFile(t, evidenceRoot, "server.log", []byte("POST /checkout 200"))
+	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"log","label":"Placement rectangle evidence","content":"{\"button\":{\"top\":169}}"},{"kind":"video","label":"Checkout recording","url":"https://example.com/checkout.mp4"},{"kind":"log","label":"Server log","path":%q}]}`, localPath)
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	md := BuildTestingSummaryForPRWithProvider(steps, rounds, "https://bitbucket.org/example/widgets.git", "abc123", t.TempDir(), evidenceRoot, nil, scm.ProviderBitbucket)
+
+	for _, want := range []string{
+		"## Testing",
+		"Evidence was collected.",
+		"### Evidence: Placement rectangle evidence",
+		"```text\n{\"button\":{\"top\":169}}\n```",
+		"[Checkout recording](https://example.com/checkout.mp4)",
+		"### Evidence: Server log",
+		"```text\nPOST /checkout 200\n```",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expected %q in Bitbucket testing summary, got:\n%s", want, md)
+		}
+	}
+	for _, leak := range []string{"<details>", "<summary>", "<code>", "<video", "![Checkout recording]"} {
+		if strings.Contains(md, leak) {
+			t.Errorf("Bitbucket testing leaked %q:\n%s", leak, md)
+		}
+	}
+}
+
+func TestBuildTestingSummaryForPR_BitbucketKeepsHTMLMentioningSummaryAsProse(t *testing.T) {
+	t.Parallel()
+	summary := "Bitbucket render is clean of <details>, <summary>, <code>, <video>, and the attestation HTML comment."
+	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":%q}`, summary)
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	md := BuildTestingSummaryForPRWithProvider(steps, rounds, "https://bitbucket.org/example/widgets.git", "abc123", t.TempDir(), "", nil, scm.ProviderBitbucket)
+
+	if !strings.Contains(md, "## Testing\n\n"+summary) {
+		t.Fatalf("expected Bitbucket testing summary to stay prose, got:\n%s", md)
+	}
+	if strings.Contains(md, "```") || strings.Contains(md, "`"+summary+"`") {
+		t.Fatalf("Bitbucket testing summary must not be wrapped as code just because it mentions HTML tags, got:\n%s", md)
+	}
+}
+
 func TestBuildTestingSummaryForPR_RendersLocalTempVisualArtifactPath(t *testing.T) {
 	t.Parallel()
 	repoRoot := t.TempDir()
-	localPath := filepath.Join(os.TempDir(), "no-mistakes-evidence", "run-123", "checkout.png")
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
+	localPath := filepath.Join(evidenceRoot, "checkout.png")
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"screenshot","label":"Checkout screenshot","path":%q}]}`, localPath)
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
@@ -579,7 +802,7 @@ func TestBuildTestingSummaryForPR_RendersLocalTempVisualArtifactPath(t *testing.
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, evidenceRoot, nil)
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	want := "- Evidence: Checkout screenshot (local file: <code>" + html.EscapeString(localPath) + "</code>)"
@@ -596,7 +819,8 @@ func TestBuildTestingSummaryForPR_RendersLocalTempVisualArtifactPath(t *testing.
 func TestBuildTestingSummaryForPR_PreservesCaptionedLocalVisualArtifactPath(t *testing.T) {
 	t.Parallel()
 	repoRoot := t.TempDir()
-	localPath := filepath.Join(os.TempDir(), "no-mistakes-evidence", "run-123", "checkout.png")
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
+	localPath := filepath.Join(evidenceRoot, "checkout.png")
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"screenshot","label":"Checkout screenshot","path":%q,"content":"Checkout completed visually."}]}`, localPath)
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
@@ -605,7 +829,7 @@ func TestBuildTestingSummaryForPR_PreservesCaptionedLocalVisualArtifactPath(t *t
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, evidenceRoot, nil)
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	wantSource := "Source: Checkout screenshot (local file: <code>" + html.EscapeString(localPath) + "</code>)"
@@ -623,7 +847,8 @@ func TestBuildTestingSummaryForPR_PreservesCaptionedLocalVisualArtifactPath(t *t
 func TestBuildTestingSummaryForPR_PrefersArtifactURLOverLocalPath(t *testing.T) {
 	t.Parallel()
 	repoRoot := t.TempDir()
-	localPath := filepath.Join(os.TempDir(), "no-mistakes-evidence", "run-123", "checkout.png")
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
+	localPath := filepath.Join(evidenceRoot, "checkout.png")
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"screenshot","label":"Checkout screenshot","url":"https://example.com/checkout.png","path":%q}]}`, localPath)
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
@@ -632,7 +857,7 @@ func TestBuildTestingSummaryForPR_PrefersArtifactURLOverLocalPath(t *testing.T) 
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, evidenceRoot, nil)
 
 	if !strings.Contains(md, "- Evidence: [Checkout screenshot](https://example.com/checkout.png)") {
 		t.Fatalf("expected artifact URL to take precedence, got:\n%s", md)
@@ -671,17 +896,16 @@ func TestArtifactPathRelativeToRoot_AllowsSymlinkEquivalentPaths(t *testing.T) {
 	}
 }
 
-// writeTempEvidenceFile creates a uniquely-named file under the temp evidence
-// root (the only absolute location outside the repo that artifact paths may
-// reference) and registers cleanup of its run directory.
-func writeTempEvidenceFile(t *testing.T, name string, content []byte) string {
+// writeTempEvidenceFile creates a file under the caller's evidence root, which
+// is the only absolute location outside the repository that artifact paths may
+// reference. The root is passed in rather than derived here so each test owns
+// one directory and can hand the same value to BuildTestingSummaryForPR.
+func writeTempEvidenceFile(t *testing.T, evidenceRoot, name string, content []byte) string {
 	t.Helper()
-	runDir := filepath.Join(testEvidenceRoot(), "run-"+strings.ReplaceAll(t.Name(), "/", "_"))
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	if err := os.MkdirAll(evidenceRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(runDir) })
-	path := filepath.Join(runDir, name)
+	path := filepath.Join(evidenceRoot, name)
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -689,8 +913,9 @@ func writeTempEvidenceFile(t *testing.T, name string, content []byte) string {
 }
 
 func TestBuildTestingSummaryForPR_EmbedsLocalTextEvidenceContent(t *testing.T) {
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	fileBody := "RENDERED WIZARD SCREEN\n  > Claude\n  > Codex\nGitHub source selected"
-	localPath := writeTempEvidenceFile(t, "init-wizard-rendered-screens.txt", []byte(fileBody))
+	localPath := writeTempEvidenceFile(t, evidenceRoot, "init-wizard-rendered-screens.txt", []byte(fileBody))
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"label":"Rendered setup wizard screens","path":%q,"content":"Shows agent auto-detect with Claude and Codex listed individually."}]}`, localPath)
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
@@ -699,7 +924,7 @@ func TestBuildTestingSummaryForPR_EmbedsLocalTextEvidenceContent(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), evidenceRoot, nil)
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "<summary>Evidence: Rendered setup wizard screens</summary>") {
@@ -719,8 +944,9 @@ func TestBuildTestingSummaryForPR_EmbedsLocalTextEvidenceContent(t *testing.T) {
 }
 
 func TestBuildTestingSummaryForPR_PreservesPublicURLForEmbeddedTextEvidence(t *testing.T) {
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	fileBody := "rendered wizard evidence"
-	localPath := writeTempEvidenceFile(t, "wizard.txt", []byte(fileBody))
+	localPath := writeTempEvidenceFile(t, evidenceRoot, "wizard.txt", []byte(fileBody))
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"label":"Wizard log","url":"https://example.com/artifacts/wizard.txt","path":%q}]}`, localPath)
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
@@ -729,7 +955,7 @@ func TestBuildTestingSummaryForPR_PreservesPublicURLForEmbeddedTextEvidence(t *t
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), evidenceRoot, nil)
 
 	if !strings.Contains(md, "Source: [Wizard log](https://example.com/artifacts/wizard.txt)") {
 		t.Fatalf("expected public URL source to be preserved, got:\n%s", md)
@@ -760,7 +986,7 @@ func TestBuildTestingSummaryForPR_EmbedsRepoTextEvidenceContent(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, "", nil)
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if strings.Contains(md, fileBody) || strings.Contains(md, "```text") {
@@ -786,7 +1012,7 @@ func TestBuildTestingSummaryForPR_DoesNotEmbedRepoRelativeSecrets(t *testing.T) 
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, "", nil)
 
 	if strings.Contains(md, secret) || strings.Contains(md, "```text") {
 		t.Fatalf("did not expect repo-relative secret content to be embedded, got:\n%s", md)
@@ -794,8 +1020,9 @@ func TestBuildTestingSummaryForPR_DoesNotEmbedRepoRelativeSecrets(t *testing.T) 
 }
 
 func TestBuildTestingSummaryForPR_RendersFileCaptionAsText(t *testing.T) {
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	fileBody := "safe evidence body"
-	localPath := writeTempEvidenceFile(t, "caption.txt", []byte(fileBody))
+	localPath := writeTempEvidenceFile(t, evidenceRoot, "caption.txt", []byte(fileBody))
 	caption := "<img src=x onerror=alert(1)>\n[leak](file:///tmp/secret)"
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"label":"Captioned log","path":%q,"content":%q}]}`, localPath, caption)
 	steps := []*db.StepResult{
@@ -805,7 +1032,7 @@ func TestBuildTestingSummaryForPR_RendersFileCaptionAsText(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), evidenceRoot, nil)
 
 	if strings.Contains(md, caption) || strings.Contains(md, "<img src=x") {
 		t.Fatalf("did not expect raw caption markdown/html, got:\n%s", md)
@@ -819,10 +1046,11 @@ func TestBuildTestingSummaryForPR_RendersFileCaptionAsText(t *testing.T) {
 }
 
 func TestBuildTestingSummaryForPR_TruncatesLargeTextEvidenceFromMiddle(t *testing.T) {
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	head := strings.Repeat("HEAD-LINE\n", 50)
 	tail := strings.Repeat("TAIL-LINE\n", 50)
 	fileBody := head + strings.Repeat("X", 40*1024) + tail
-	localPath := writeTempEvidenceFile(t, "big.txt", []byte(fileBody))
+	localPath := writeTempEvidenceFile(t, evidenceRoot, "big.txt", []byte(fileBody))
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"label":"Large log","path":%q}]}`, localPath)
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
@@ -831,7 +1059,7 @@ func TestBuildTestingSummaryForPR_TruncatesLargeTextEvidenceFromMiddle(t *testin
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), evidenceRoot, nil)
 
 	if !strings.Contains(md, "HEAD-LINE") {
 		t.Fatalf("expected truncated content to keep the head, got:\n%s", md[:min(len(md), 600)])
@@ -848,12 +1076,13 @@ func TestBuildTestingSummaryForPR_TruncatesLargeTextEvidenceFromMiddle(t *testin
 }
 
 func TestBuildTestingSummaryForPR_LimitsTotalEmbeddedTextEvidence(t *testing.T) {
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	firstBody := strings.Repeat("first evidence line\n", 700)
 	secondBody := strings.Repeat("second evidence line\n", 700)
 	thirdBody := strings.Repeat("third evidence line\n", 700)
-	firstPath := writeTempEvidenceFile(t, "first.txt", []byte(firstBody))
-	secondPath := writeTempEvidenceFile(t, "second.txt", []byte(secondBody))
-	thirdPath := writeTempEvidenceFile(t, "third.txt", []byte(thirdBody))
+	firstPath := writeTempEvidenceFile(t, evidenceRoot, "first.txt", []byte(firstBody))
+	secondPath := writeTempEvidenceFile(t, evidenceRoot, "second.txt", []byte(secondBody))
+	thirdPath := writeTempEvidenceFile(t, evidenceRoot, "third.txt", []byte(thirdBody))
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"label":"First log","path":%q},{"label":"Second log","path":%q},{"label":"Third log","path":%q}]}`, firstPath, secondPath, thirdPath)
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
@@ -862,7 +1091,7 @@ func TestBuildTestingSummaryForPR_LimitsTotalEmbeddedTextEvidence(t *testing.T) 
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), evidenceRoot, nil)
 
 	if !strings.Contains(md, firstBody) || !strings.Contains(md, secondBody) {
 		t.Fatalf("expected earlier evidence to embed before budget is exhausted, got:\n%s", md[:min(len(md), 600)])
@@ -876,7 +1105,8 @@ func TestBuildTestingSummaryForPR_LimitsTotalEmbeddedTextEvidence(t *testing.T) 
 }
 
 func TestBuildTestingSummaryForPR_FallsBackForBinaryEvidence(t *testing.T) {
-	localPath := writeTempEvidenceFile(t, "capture.dat", []byte{0x00, 0x01, 0x02, 0xff, 0x00})
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
+	localPath := writeTempEvidenceFile(t, evidenceRoot, "capture.dat", []byte{0x00, 0x01, 0x02, 0xff, 0x00})
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"label":"Binary capture","path":%q}]}`, localPath)
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
@@ -885,53 +1115,12 @@ func TestBuildTestingSummaryForPR_FallsBackForBinaryEvidence(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), evidenceRoot, nil)
 
 	if !strings.Contains(md, "- Evidence: Binary capture (local file: <code>"+html.EscapeString(localPath)+"</code>)") {
 		t.Fatalf("expected binary evidence to fall back to a local file reference, got:\n%s", md)
 	}
 	if strings.Contains(md, "```text") {
 		t.Fatalf("did not expect binary content to be embedded as text, got:\n%s", md)
-	}
-}
-
-func TestWriteStepStatusDetailDistinguishesEvidenceTriage(t *testing.T) {
-	findings, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{{
-		ID:     types.FindingIDReviewVerdictEvidence,
-		Source: types.FindingSourceReviewGate,
-	}}})
-	if err != nil {
-		t.Fatalf("marshal findings: %v", err)
-	}
-	var b strings.Builder
-	writeStepStatusDetail(&b, &db.StepResult{
-		StepName:     types.StepReview,
-		Status:       types.StepStatusAwaitingTriage,
-		FindingsJSON: &findings,
-	})
-	if got := b.String(); !strings.Contains(got, "Review verdict evidence failed after one cold retry") || strings.Contains(got, "fix-round cap") {
-		t.Fatalf("evidence triage detail = %q", got)
-	}
-}
-
-func TestWriteStepStatusDetailSurfacesEvidenceTriageAtFixRoundCap(t *testing.T) {
-	findings, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{{
-		ID:     types.FindingIDReviewVerdictEvidence,
-		Source: types.FindingSourceReviewGate,
-	}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reason := types.ReviewTriageReasonEvidence + "; " + types.ReviewTriageReasonFixRoundCap
-	var b strings.Builder
-	writeStepStatusDetail(&b, &db.StepResult{
-		StepName:     types.StepReview,
-		Status:       types.StepStatusAwaitingTriage,
-		FindingsJSON: &findings,
-		Error:        &reason,
-	})
-	got := b.String()
-	if !strings.Contains(got, "evidence failed") || !strings.Contains(got, "fix-round cap") {
-		t.Fatalf("combined triage detail = %q", got)
 	}
 }

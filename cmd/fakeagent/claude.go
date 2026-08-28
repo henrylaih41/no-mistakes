@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
 
-func runClaude(args []string, scenario *Scenario) int {
+func runClaude(args []string, promptReader io.Reader, scenario *Scenario) int {
 	started := time.Now()
-	prompt := extractClaudePrompt(args)
+	prompt, err := extractClaudePrompt(args, promptReader)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fakeagent: claude prompt: %v\n", err)
+		return 1
+	}
 	logInvocation("claude", prompt, args)
 
 	action := scenario.Match(prompt)
@@ -49,9 +54,7 @@ func runClaude(args []string, scenario *Scenario) int {
 	}
 
 	enc := json.NewEncoder(os.Stdout)
-	content := []any{
-		map[string]any{"type": "text", "text": action.textOrDefault()},
-	}
+	content := []any{map[string]any{"type": "text", "text": action.textOrDefault()}}
 	if isReviewPrompt(prompt) {
 		content = append([]any{map[string]any{"type": "tool_use", "name": "Read"}}, content...)
 	}
@@ -220,39 +223,24 @@ func hasClaudeSchema(args []string) bool {
 	return false
 }
 
-// extractClaudePrompt scans for the value following -p, matching the real
-// claude CLI's argv shape (claude -p "<prompt>" --verbose ...). Other
-// flags carrying values are skipped explicitly so we don't accidentally
-// pick up e.g. --output-format's argument.
-func extractClaudePrompt(args []string) string {
-	flagsWithValues := map[string]bool{
-		"--output-format":    true,
-		"--json-schema":      true,
-		"--permission-mode":  true,
-		"--model":            true,
-		"-m":                 true,
-		"--max-turns":        true,
-		"--system":           true,
-		"--allowed-tools":    true,
-		"--disallowed-tools": true,
-		"--mcp-config":       true,
-		"--continue":         true,
-		"--resume":           true,
-		"--cwd":              true,
-		"--add-dir":          true,
-	}
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-p", "--print":
-			if i+1 < len(args) {
-				return args[i+1]
-			}
-			return ""
-		}
-		if flagsWithValues[args[i]] {
-			i++ // skip the value
+// extractClaudePrompt mirrors Claude Code's documented print-mode contract:
+// -p selects non-interactive mode and the text user prompt is read to EOF from
+// stdin. Keeping the e2e fake on this shape ensures prompts cannot regress into
+// process argv unnoticed.
+func extractClaudePrompt(args []string, promptReader io.Reader) (string, error) {
+	foundPrint := false
+	for _, arg := range args {
+		if arg == "-p" || arg == "--print" {
+			foundPrint = true
+			break
 		}
 	}
-	fmt.Fprintln(os.Stderr, "fakeagent: claude prompt missing (no -p found)")
-	return ""
+	if !foundPrint {
+		return "", fmt.Errorf("missing -p")
+	}
+	prompt, err := io.ReadAll(promptReader)
+	if err != nil {
+		return "", fmt.Errorf("read stdin: %w", err)
+	}
+	return string(prompt), nil
 }

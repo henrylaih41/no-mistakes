@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -23,15 +24,14 @@ var daemonKillPID = killPID
 var daemonEndpointUsesRegularFile = func() bool { return runtime.GOOS == "windows" }
 
 func daemonStartTimeout() time.Duration {
-	fallback := 5 * time.Second
-	if runtimeGOOS == "windows" {
-		fallback = 15 * time.Second
-	}
-	return durationFromEnv("NM_TEST_DAEMON_START_TIMEOUT", fallback)
+	// Login-shell environment resolution alone has a 30s safety budget. A
+	// production readiness deadline must cover that cold work plus exclusive
+	// recovery, while remaining bounded for genuine startup failures.
+	return durationFromEnv("NM_TEST_DAEMON_START_TIMEOUT", 45*time.Second)
 }
 
-// daemonStopTimeout bounds how long waitForDaemonStop polls the health check
-// for graceful shutdown before falling back to killing the daemon by PID.
+// daemonStopTimeout bounds how long waitForDaemonStop polls for a graceful
+// shutdown before falling back to killing the daemon by PID.
 // Windows gets a longer window: closing the loopback TCP listener used for
 // its named-pipe-less IPC transport (transport_windows.go) does not make
 // pending/racing connections fail as immediately as a Unix domain socket
@@ -63,8 +63,9 @@ func durationFromEnv(name string, fallback time.Duration) time.Duration {
 
 // Start installs or refreshes the managed daemon service when supported and
 // starts it, falling back to a detached explicit `daemon run --root` re-exec
-// when managed startup is unavailable or fails. It waits up to 5 seconds for
-// the daemon to become responsive on the IPC socket.
+// when managed startup is unavailable or fails. Launch and readiness are
+// distinct: readiness requires a real IPC health response within the bounded
+// production startup budget.
 //
 // When the daemon is already running, Start refreshes the installed service
 // definition and reloads the service manager if the on-disk definition is
@@ -93,18 +94,39 @@ func Start(p *paths.Paths) error {
 	if err := reconcileCollidingDaemons(p); err != nil {
 		return err
 	}
+	var managedErr error
 	if managed, err := installManagedService(p); err == nil {
 		if managed {
 			if err := startManagedDaemon(p); err == nil {
 				return nil
-			} else if err := stopManagedFallback(p); err != nil {
-				return err
+			} else {
+				managedErr = err
+			}
+			if cleanupErr := stopManagedFallback(p); cleanupErr != nil {
+				return errors.Join(
+					fmt.Errorf("managed startup failed: %w", managedErr),
+					fmt.Errorf("managed cleanup failed: %w", cleanupErr),
+				)
 			}
 		}
-	} else if alive, _ := daemonHealthCheck(p); alive {
+	} else {
+		if alive, _ := daemonHealthCheck(p); alive {
+			return nil
+		}
+		managedErr = fmt.Errorf("install managed service: %w", err)
+	}
+
+	fallbackErr := startDetachedDaemon(p)
+	if fallbackErr == nil {
 		return nil
 	}
-	return startDetachedDaemon(p)
+	if managedErr != nil {
+		return errors.Join(
+			fmt.Errorf("managed startup failed: %w", managedErr),
+			fmt.Errorf("detached fallback failed: %w", fallbackErr),
+		)
+	}
+	return fallbackErr
 }
 
 // reinstallManagedServiceIfChanged refreshes the managed daemon service and
@@ -214,12 +236,26 @@ func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
 }
 
 func stopCurrentDaemonBeforeManagedRestart(p *paths.Paths) error {
-	if managed, err := stopManagedService(p); managed && err != nil {
-		if alive, _ := daemonHealthCheck(p); !alive {
-			return nil
+	instance := captureRunningDaemon(p)
+	if managed, err := stopManagedService(p); managed {
+		var detachedErr error
+		// A managed service definition can coexist with a detached daemon.
+		// Stopping the service is then a successful no-op, so shut down any
+		// daemon that is still answering before restarting the service.
+		if alive, _ := daemonHealthCheck(p); alive {
+			detachedErr = stopDetachedDaemon(p)
 		}
-		if detachedErr := stopDetachedDaemon(p); detachedErr != nil {
-			return fmt.Errorf("stop managed daemon before restart: %w; detached shutdown: %v", err, detachedErr)
+		if waitErr := waitForDaemonStop(p, instance); waitErr != nil {
+			switch {
+			case err != nil && detachedErr != nil:
+				return fmt.Errorf("stop managed daemon before restart: %w; detached shutdown: %v; wait for exit: %v", err, detachedErr, waitErr)
+			case err != nil:
+				return fmt.Errorf("stop managed daemon before restart: %w; wait for exit: %v", err, waitErr)
+			case detachedErr != nil:
+				return fmt.Errorf("detached shutdown before managed restart: %w; wait for exit: %v", detachedErr, waitErr)
+			default:
+				return fmt.Errorf("wait for managed daemon exit before restart: %w", waitErr)
+			}
 		}
 		return nil
 	}
@@ -242,12 +278,42 @@ func stopManagedFallback(p *paths.Paths) error {
 				return fmt.Errorf("remove launch agent before detached fallback: %w", err)
 			}
 		}
+		if err := waitForManagedServiceExit(p, 5*time.Second); err != nil {
+			return fmt.Errorf("wait for managed daemon exit before detached fallback: %w", err)
+		}
 		return nil
 	}
 	if alive, _ := daemonHealthCheck(p); alive {
 		return fmt.Errorf("managed daemon is still running: %w", err)
 	}
 	return fmt.Errorf("stop managed daemon before detached fallback: %w", err)
+}
+
+// waitForManagedServiceExit closes the bootout/stop race before a detached
+// fallback is launched. Health cannot prove exit for a child that never became
+// ready, so inspect processes by canonical root and fail closed if the owned
+// managed child survives the cleanup budget.
+func waitForManagedServiceExit(p *paths.Paths, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	wantRoot := canonicalRoot(p.Root())
+	for time.Now().Before(deadline) {
+		processes, err := daemonListDaemonProcesses()
+		if err != nil {
+			return fmt.Errorf("enumerate daemon processes: %w", err)
+		}
+		var matching []int
+		for _, process := range processes {
+			if process.PID == os.Getpid() || canonicalRoot(process.Root) != wantRoot {
+				continue
+			}
+			matching = append(matching, process.PID)
+		}
+		if len(matching) == 0 {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("managed daemon process for %s survived %v", p.Root(), timeout)
 }
 
 func startDetachedDaemon(p *paths.Paths) error {
@@ -258,9 +324,9 @@ func startDetachedDaemon(p *paths.Paths) error {
 		return fmt.Errorf("resolve executable: %w", err)
 	}
 
-	logFile, err := os.OpenFile(p.DaemonLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(p.DaemonBootstrapLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return fmt.Errorf("open daemon log: %w", err)
+		return fmt.Errorf("open daemon bootstrap log: %w", err)
 	}
 	defer logFile.Close()
 
@@ -283,64 +349,134 @@ func startDetachedDaemon(p *paths.Paths) error {
 		}
 		return fmt.Errorf("inspect daemon process %d: %w", pid, err)
 	}
-	slog.Info("daemon process started", "pid", pid, "log", p.DaemonLog())
+	slog.Info("daemon process launched", "pid", pid, "log", p.DaemonLog(), "bootstrap_log", p.DaemonBootstrapLog())
 
-	if err := waitForDaemonStartWithProcess(p, cmd.Process, pid, startedAt); err != nil {
-		return err
-	}
-
-	// Release the child so it's not reaped when we exit.
-	if err := cmd.Process.Release(); err != nil {
-		return fmt.Errorf("release daemon process: %w", err)
-	}
-	return nil
+	// Own Wait in a goroutine from launch onward. This reports a genuine child
+	// exit immediately and guarantees timeout cleanup reaps the exact child,
+	// rather than leaving a zombie or a process racing fallback rollback.
+	exitCh := make(chan error, 1)
+	go func() {
+		state, waitErr := cmd.Process.Wait()
+		if waitErr == nil && state != nil && !state.Success() {
+			waitErr = fmt.Errorf("exit status %d", state.ExitCode())
+		}
+		exitCh <- waitErr
+	}()
+	return waitForDaemonStartWithProcess(p, cmd.Process, exitCh, pid, startedAt, managedServiceLaunch{})
 }
 
 func startManagedDaemon(p *paths.Paths) error {
+	launch, err := prepareManagedDaemonLaunch(p)
+	if err != nil {
+		return fmt.Errorf("inspect managed daemon before launch: %w", err)
+	}
 	if _, err := startManagedService(p); err != nil {
 		if alive, _ := daemonHealthCheck(p); alive {
 			return nil
 		}
 		return err
 	}
-	return waitForDaemonStart(p, 0, time.Time{})
+	slog.Info("managed daemon launched")
+	return waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, launch)
 }
 
 func waitForDaemonStart(p *paths.Paths, pid int, startedAt time.Time) error {
-	return waitForDaemonStartWithProcess(p, nil, pid, startedAt)
+	return waitForDaemonStartWithProcess(p, nil, nil, pid, startedAt, managedServiceLaunch{})
 }
 
-func waitForDaemonStartWithProcess(p *paths.Paths, proc *os.Process, pid int, startedAt time.Time) error {
-	// Poll for the daemon to become responsive.
+func waitForDaemonStartWithProcess(p *paths.Paths, proc *os.Process, exitCh <-chan error, pid int, startedAt time.Time, launch managedServiceLaunch) error {
 	timeout := daemonStartTimeout()
 	pollInterval := daemonStartPollInterval()
 	deadline := time.Now().Add(timeout)
+	managedPID := 0
+	nextManagedProbe := time.Time{}
+	var lastHealthErr error
+
 	for time.Now().Before(deadline) {
-		if alive, _ := daemonHealthCheck(p); alive {
-			slog.Info("daemon is responsive", "pid", pid)
+		if alive, err := daemonHealthCheck(p); alive {
+			slog.Info("daemon ready", "pid", pid)
 			return nil
+		} else if err != nil {
+			lastHealthErr = err
+		}
+
+		if exitCh != nil {
+			select {
+			case exitErr := <-exitCh:
+				if exitErr != nil {
+					return fmt.Errorf("daemon child %d exited before readiness: %w", pid, exitErr)
+				}
+				return fmt.Errorf("daemon child %d exited before readiness", pid)
+			default:
+			}
+		} else if pid == 0 {
+			if state, err := inspectManagedDaemonService(p, launch); err == nil && state == managedServiceExited {
+				return fmt.Errorf("managed daemon exited before readiness")
+			}
+			// Managed services have no os.Process handle. The daemon publishes its
+			// PID immediately after taking the singleton lock, before recovery, so
+			// observe that exact child and notice an early exit without waiting out
+			// the full readiness budget.
+			if managedPID == 0 {
+				if record, err := readDaemonPIDFile(p.PIDFile()); err == nil && !record.StartedAt.IsZero() {
+					if actual, err := daemonProcessStartTime(record.PID); err == nil {
+						if matches, _ := daemonPIDRecordMatchesProcess(p, record, actual); matches {
+							managedPID = record.PID
+							nextManagedProbe = time.Now().Add(250 * time.Millisecond)
+						}
+					}
+				}
+			} else if !time.Now().Before(nextManagedProbe) {
+				running, err := daemonProcessRunning(managedPID)
+				if err == nil && !running {
+					return fmt.Errorf("managed daemon child %d exited before readiness", managedPID)
+				}
+				nextManagedProbe = time.Now().Add(250 * time.Millisecond)
+			}
 		}
 		time.Sleep(pollInterval)
 	}
 
-	// Kill the child so it can't race with rollback work (e.g. SQLite writes)
-	// after the caller gives up on it. Skip when pid is 0 (managed service).
-	if pid > 0 {
-		var cleanupErr error
-		if proc != nil {
-			cleanupErr = cleanupStartedDaemonProcess(proc)
-		} else {
-			cleanupErr = killTimedOutDaemonPID(pid, startedAt)
+	timeoutErr := fmt.Errorf("daemon launched but did not become ready within %v", timeout)
+	if lastHealthErr != nil {
+		timeoutErr = fmt.Errorf("%w: last health check: %v", timeoutErr, lastHealthErr)
+	}
+
+	cleanupWait := 5 * time.Second
+	if timeout < cleanupWait {
+		cleanupWait = timeout
+	}
+
+	// Kill and reap the detached child so it cannot race rollback or a fallback
+	// service after the caller gives up. Managed cleanup is owned by Start.
+	if proc != nil && pid > 0 {
+		if err := proc.Kill(); err != nil {
+			select {
+			case <-exitCh:
+				return timeoutErr
+			default:
+				return fmt.Errorf("%w: cleanup daemon child %d: %v", timeoutErr, pid, err)
+			}
 		}
-		if cleanupErr != nil {
-			return fmt.Errorf("daemon started but did not become responsive within %v: cleanup daemon child %d: %w", timeout, pid, cleanupErr)
-		}
-		if proc == nil && !startedAt.IsZero() {
-			waitForProcessExit(pid, timeout)
+		select {
+		case <-exitCh:
+			return timeoutErr
+		case <-time.After(cleanupWait):
+			return fmt.Errorf("%w: cleanup daemon child %d: wait for exit timed out", timeoutErr, pid)
 		}
 	}
 
-	return fmt.Errorf("daemon started but did not become responsive within %v", timeout)
+	// Retain the explicit-PID cleanup path used by callers that own a known
+	// detached process but do not have an os.Process handle.
+	if pid > 0 {
+		if err := killTimedOutDaemonPID(pid, startedAt); err != nil {
+			return fmt.Errorf("%w: cleanup daemon child %d: %v", timeoutErr, pid, err)
+		}
+		if !startedAt.IsZero() {
+			waitForProcessExit(pid, cleanupWait)
+		}
+	}
+	return timeoutErr
 }
 
 func cleanupStartedDaemonProcess(proc *os.Process) error {
@@ -415,22 +551,36 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 
 // Stop sends a shutdown request to the running daemon and waits for it to exit.
 func Stop(p *paths.Paths) error {
+	instance := captureRunningDaemon(p)
 	if managed, err := stopManagedService(p); managed {
+		var detachedErr error
 		if err != nil {
-			if alive, _ := daemonHealthCheck(p); !alive {
-				return nil
+			if alive, _ := daemonHealthCheck(p); alive {
+				detachedErr = stopDetachedDaemon(p)
 			}
-			if detachedErr := stopDetachedDaemon(p); detachedErr != nil {
-				return fmt.Errorf("%w; detached shutdown: %v", err, detachedErr)
-			}
-			return nil
 		}
-		return waitForDaemonStop(p)
+		if waitErr := waitForDaemonStop(p, instance); waitErr != nil {
+			switch {
+			case err != nil && detachedErr != nil:
+				return fmt.Errorf("%w; detached shutdown: %v; wait for exit: %v", err, detachedErr, waitErr)
+			case err != nil:
+				return fmt.Errorf("%w; wait for exit: %v", err, waitErr)
+			default:
+				return waitErr
+			}
+		}
+		return nil
 	}
 	return stopDetachedDaemon(p)
 }
 
 func stopDetachedDaemon(p *paths.Paths) error {
+	// Identify the process we are about to shut down before asking it to
+	// exit: the daemon removes its own PID file during teardown, so after
+	// the shutdown request there is no longer a way to name the instance
+	// this stop is responsible for.
+	instance := captureRunningDaemon(p)
+
 	client, err := daemonDial(p.Socket())
 	if err != nil {
 		stale, staleErr := staleDaemonArtifacts(p)
@@ -446,13 +596,84 @@ func stopDetachedDaemon(p *paths.Paths) error {
 		}
 		return nil
 	}
-	defer client.Close()
 
 	var result ipc.ShutdownResult
-	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &result); err != nil {
-		return fmt.Errorf("shutdown request: %w", err)
+	callErr := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &result)
+	// Hand the connection back before waiting on the exit it gates. The
+	// daemon's accept loop drains in-flight connection handlers before it
+	// finishes shutting down, so a stopper that kept its client open while
+	// waiting would deadlock against the very exit it is waiting for: the
+	// daemon cannot exit until this connection closes, and this call would
+	// not return (and so not run a deferred close) until the daemon exits.
+	_ = client.Close()
+	if callErr != nil {
+		return fmt.Errorf("shutdown request: %w", callErr)
 	}
-	return waitForDaemonStop(p)
+	return waitForDaemonStop(p, instance)
+}
+
+// daemonInstance names the exact daemon process a stop is responsible for.
+// A zero value means no provable external process was captured, so callers
+// fall back to health-only stop confirmation.
+type daemonInstance struct {
+	pid       int
+	startedAt time.Time
+}
+
+// captureRunningDaemon best-effort identifies the live daemon process for this
+// root from the PID file, validated against the process's real start time so a
+// recycled PID cannot be mistaken for the daemon. It must be called before a
+// shutdown request, while the record still exists. An in-process daemon (test
+// harnesses driving RunWithResources in a goroutine) reports our own PID and
+// is deliberately not captured: it never exits as a process.
+func captureRunningDaemon(p *paths.Paths) daemonInstance {
+	record, err := readDaemonPIDFile(p.PIDFile())
+	if err != nil || record.PID <= 0 {
+		return daemonInstance{}
+	}
+	if record.PID == os.Getpid() {
+		return daemonInstance{}
+	}
+	startedAt, err := daemonProcessStartTime(record.PID)
+	if err != nil {
+		return daemonInstance{pid: record.PID, startedAt: record.StartedAt.UTC()}
+	}
+	matches, err := daemonPIDRecordMatchesProcess(p, record, startedAt)
+	if err != nil {
+		return daemonInstance{pid: record.PID}
+	}
+	if !matches {
+		return daemonInstance{}
+	}
+	return daemonInstance{pid: record.PID, startedAt: startedAt}
+}
+
+// exited reports whether this instance is gone. A PID now owned by a different
+// process is gone. A zero instance has no process identity to inspect, so the
+// caller relies on the independent health check.
+func (i daemonInstance) exited() (bool, error) {
+	if i.pid <= 0 {
+		return true, nil
+	}
+	if i.startedAt.IsZero() {
+		return false, fmt.Errorf("daemon pid %d start time is unknown", i.pid)
+	}
+	running, err := daemonProcessRunning(i.pid)
+	if err != nil {
+		return false, err
+	}
+	if !running {
+		return true, nil
+	}
+	startedAt, err := daemonProcessStartTime(i.pid)
+	if err != nil {
+		return false, err
+	}
+	diff := startedAt.Sub(i.startedAt)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff > orphanStartTimeTolerance, nil
 }
 
 func stopDetachedDaemonByPID(p *paths.Paths) error {
@@ -569,46 +790,75 @@ func daemonSocketAcceptingConnections(path string) (bool, error) {
 	return true, nil
 }
 
-func waitForDaemonStop(p *paths.Paths) error {
-	// Wait for daemon to actually stop (socket becomes unavailable).
+// waitForDaemonStop waits until the daemon instance this stop is responsible
+// for is really gone, then clears its artifacts.
+//
+// Losing IPC health is necessary but NOT sufficient proof of exit. The daemon
+// closes its IPC listener at the START of shutdown, and closing a Unix
+// listener unlinks the socket, so the health check reports "not running"
+// while the process is still draining runs, closing the database, flushing
+// logs, and reaping its bootstrap log-sink child. The NM_HOME singleton lock
+// is an OS file lock the kernel releases only when the owning process
+// actually dies, so a stop that returned at "socket gone" handed the caller a
+// root whose lock was still held - and the very next `daemon start` (that is,
+// `daemon restart`) launched a child that failed acquireSingletonLock and
+// exited before readiness with status 1. Waiting for the captured instance to
+// exit is what makes "daemon stopped" mean the daemon's resources are free.
+func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 	deadline := time.Now().Add(daemonStopTimeout())
 	for time.Now().Before(deadline) {
 		alive, err := daemonHealthCheck(p)
 		if err == nil && !alive {
-			cleanupDaemonArtifacts(p)
-			slog.Info("daemon stopped gracefully")
-			return nil
+			exited, exitErr := instance.exited()
+			if exitErr == nil && exited {
+				cleanupDaemonArtifacts(p)
+				slog.Info("daemon stopped gracefully")
+				return nil
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Try to kill by PID as last resort.
-	if pid, err := ReadPID(p); err == nil {
+	// Try to kill by PID as last resort. Prefer the PID file, which carries
+	// its own consistency validation; fall back to the captured instance for
+	// a daemon that already removed its PID file but is still running.
+	pid, err := ReadPID(p)
+	switch {
+	case err == nil:
 		if err := validateDaemonPIDFallback(p, pid); err != nil {
 			return err
 		}
-		slog.Warn("daemon did not stop gracefully, killing", "pid", pid)
-		if err := daemonKillPID(pid); err != nil {
-			return fmt.Errorf("kill daemon pid %d: %w", pid, err)
+	default:
+		exited, exitErr := instance.exited()
+		switch {
+		case exitErr != nil:
+			return fmt.Errorf("daemon did not stop within timeout: inspect daemon instance: %w", exitErr)
+		case exited:
+			return fmt.Errorf("daemon did not stop within timeout")
+		default:
+			pid = instance.pid
 		}
-
-		killDeadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(killDeadline) {
-			running, err := daemonProcessRunning(pid)
-			if err != nil {
-				return err
-			}
-			if !running {
-				cleanupDaemonArtifacts(p)
-				slog.Warn("daemon killed after shutdown timeout", "pid", pid)
-				return nil
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		return fmt.Errorf("daemon pid %d still running after kill", pid)
 	}
 
-	return fmt.Errorf("daemon did not stop within timeout")
+	slog.Warn("daemon did not stop gracefully, killing", "pid", pid)
+	if err := daemonKillPID(pid); err != nil {
+		return fmt.Errorf("kill daemon pid %d: %w", pid, err)
+	}
+
+	killDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(killDeadline) {
+		running, err := daemonProcessRunning(pid)
+		if err != nil {
+			return err
+		}
+		if !running {
+			cleanupDaemonArtifacts(p)
+			slog.Warn("daemon killed after shutdown timeout", "pid", pid)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("daemon pid %d still running after kill", pid)
 }
 
 func cleanupDaemonArtifacts(p *paths.Paths) {

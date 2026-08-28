@@ -3,7 +3,6 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -14,13 +13,6 @@ import (
 type lastFixedIssues struct {
 	Checks        []string `json:"checks,omitempty"`
 	MergeConflict bool     `json:"mergeConflict,omitempty"`
-	// HeadSHA and DevinPrints carry the post-PR review-loop anti-thrash key: the
-	// commit a Devin-driven fix was made against plus the fingerprints of the
-	// findings it addressed. Both are omitempty so a check/merge-conflict key
-	// (the only kind produced when the review loop is disabled) marshals to
-	// byte-identical JSON as before.
-	HeadSHA     string   `json:"headSHA,omitempty"`
-	DevinPrints []string `json:"devinPrints,omitempty"`
 }
 
 // pollInterval returns the polling interval based on elapsed time since CI monitoring started.
@@ -56,6 +48,29 @@ func hasPendingChecks(checks []scm.Check) bool {
 	return false
 }
 
+func hasUnresolvedChecks(checks []scm.Check) bool {
+	for _, c := range checks {
+		switch c.Bucket {
+		case scm.CheckBucketPass, scm.CheckBucketFail, scm.CheckBucketSkip:
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func allChecksPassed(checks []scm.Check) bool {
+	if len(checks) == 0 {
+		return false
+	}
+	for _, c := range checks {
+		if c.Bucket != scm.CheckBucketPass && c.Bucket != scm.CheckBucketSkip {
+			return false
+		}
+	}
+	return true
+}
+
 // failingCheckNames returns the names of failing checks.
 func failingCheckNames(checks []scm.Check) []string {
 	var names []string
@@ -67,10 +82,18 @@ func failingCheckNames(checks []scm.Check) []string {
 	return names
 }
 
-func failingCheckCompletionTimes(checks []scm.Check) map[string]time.Time {
+// terminalFailureCompletionTimes snapshots when each terminally failed check
+// finished, so a later poll can tell that CI has re-run since the fix push.
+//
+// It covers the whole terminal-failure set rather than just the fail bucket
+// because a cancelled check can be a fix target too (see the CI step's
+// fixTargets). Keying the snapshot on the fail bucket alone would leave a
+// cancelled-only fix round with no completion evidence at all, and the step
+// would then have no way to notice its own re-run.
+func terminalFailureCompletionTimes(checks []scm.Check) map[string]time.Time {
 	completedAt := make(map[string]time.Time)
 	for _, c := range checks {
-		if !c.Failing() {
+		if !checkFailedTerminally(c) {
 			continue
 		}
 		if c.CompletedAt.IsZero() {
@@ -87,12 +110,12 @@ func failingCheckCompletionTimes(checks []scm.Check) map[string]time.Time {
 	return completedAt
 }
 
-func failingCheckCompletedAfter(checks []scm.Check, after map[string]time.Time) bool {
+func terminalFailureCompletedAfter(checks []scm.Check, after map[string]time.Time) bool {
 	if len(after) == 0 {
 		return false
 	}
 	for _, c := range checks {
-		if !c.Failing() || c.CompletedAt.IsZero() {
+		if !checkFailedTerminally(c) || c.CompletedAt.IsZero() {
 			continue
 		}
 		previous, ok := after[c.Name]
@@ -143,27 +166,6 @@ func encodeLastFixedChecks(failing []string, mergeConflict bool) string {
 	return string(encoded)
 }
 
-// encodeDevinFixKey builds the anti-thrash key for a post-PR review-loop fix
-// round. It folds the head SHA and the Devin finding fingerprints into the key
-// so a fix is treated as "already attempted" only until the head advances (a new
-// commit Devin must re-review) or the set of findings changes. Returns "" when
-// there is nothing to key on.
-func encodeDevinFixKey(failing []string, mergeConflict bool, headSHA string, devinPrints []string) string {
-	if len(failing) == 0 && !mergeConflict && len(devinPrints) == 0 {
-		return ""
-	}
-	encoded, err := json.Marshal(lastFixedIssues{
-		Checks:        failing,
-		MergeConflict: mergeConflict,
-		HeadSHA:       headSHA,
-		DevinPrints:   devinPrints,
-	})
-	if err != nil {
-		return ""
-	}
-	return string(encoded)
-}
-
 func decodeLastFixedChecks(raw string) (lastFixedIssues, bool) {
 	if raw == "" {
 		return lastFixedIssues{}, false
@@ -172,7 +174,7 @@ func decodeLastFixedChecks(raw string) (lastFixedIssues, bool) {
 	if err := json.Unmarshal([]byte(raw), &issues); err != nil {
 		return lastFixedIssues{}, false
 	}
-	if len(issues.Checks) == 0 && !issues.MergeConflict && len(issues.DevinPrints) == 0 {
+	if len(issues.Checks) == 0 && !issues.MergeConflict {
 		return lastFixedIssues{}, false
 	}
 	return issues, true
@@ -201,103 +203,19 @@ func ciFailureOutcome(failing []string, mergeConflict bool, summary string) *pip
 	}
 }
 
-// withDevinManualVerify folds the body-only Devin "manual verify" signal into an
-// already-parked CI outcome so it is never hidden behind a CI-failure or
-// mergeability gate that happens to fire in the same poll (ruling #3: a not-green
-// review signal must not disappear when checks also fail). reason == "" (no
-// manual-review state) is a no-op that returns the outcome unchanged, so a plain
-// CI-failure park marshals exactly as before.
-func withDevinManualVerify(outcome *pipeline.StepOutcome, reason string) *pipeline.StepOutcome {
-	if outcome == nil || reason == "" {
-		return outcome
-	}
-	parsed, err := types.ParseFindingsJSON(outcome.Findings)
-	if err != nil {
-		return outcome
-	}
-	parsed.Items = append(parsed.Items, Finding{
-		Severity:    "warning",
-		Description: reason,
-		Action:      types.ActionAskMaster,
-	})
-	if parsed.Summary != "" {
-		parsed.Summary += "; " + reason
-	} else {
-		parsed.Summary = reason
-	}
-	findingsJSON, _ := json.Marshal(parsed)
-	outcome.Findings = string(findingsJSON)
-	return outcome
-}
+// consecutiveCheckErrorLimit bounds consecutive GetChecks failures before the
+// CI step parks at an ask-master gate. At the default 30s poll this is ~3 minutes
+// of a provider read that keeps failing, making a broken gh (e.g. < v2.50, which
+// rejects `gh pr checks --json`) an actionable stop instead of an invisible
+// spin to ci_timeout.
+const consecutiveCheckErrorLimit = 6
 
-// devinSeverityToFinding maps the review bot's coarse severity bucket
-// (high/medium/low, as parsed from comment bodies in the github read layer) onto
-// the pipeline's finding severities (error/warning/info). The rest of the
-// codebase ranks and gates on error/warning/info (see types.SeverityRank and
-// hasBlockingFindings); an unmapped high/medium/low would rank 0 and not count
-// as blocking, so an escalated Devin finding would neither sort nor gate
-// correctly. Anything unrecognized (including empty) defaults to warning so it
-// still blocks.
-func devinSeverityToFinding(severity string) string {
-	switch strings.ToLower(strings.TrimSpace(severity)) {
-	case "high":
-		return "error"
-	case "medium":
-		return "warning"
-	case "low":
-		return "info"
-	default:
-		return "warning"
-	}
-}
-
-// devinFailureOutcome escalates an unresolved post-PR review-loop state to the
-// gate owner, surfacing the bot's outstanding findings as actionable
-// items. Used when the loop exhausts its bounded rounds with Devin still
-// requesting changes.
-func devinFailureOutcome(findings []scm.ReviewComment, summary string) *pipeline.StepOutcome {
-	out := Findings{Summary: summary}
-	for _, f := range findings {
-		if f.Path == "" {
-			continue // top-level summary, not an actionable file-scoped finding
-		}
-		out.Items = append(out.Items, Finding{
-			Severity:    devinSeverityToFinding(f.Severity),
-			Description: fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Body),
-			Action:      types.ActionAskMaster,
-		})
-	}
-	if len(out.Items) == 0 {
-		out.Items = append(out.Items, Finding{
-			Severity:    "warning",
-			Description: "Devin still requested changes when the review loop exhausted its rounds",
-			Action:      types.ActionAskMaster,
-		})
-	}
-	findingsJSON, _ := json.Marshal(out)
-	return &pipeline.StepOutcome{
-		NeedsApproval: true,
-		Findings:      string(findingsJSON),
-	}
-}
-
-// devinManualReviewOutcome parks the run for gate-owner judgment when the
-// review bot signals a problem on the current head SHA but no concrete
-// file-scoped findings could be loaded to auto-fix (its body reports findings
-// yet the inline threads are missing, or it used a native CHANGES_REQUESTED
-// state with no inline comments). It deliberately does NOT synthesize or
-// fabricate any file-scoped finding summary — it surfaces the single, honest
-// reason and hands the decision to the gate owner (ruling #11).
-//
-// Like every parked CI gate, this is reconciled by CIStep.ReconcileApprovalGate
-// against the PR's current state. A merge or close therefore self-heals through
-// v1.37's single bounded reconciliation path rather than a second waiter.
-func devinManualReviewOutcome(reason string) *pipeline.StepOutcome {
+func ciCheckReadFailureOutcome(err error) *pipeline.StepOutcome {
 	findings := Findings{
-		Summary: reason,
+		Summary: "CI checks could not be read from the provider",
 		Items: []Finding{{
 			Severity:    "warning",
-			Description: reason,
+			Description: fmt.Sprintf("CI checks could not be read from the provider: %v. Verify that the provider CLI or credentials are installed, authenticated, and support the required check-reading command. For GitHub errors involving 'pr checks --json', gh >= 2.50 is required.", err),
 			Action:      types.ActionAskMaster,
 		}},
 	}

@@ -14,7 +14,8 @@ import (
 //
 // The framing depends on provenance (sctx.IntentSource):
 //
-//   - An EXPLICIT intent (Source=="agent", supplied via `axi run --intent`) is
+//   - An EXPLICIT intent (Source=="agent", supplied via `axi run --intent`) or
+//     an inherited explicit intent (Source=="rerun") is
 //     the driving agent's own statement of the goal, in the same trust domain
 //     as the operator running the gate. It is framed as AUTHORITATIVE
 //     acceptance criteria: the change must satisfy the required constraints and
@@ -52,14 +53,16 @@ func userIntentPromptSection(sctx *pipeline.StepContext) string {
 
 // intentSourceIsAuthoritative reports whether the user intent was supplied
 // explicitly by the driving agent (`axi run --intent`, persisted with
-// Source==db.RunIntentSourceAgent) rather than inferred from a transcript. An
+// Source==db.RunIntentSourceAgent) or inherited from an explicit prior run
+// (Source==db.RunIntentSourceRerun), rather than inferred from a transcript. An
 // explicit intent is the author's own statement of the goal, in the operator's
 // trust domain, so it is framed as authoritative acceptance criteria; an
 // inferred summary stays a low-confidence hint. See internal/daemon/manager.go
-// (Source: db.RunIntentSourceAgent) and internal/pipeline/steps/intent.go
-// (Source: result.AgentName) for the two provenance paths.
+// (Source: db.RunIntentSourceAgent or db.RunIntentSourceRerun) and
+// internal/pipeline/steps/intent.go (Source: result.AgentName) for the
+// explicit, inherited, and inferred provenance paths.
 func intentSourceIsAuthoritative(sctx *pipeline.StepContext) bool {
-	return sctx != nil && sctx.IntentSource == db.RunIntentSourceAgent
+	return sctx != nil && db.IsAuthoritativeRunIntentSource(sctx.IntentSource)
 }
 
 // intentConformanceReviewClause returns a review-prompt directive that turns
@@ -69,12 +72,18 @@ func intentSourceIsAuthoritative(sctx *pipeline.StepContext) bool {
 // required behavior still present?" question - a risk-only rereview scores a
 // removed feature as clean because a deleted behavior has no risk.
 //
-// It is emitted only for an explicit, authoritative intent (Source=="agent");
+// The same clause states that conformance is necessary, not sufficient:
+// satisfying the criteria does not replace checking that the algorithm is
+// correct. Without that note, an authoritative intent can be read as the
+// whole review charter.
+//
+// It is emitted only for an explicit or inherited authoritative intent
+// (Source=="agent" or Source=="rerun");
 // an inferred hint carries no such obligation, so the clause is empty and the
-// review prompt is unchanged for inferred runs. The obligation narrows the
-// agent's task to a closed classification of the diff against the criteria
-// (fail-safe: the worst a poisoned criterion can do is force a park), never
-// "obey these instructions."
+// review prompt is unchanged for inferred runs. The conformance obligation
+// narrows that check to a closed classification of the diff against the
+// criteria (fail-safe: the worst a poisoned criterion can do is force a
+// park), never "obey these instructions."
 func intentConformanceReviewClause(sctx *pipeline.StepContext) string {
 	if !intentSourceIsAuthoritative(sctx) || cleanedUserIntent(sctx) == "" {
 		return ""
@@ -82,7 +91,7 @@ func intentConformanceReviewClause(sctx *pipeline.StepContext) string {
 	// Pipeline-owned delivery outcomes (push, PR open/update, CI) are owned by
 	// later steps; review must not treat their absence as an intent
 	// contradiction. Source-verifiable required/forbidden behavior stays hard.
-	return "\n\nIntent conformance is required. The User intent above is authoritative acceptance criteria, not a hint. When the change removes or omits a source-verifiable behavior the criteria mark as REQUIRED, or adds a behavior they mark as FORBIDDEN, emit a finding and quote the criterion plus the contradicting diff hunk (or note the required behavior now absent). Classify it: auto-fix when restoring conformance is clear and bounded; ask-master when restoring conformance requires non-local implementation or design judgment while preserving the criterion; ask-user only when the criterion is internally conflicting, demonstrably cannot be met under the approved constraints, or must itself be changed. For ask-user, state the exact criterion change, its guarantee consequences, and a recommendation. Never silently resolve an intent contradiction by weakening or deleting the authoritative criterion. Do not treat deferred pipeline-owned delivery outcomes (remote branch not yet pushed, pull request not yet opened or updated, CI not yet observed for this run) as contradictions at this phase; later pipeline steps own those."
+	return "\n\nIntent conformance is required. The User intent above is authoritative acceptance criteria, not a hint. When the change removes or omits a source-verifiable behavior the criteria mark as REQUIRED, or adds a behavior they mark as FORBIDDEN, emit a finding and quote the criterion plus the contradicting diff hunk (or note the required behavior now absent). Classify it: auto-fix when restoring conformance is clear and bounded; ask-master when restoring conformance requires non-local implementation or design judgment while preserving the criterion; ask-user only when the criterion is internally conflicting, demonstrably cannot be met under the approved constraints, or must itself be changed. For ask-user, state the exact criterion change, its guarantee consequences, and a recommendation. Never silently resolve an intent contradiction by weakening or deleting the authoritative criterion. Do not treat deferred pipeline-owned delivery outcomes (remote branch not yet pushed, pull request not yet opened or updated, CI not yet observed for this run) as contradictions at this phase; later pipeline steps own those. Conformance does not replace correctness review: an authoritative intent obliges flagging contradictions but never substitutes for checking that the algorithm is correct. An implementation that satisfies every required constraint can still compute a wrong value, label, or set; flag those as ordinary source findings."
 }
 
 // cleanedUserIntent returns the trimmed, secret-redacted, adversarial-stripped

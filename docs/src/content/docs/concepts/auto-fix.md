@@ -35,6 +35,23 @@ When `commands.lint` is empty, that same invocation is a combined documentation-
 The lint step consumes a usable lint result from that pass instead of starting a second cold agent invocation; when the combined pass is skipped, cannot produce trustworthy structured output, or loses its in-memory result across a daemon restart, lint falls back to its own agent pass.
 Unresolved documentation findings and unresolved blocking lint findings pause for approval instead of entering another automatic fix loop.
 
+## Before the agent: deterministic CI reruns
+
+The CI step has one cheaper option than a fix round, and it tries it first.
+
+A check whose failure the provider attributes to itself rather than to your commit, such as a cancellation, is the provider telling you about itself. On GitHub, a positive transient rerun budget also enables structural detection of jobs that failed before any repository step ran. Handing a detected provider failure to the fix agent spends an agent round reading a run that never tested anything, and the fix it invents edits code that was never broken. So when every terminally failed check on the pull request is one of those and the configured budget authorizes a rerun, the CI step asks the provider to run those checks again for the same commit and keeps polling.
+
+That deterministic rerun sits strictly before the agent rounds described above:
+
+1. Every check finishes and at least one has failed.
+2. If all of those failures are provider-attributed checks, the pull request has no merge conflict, and the configured budget authorizes it, each one is re-run and the monitor keeps polling. No `auto_fix.ci` attempt is consumed.
+3. When such a detected provider-attributed outcome is the only remaining issue, a check with no authorized or outstanding rerun pauses for a decision without consuming an `auto_fix.ci` attempt.
+4. Every other failure escalates into the `auto_fix.ci` loop on its first observation.
+
+[`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_transient) owns the budget, the exact classification, and every case that skips the rerun.
+
+Nothing that survives a rerun falls into the agent loop either. A check the provider cancels again, or a detected GitHub setup failure that persists after its budget, is still not a verdict on the code, so it pauses for a decision instead of spending a fix round on a run that never tested anything. A cancellation no rerun is going to replace, including at the default budget of `0`, reaches that same decision directly: the provider has published its conclusion and will not replace it, so waiting on it would never end. A rerun costs another provider-side workflow run, so the budget is deliberately small and is spent when the rerun is requested, which bounds the loop by construction. Each rerun is announced in the step log, so a run that is waiting on one says so instead of looking stalled. Reruns never cross a head change: if the published branch head no longer matches the commit the run delivered, the step pauses with the expected and observed commits rather than re-running checks against a revision it never produced.
+
 ## Configuration
 
 Per-step attempt limits come from the `auto_fix` config object; the [`auto_fix` field reference](/no-mistakes/reference/global-config/#auto_fix) owns the defaults, per-step meanings, and the legacy alias.
@@ -57,12 +74,11 @@ If the complete findings JSON is malformed or unreadable, the gate also parks in
 Action names identify decision authority, not severity. A severe or user-visible defect remains `auto-fix` when current authoritative evidence establishes one bounded correction. For a user-visible correction, the finding must name the still-current intent criterion, design clause, contract, invariant, or test that fixes the outcome; evidence removed or changed by the diff does not count. When the approved outcome is known but the implementation needs non-local judgment, use `ask-master`. Reserve `ask-user` for choices with at least two materially different outcomes that authoritative evidence does not settle and that change behavior or an agreed correctness, security, durability, performance, scalability, compatibility, or cost guarantee. An `ask-user` finding states the exact choice, viable options, consequence of each, and a recommendation. Uncertainty about **how** to fix routes to Master; uncertainty about **what** the product should do routes to the user.
 
 Agents driving AXI resolve `ask-master` under documented gate-owner authority and bring only the concise unresolved choice, options, consequences, and recommendation for `ask-user` findings to the user. If no Master role exists, `ask-master` falls back to the user.
-In the TUI, yolo mode is an explicit override that auto-resolves paused steps by treating `auto-fix`, `ask-master`, and `ask-user` findings as consent to run one fix round.
+In the TUI, yolo mode is an explicit override that auto-resolves ordinary findings gates by treating `auto-fix`, `ask-master`, and `ask-user` findings as consent to run one fix round.
 Steps with only `no-op` findings are approved as-is.
 
 The `review`, `test`, and configured-command `lint` steps use this shared model directly. The `document` step also uses the same `action` field, but unresolved documentation findings pause for approval because the initial document pass already attempted the documentation updates it could make safely.
 When `commands.lint` is empty, the combined housekeeping pass routes documentation and lint findings to their owning gates. Its unresolved lint findings describe issues left after safe fixes, so blocking findings pause for approval instead of remaining eligible for another automatic fix loop.
-When the review step uses a reviewer panel, each review finding also carries a `source` label such as `codex` or `claude`; the fix payload preserves that provenance so the fixing agent and user can reconcile agreements or contradictions.
 
 Documentation findings use the same approval UI, but the `document` step treats any finding as an unresolved documentation gap or judgment call that should pause for approval.
 
@@ -75,30 +91,26 @@ When the pipeline pauses for approval, you can manually trigger a fix from the T
 3. Optionally press `e` to attach a note to the current finding, or `+` to add your own finding to the fix request
 4. Press `f` to fix the selected findings
 
-The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and a sanitized history of previous rounds for that step.
-That history includes which finding IDs were selected for a prior fix attempt, which findings were left unselected by the user, and any one-line summaries from earlier fix commits.
-On follow-up review passes, that history tells the agent not to re-report user-ignored findings unless the code now presents a materially different issue.
+The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and the shared [finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history).
+The current step's part of that history also includes one-line summaries from earlier fix commits.
 
-After a user-triggered fix, the step re-runs and pauses again to show you the results (`fix_review` status). You can then approve, fix again, skip, or abort.
+After a user-triggered fix, the step re-runs and pauses again to show you the results (`fix_review` status). You can then approve, fix again, skip, or abort while that step still permits another round.
 Yolo and AXI `--yes` approve that fix review automatically after their one fix round, so a finding that remains after the fix does not trigger an unbounded fix loop.
-Review also parks at `awaiting_triage` after a second invalid verdict-evidence result; neither yolo nor AXI `--yes` resolves any triage gate. The evidence diagnostic itself is not fixable, but a normal fix round may address preserved real reviewer findings when verdict evidence is the only triage cause. When `review.max_fix_rounds` is also configured and reached, another fix round requires an explicit `--fix-override --override-reason` triage decision. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns the verdict-evidence contract.
+
+Review has a separate persisted [`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds) ceiling that can bound manual and automatic rounds together. When residual Review findings reach it, the step parks at `awaiting_triage`; unattended modes stop, and one more round requires an explicit Master-triage reason through AXI.
 
 ## Fix commits
 
-Each auto-fix cycle commits its changes with a descriptive message. The combined document-and-lint housekeeping pass runs in the Document step, so its documentation and safe lint fixes use the Document prefix; configured-command lint fixes use the Lint prefix:
+When the Review, Test, Document, Lint, or CI step commits auto-fix changes, its subject comes from `commit.fix_message`.
+The [global config reference](/no-mistakes/reference/global-config/#commitfix_message) owns the template syntax, default, validation rules, size limits, and supported placeholders; the [repo config reference](/no-mistakes/reference/repo-config/#commitfix_message) owns the repository override and trust behavior.
+The pipeline validates the template, agent summary, predicted output size, and final rendered subject before `git add -A`, so a rejected value does not leave changes staged.
+The combined document-and-lint housekeeping pass runs in the Document step, so its documentation and safe lint fixes use the Document value for `{{.Step}}`; configured-command lint fixes use the Lint value.
 
 Before a step-specific fix commit, the pipeline verifies that the live worktree HEAD still descends from the head recorded after its previous commit.
 It allows a legitimate forward commit made by an agent, but aborts the run if an out-of-band backward or divergent reset would drop the reviewed history.
 
-| Step | Commit prefix |
-|---|---|
-| Rebase | `no-mistakes(rebase): <summary>` |
-| Review | `no-mistakes(review): <summary>` |
-| Test | `no-mistakes(test): <summary>` |
-| Document | `no-mistakes(document): <summary>` |
-| Lint | `no-mistakes(lint): <summary>` |
-
-The push step commits any remaining uncommitted changes with `no-mistakes: apply agent fixes`.
+The template does not control commits created by the Rebase or Push steps.
+The Push step uses `no-mistakes: apply agent fixes` for remaining uncommitted changes.
 
 ## Step rounds
 
@@ -107,11 +119,7 @@ A round stores its findings, duration, any selected finding IDs and whether that
 That merged payload can include per-finding user notes and user-authored findings added from the TUI or AXI interface.
 AXI status uses the same round history and the persisted auto-fix limit to show the active fix attempt, for example `auto-fix 1/3` or `fix 2`.
 The step log records a marker when each automatic or user-triggered fix round starts.
-The PR body's deterministic risk assessment, testing, and pipeline sections are built from these rounds, giving reviewers visibility into test results, review risk, what was fixed, and how many attempts it took.
-In PR pipeline details, auto-fix rounds are rendered as an issue -> fix -> verification narrative instead of a round-numbered log: each fix summary is followed by either a successful re-check or the findings still open after that fix.
-On very long runs, the PR body uses a 63,488-byte safety cap, which leaves a 2 KB buffer below GitHub's 65,536-character body limit.
-It first keeps the newest pipeline update rounds and replaces older rounds with an omission marker at whole-update boundaries.
-If the newest update or essential body content is still too large, the PR step truncates at line or section boundaries and adds an explicit marker.
+The generated PR surfaces this recorded evidence in deterministic Risk Assessment, Testing, and Pipeline sections. The [pipeline steps reference](/no-mistakes/reference/pipeline-steps/#pr) owns the PR body composition and size-limit contract.
 The full round history remains available in the run log.
 
 Round trigger types:

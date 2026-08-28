@@ -60,10 +60,7 @@ Combined lint duty (same pass - no separate lint agent will run):
 Set "category" on every finding: "documentation" for documentation findings, "lint" for lint findings.`
 
 // housekeepingFindingsSchema extends findingsSchema with the per-finding
-// category that routes combined-pass findings to their owning gates. The
-// document/housekeeping prompt intentionally defines no action vocabulary
-// (schema-only); only the review and test prompts teach the four-level
-// authority contract.
+// category that routes combined-pass findings to their owning gates.
 var housekeepingFindingsSchema = json.RawMessage(`{
 	"type": "object",
 	"properties": {
@@ -89,6 +86,9 @@ var housekeepingFindingsSchema = json.RawMessage(`{
 }`)
 
 func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 
@@ -131,7 +131,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		purpose = "housekeeping"
 	}
 
-	result, err := sctx.Agent.Run(ctx, agent.RunOpts{
+	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: schema,
@@ -154,7 +154,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	}
 
 	// Without trustworthy structured output we cannot confirm the agent
-	// resolved every gap, so surface it for gate-owner review. Nothing is stashed
+	// resolved every gap, so surface it for human review. Nothing is stashed
 	// for the lint step, which therefore re-assesses with its own pass.
 	var findings Findings
 	if result.Output == nil {
@@ -198,7 +198,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 // placement policy, scope discipline, trusted repository-specific policy,
 // the task, and - in combined mode - the lint duty.
 func (s *DocumentStep) buildPrompt(sctx *pipeline.StepContext, baseSHA, ignorePatterns string, combinedLint bool) string {
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + designContextPromptSection(sctx)
 
 	intro := "Keep the project documentation accurate for this change."
 	if combinedLint {

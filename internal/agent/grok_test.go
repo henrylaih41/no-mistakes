@@ -3,387 +3,248 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-func TestParseGrokEventsSurfacesUsageAndReviewActivity(t *testing.T) {
+func TestGrokAgentBuildArgsUsesManagedHeadlessContractWithoutPinningModel(t *testing.T) {
+	a := &grokAgent{bin: "grok", disableProjectSettings: true}
+	schema := json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`)
+	args := a.buildArgs("/tmp/prompt.txt", schema, "")
+
+	wantPairs := [][]string{
+		{"--prompt-file", "/tmp/prompt.txt"},
+		{"--output-format", "streaming-messages-json"},
+		{"--json-schema", string(schema)},
+		{"--permission-mode", "bypassPermissions"},
+		{"--system-prompt-override", grokGateSystemPrompt},
+	}
+	for _, pair := range wantPairs {
+		if !grokArgsContainPair(args, pair[0], pair[1]) {
+			t.Errorf("args %v missing managed pair %v", args, pair)
+		}
+	}
+	for _, want := range []string{"--verbatim", "--no-subagents", "--no-auto-update"} {
+		if !grokArgsContain(args, want) {
+			t.Errorf("args %v missing %s", args, want)
+		}
+	}
+	for _, arg := range args {
+		if arg == "-m" || arg == "--model" || strings.HasPrefix(arg, "--model=") {
+			t.Fatalf("managed args must leave Grok's current default model unpinned: %v", args)
+		}
+	}
+}
+
+func TestGrokAgentBuildArgsPreservesExplicitModelOverrideAndResume(t *testing.T) {
+	a := &grokAgent{bin: "grok", extraArgs: []string{"--model", "operator-selected"}}
+	args := a.buildArgs("/tmp/prompt.txt", nil, "session-123")
+
+	if !grokArgsContainPair(args, "--model", "operator-selected") {
+		t.Fatalf("args %v missing explicit model override", args)
+	}
+	if !grokArgsContainPair(args, "--resume", "session-123") {
+		t.Fatalf("args %v missing resume identity", args)
+	}
+	if grokArgsContain(args, "--system-prompt-override") {
+		t.Fatalf("project instruction override must be opt-in policy only: %v", args)
+	}
+}
+
+func TestGrokAgentPassesInvocationEnvironmentToProcess(t *testing.T) {
+	observationPath := filepath.Join(t.TempDir(), "environment")
+	a := newGrokEnvHelperAgent(t)
+
+	_, err := a.runOnce(context.Background(), RunOpts{
+		Prompt: "report environment",
+		CWD:    t.TempDir(),
+		Env: []string{
+			"NM_GROK_ENV_HELPER=run",
+			"NM_GROK_ENV_OBSERVATION=" + observationPath,
+			"NM_GROK_INVOCATION_VALUE=present",
+		},
+	})
+	if err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	got, err := os.ReadFile(observationPath)
+	if err != nil {
+		t.Fatalf("read environment observation: %v", err)
+	}
+	if string(got) != "present" {
+		t.Fatalf("invocation environment = %q, want present", got)
+	}
+}
+
+func newGrokEnvHelperAgent(t *testing.T) *grokAgent {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("current test executable: %v", err)
+	}
+	return &grokAgent{bin: exe, extraArgs: []string{"-test.run=^TestGrokEnvHelper$", "--"}}
+}
+
+func TestGrokEnvHelper(t *testing.T) {
+	if os.Getenv("NM_GROK_ENV_HELPER") != "run" {
+		return
+	}
+	if err := os.WriteFile(os.Getenv("NM_GROK_ENV_OBSERVATION"), []byte(os.Getenv("NM_GROK_INVOCATION_VALUE")), 0o644); err != nil {
+		os.Exit(2)
+	}
+	_, _ = os.Stdout.WriteString(`{"type":"result","subtype":"success","is_error":false,"result":"done"}` + "\n")
+	os.Exit(0)
+}
+
+func TestGrokAgentHTTP402FailsClosedWithoutRetry(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("current test executable: %v", err)
+	}
+	a := &grokAgent{bin: exe, extraArgs: []string{"-test.run=^TestGrokHTTP402Helper$", "--"}}
+	attempts := 0
+	result, err := a.Run(context.Background(), RunOpts{
+		Prompt: "review",
+		CWD:    t.TempDir(),
+		Env:    []string{"NM_GROK_HTTP402_HELPER=run"},
+		OnAttempt: func(Attempt) {
+			attempts++
+		},
+	})
+	if err == nil {
+		t.Fatal("HTTP 402 must fail the invocation rather than report a successful result")
+	}
+	if result != nil {
+		t.Fatalf("HTTP 402 result = %+v, want nil", result)
+	}
+	if !strings.Contains(err.Error(), "HTTP 402") {
+		t.Fatalf("HTTP 402 failure = %v, want provider detail", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("HTTP 402 attempts = %d, want 1 because payment failures are not transient", attempts)
+	}
+}
+
+func TestGrokHTTP402Helper(t *testing.T) {
+	if os.Getenv("NM_GROK_HTTP402_HELPER") != "run" {
+		return
+	}
+	_, _ = os.Stdout.WriteString(`{"type":"result","subtype":"success","is_error":false,"result":"not accepted"}` + "\n")
+	_, _ = os.Stderr.WriteString("HTTP 402 payment required\n")
+	os.Exit(1)
+}
+
+func TestGrokAgentNeutralizationFailsClosedUntilEmpiricallyVerified(t *testing.T) {
+	if (&grokAgent{disableProjectSettings: true}).NeutralizesGateInstructions() {
+		t.Fatal("system prompt replacement is not enough to claim complete project-setting isolation")
+	}
+	if (&grokAgent{}).NeutralizesGateInstructions() {
+		t.Fatal("agent without the trusted opt-out must not claim neutralization")
+	}
+	for _, args := range [][]string{
+		{"--system-prompt-override", "operator prompt"},
+		{"--system-prompt=operator prompt"},
+		{"--agent", "custom"},
+		{"--rules", "operator rules"},
+		{"--append-system-prompt=operator rules"},
+	} {
+		if (&grokAgent{disableProjectSettings: true, extraArgs: args}).NeutralizesGateInstructions() {
+			t.Fatalf("override %v must defeat the neutralization claim", args)
+		}
+	}
+}
+
+func TestParseGrokEventsStructuredSuccess(t *testing.T) {
 	events := strings.Join([]string{
 		`{"type":"system","subtype":"init","session_id":"grok-session","model":"grok-4.6"}`,
-		`{"type":"assistant","message":{"model":"grok-4.6","content":[{"type":"tool_use","name":"Read"},{"type":"text","text":"inspecting"}]},"session_id":"grok-session"}`,
-		`{"type":"assistant","message":{"model":"grok-4.6","content":[{"type":"tool_use","name":"StructuredOutput"}]},"session_id":"grok-session"}`,
-		`{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"findings":[]},"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"reasoning_tokens":2}}`,
-		"",
-	}, "\n")
+		`{"type":"assistant","message":{"model":"grok-4.6","content":[{"type":"text","text":"working"}]},"session_id":"grok-session"}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"summary":"ok"},"session_id":"grok-session","usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"reasoning_tokens":2}}`,
+	}, "\n") + "\n"
 	var chunks []string
-	result, _, err := parseGrokEvents(context.Background(), strings.NewReader(events), func(chunk string) {
+
+	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), func(chunk string) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
 		t.Fatalf("parseGrokEvents() error = %v", err)
 	}
-	if got, want := string(result.Output), `{"findings":[]}`; got != want {
+	if got, want := string(result.Output), `{"summary":"ok"}`; got != want {
 		t.Fatalf("output = %s, want %s", got, want)
 	}
-	if result.SessionID != "grok-session" || result.Model != "grok-4.6" {
-		t.Fatalf("identity = %+v", result)
+	if result.Text != "done" || result.SessionID != "grok-session" {
+		t.Fatalf("result identity/text = %+v", result)
 	}
-	wantUsage := TokenUsage{
-		InputTokens: 19, OutputTokens: 7, CacheReadTokens: 5,
-		CacheCreationTokens: 3, ReasoningTokens: 2,
-		Reported: true, CacheCreationReported: true, ReasoningReported: true,
+	if result.Model != "grok-4.6" || result.ModelProvider != "" {
+		t.Fatalf("model = %q provider = %q", result.Model, result.ModelProvider)
 	}
+	// Grok reports disjoint uncached/read/creation input buckets. Normalize
+	// InputTokens to total prompt input so FreshInputTokens subtracts cache
+	// reads exactly once.
+	wantUsage := TokenUsage{InputTokens: 19, OutputTokens: 7, CacheReadTokens: 5, CacheCreationTokens: 3, ReasoningTokens: 2, Reported: true, CacheCreationReported: true, ReasoningReported: true}
 	if !reflect.DeepEqual(result.Usage, wantUsage) {
 		t.Fatalf("usage = %+v, want %+v", result.Usage, wantUsage)
 	}
-	if result.Metrics == nil || result.Metrics.ModelRoundtrips != 1 || result.Metrics.ToolCalls != 1 || result.Metrics.ToolCategories.Read != 1 {
-		t.Fatalf("activity metrics = %+v, want one genuine round and one repository Read", result.Metrics)
-	}
-	if !reflect.DeepEqual(chunks, []string{"inspecting"}) {
-		t.Fatalf("chunks = %v", chunks)
+	if !reflect.DeepEqual(chunks, []string{"working"}) {
+		t.Fatalf("chunks = %v, want [working]", chunks)
 	}
 }
 
-func TestParseGrokEventsClassifiesCommandsAndPreservesUnknownInput(t *testing.T) {
+func TestParseGrokEventsReportsReviewActivityMetrics(t *testing.T) {
 	events := strings.Join([]string{
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status && go test ./internal/agent"}}]}}`,
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":["git","status"]}},{"type":"text","text":"kept"}]}}`,
-		`{"type":"result","subtype":"success","is_error":false,"structured_output":{"findings":[]}}`,
-		"",
-	}, "\n")
-	var chunks []string
-	result, _, err := parseGrokEvents(context.Background(), strings.NewReader(events), func(chunk string) {
-		chunks = append(chunks, chunk)
-	})
-	if err != nil {
-		t.Fatalf("parseGrokEvents() error = %v", err)
-	}
-	metrics := result.Metrics
-	if metrics == nil || metrics.ModelRoundtrips != 2 || metrics.ToolCalls != 2 || metrics.ToolCategories.Git != 1 || metrics.ToolCategories.TestLint != 1 || metrics.ToolCategories.Other != 1 {
-		t.Fatalf("activity metrics = %+v, want command categories plus one structured-name fallback", metrics)
-	}
-	if len(chunks) != 1 || chunks[0] != "kept" {
-		t.Fatalf("assistant frame was dropped: chunks=%v", chunks)
-	}
-}
-
-func TestParseGrokEventsStructuredOutputEnvelopeIsNotActivity(t *testing.T) {
-	events := strings.Join([]string{
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"reasoning"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"},{"type":"text","text":"inspecting"}]}}`,
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput"}]}}`,
 		`{"type":"result","subtype":"success","is_error":false,"structured_output":{"findings":[]}}`,
 		"",
 	}, "\n")
-	result, _, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
 	if err != nil {
 		t.Fatalf("parseGrokEvents() error = %v", err)
 	}
-	if result.Metrics == nil || result.Metrics.ModelRoundtrips != 1 || result.Metrics.ToolCalls != 0 {
-		t.Fatalf("activity metrics = %+v, want one genuine round and no repository tools", result.Metrics)
+	if result.Metrics == nil || result.Metrics.ModelRoundtrips != 1 || result.Metrics.ToolCalls != 1 || result.Metrics.ToolCategories.Read != 1 {
+		t.Fatalf("activity metrics = %+v, want one genuine round and one repository Read", result.Metrics)
 	}
 }
 
-func TestParseGrokEventsSkipsMalformedAndNonEventOutput(t *testing.T) {
-	events := strings.Join([]string{
-		`Grok CLI update available`,
-		`{"notice":"warming cache"}`,
-		`{"type":"assistant","message":"malformed"}`,
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}`,
-		`{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"findings":[]}}`,
-		"",
-	}, "\n")
-	result, _, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+func TestParseGrokEventsTreatsAllZeroUsageAsUnknown(t *testing.T) {
+	events := `{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"reasoning_tokens":0}}` + "\n"
+	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
 	if err != nil {
 		t.Fatalf("parseGrokEvents() error = %v", err)
 	}
-	if got := string(result.Output); got != `{"findings":[]}` {
-		t.Fatalf("output = %s", got)
-	}
-	if result.Metrics == nil || result.Metrics.ToolCalls != 1 {
-		t.Fatalf("activity metrics = %+v, want one repository tool call", result.Metrics)
+	if result.UsageReported || result.CacheCreationReported || result.Usage.Reported || result.Usage.CacheCreationReported || result.Usage.ReasoningReported {
+		t.Fatalf("all-zero Grok usage must remain unknown, got %+v", result)
 	}
 }
 
-func TestGrokAgentBuildArgsForStreamingReview(t *testing.T) {
-	a := &grokAgent{bin: "grok"}
-	got := a.buildArgs("review this", json.RawMessage(`{"type":"object"}`), true)
-	want := []string{
-		"--permission-mode", "bypassPermissions",
-		"-p", "review this",
-		"--output-format", "streaming-messages-json",
-		"--json-schema", `{"type":"object"}`,
-	}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("args = %q, want %q", got, want)
-	}
-}
-
-func TestGrokAgentBuildArgsWithPlainOutput(t *testing.T) {
-	a := &grokAgent{bin: "grok"}
-	got := a.buildArgs("fix this", nil, false)
-	want := []string{
-		"--permission-mode", "bypassPermissions",
-		"-p", "fix this",
-		"--output-format", "plain",
-	}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("args = %q, want %q", got, want)
-	}
-}
-
-func TestGrokAgentBuildArgsWithNonReviewJSONSchema(t *testing.T) {
-	a := &grokAgent{bin: "grok"}
-	got := a.buildArgs("fix this", json.RawMessage(`{"type":"object"}`), false)
-	want := []string{
-		"--permission-mode", "bypassPermissions",
-		"-p", "fix this",
-		"--json-schema", `{"type":"object"}`,
-	}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("args = %q, want %q", got, want)
-	}
-}
-
-func TestGrokAgentBuildArgsPrependsModelAndReasoningOverrides(t *testing.T) {
-	a := &grokAgent{
-		bin:       "grok",
-		extraArgs: []string{"-m", "grok-code-fast-1", "--reasoning-effort", "high"},
-	}
-	got := a.buildArgs("review this", nil, true)
-	want := []string{
-		"-m", "grok-code-fast-1", "--reasoning-effort", "high",
-		"--permission-mode", "bypassPermissions",
-		"-p", "review this",
-		"--output-format", "streaming-messages-json",
-	}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("args = %q, want %q", got, want)
-	}
-}
-
-func TestGrokAgentRunCapturesStructuredOutputAndChunk(t *testing.T) {
-	dir := t.TempDir()
-	bin := writeFakeGrok(t, dir, `#!/bin/sh
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"inspected"}]}}'
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"ok":true}}'
-`, "@echo off\r\necho {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"inspected\"}]}}\r\necho {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"structured_output\":{\"ok\":true}}\r\n")
-	var chunks []string
-	a := &grokAgent{bin: bin}
-	result, err := a.Run(context.Background(), RunOpts{
-		Prompt:     "review",
-		CWD:        dir,
-		Purpose:    "review",
-		JSONSchema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`),
-		OnChunk:    func(chunk string) { chunks = append(chunks, chunk) },
-	})
+func TestParseGrokEventsRequiresStructuredOutputWhenSchemaRequested(t *testing.T) {
+	events := `{"type":"result","subtype":"success","is_error":false,"result":"plain"}` + "\n"
+	parsed, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
 	if err != nil {
-		t.Fatalf("Run() error = %v", err)
+		t.Fatalf("parseGrokEvents() error = %v", err)
 	}
-	if string(result.Output) != `{"ok":true}` {
-		t.Fatalf("structured output = %s", result.Output)
-	}
-	if result.Text != "done" {
-		t.Fatalf("text = %q", result.Text)
-	}
-	if len(chunks) != 1 || chunks[0] != "inspected" {
-		t.Fatalf("chunks = %q", chunks)
+	_, err = finalizeGrokResult(parsed, json.RawMessage(`{"type":"object"}`))
+	if !errors.Is(err, errGrokNoStructuredOutput) {
+		t.Fatalf("finalizeGrokResult() error = %v, want errGrokNoStructuredOutput", err)
 	}
 }
 
-func TestGrokAgentRunUsesTerminalStructuredOutputWhenTextHasMultipleSummaries(t *testing.T) {
-	dir := t.TempDir()
-	bin := writeFakeGrok(t, dir, `#!/bin/sh
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"{\"summary\":\"Investigating ...\"}{\"summary\":\"Implementing ...\"}"}]}}'
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","structured_output":{"summary":"Done"}}'
-`, "@echo off\r\necho {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Investigating\"}]}}\r\necho {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"structured_output\":{\"summary\":\"Done\"}}\r\n")
-	a := &grokAgent{bin: bin}
-	result, err := a.Run(context.Background(), RunOpts{
-		Prompt:     "review",
-		CWD:        dir,
-		Purpose:    "review",
-		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`),
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if string(result.Output) != `{"summary":"Done"}` {
-		t.Fatalf("structured output = %s", result.Output)
+func TestFinalizeGrokResultValidatesStructuredOutputAgainstSchema(t *testing.T) {
+	result := &Result{Output: json.RawMessage(`{"summary":42}`)}
+	_, err := finalizeGrokResult(result, json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`))
+	if err == nil || !strings.Contains(err.Error(), "summary") {
+		t.Fatalf("finalizeGrokResult() error = %v, want schema mismatch", err)
 	}
 }
 
-func TestGrokAgentRunOnceEmitsAssistantTextWhenStructuredOutputIsInvalid(t *testing.T) {
-	dir := t.TempDir()
-	progress := strings.Repeat("progress summary; ", 20)
-	bin := writeFakeGrok(t, dir,
-		"#!/bin/sh\nprintf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\""+progress+"\"}]}}'\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"summary\":42}}'\n",
-		"@echo off\r\necho {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"progress\"}]}}\r\necho {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"summary\":42}}\r\n",
-	)
-	var chunks []string
-	a := &grokAgent{bin: bin}
-	_, err := a.runOnce(context.Background(), RunOpts{
-		Prompt:     "review",
-		CWD:        dir,
-		Purpose:    "review",
-		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`),
-		OnChunk:    func(chunk string) { chunks = append(chunks, chunk) },
-	})
-	if err == nil {
-		t.Fatal("expected invalid structured output error")
+func TestParseGrokEventsSurfacesTerminalError(t *testing.T) {
+	events := `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["tool failed"]}` + "\n"
+	_, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	if err == nil || !strings.Contains(err.Error(), "tool failed") {
+		t.Fatalf("parseGrokEvents() error = %v, want terminal detail", err)
 	}
-	if len(chunks) != 2 || (runtime.GOOS != "windows" && chunks[0] != progress) {
-		t.Fatalf("chunks = %q, want assistant progress and raw result diagnostic", chunks)
-	}
-	if !strings.Contains(chunks[1], "raw result event:") || !strings.Contains(chunks[1], `"structured_output":{"summary":42}`) {
-		t.Fatalf("diagnostic chunk = %q, want raw terminal result event", chunks[1])
-	}
-}
-
-func TestFinalizeGrokResultAllowsNullOptionalProperties(t *testing.T) {
-	result := &Result{Output: json.RawMessage(`{"summary":"clean","line":null}`)}
-	schema := json.RawMessage(`{
-		"type":"object",
-		"properties":{"summary":{"type":"string"},"line":{"type":"integer"}},
-		"required":["summary"]
-	}`)
-	if _, err := finalizeGrokResult(result, schema); err != nil {
-		t.Fatalf("finalizeGrokResult() rejected optional null: %v", err)
-	}
-}
-
-func TestNormalizedGrokUsagePreservesOptionalFieldPresence(t *testing.T) {
-	cacheZero := 0
-	reasoningZero := 0
-	withoutOptional := normalizedGrokUsage(&grokUsage{InputTokens: 1})
-	if withoutOptional.CacheCreationReported || withoutOptional.ReasoningReported {
-		t.Fatalf("usage = %+v, want optional fidelity fields unknown", withoutOptional)
-	}
-	withZeroOptional := normalizedGrokUsage(&grokUsage{
-		CacheCreationInputTokens: &cacheZero,
-		ReasoningTokens:          &reasoningZero,
-	})
-	if !withZeroOptional.CacheCreationReported || !withZeroOptional.ReasoningReported || withZeroOptional.CacheCreationTokens != 0 || withZeroOptional.ReasoningTokens != 0 {
-		t.Fatalf("usage = %+v, want reported real zeros", withZeroOptional)
-	}
-}
-
-func TestGrokAgentRunNonReviewRetainsLegacyOutputShapes(t *testing.T) {
-	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
-	tests := []struct {
-		name       string
-		stdout     string
-		schema     json.RawMessage
-		wantText   string
-		wantOutput string
-	}{
-		{name: "plain", stdout: "done", wantText: "done"},
-		{name: "response envelope", stdout: `{"text":"working","structuredOutput":{"ok":true}}`, schema: schema, wantText: "working", wantOutput: `{"ok":true}`},
-		{name: "bare structured", stdout: `{"ok":true}`, schema: schema, wantText: `{"ok":true}`, wantOutput: `{"ok":true}`},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			bin := writeFakeGrok(t, dir,
-				"#!/bin/sh\nprintf '%s\\n' '"+tc.stdout+"'\n",
-				"@echo off\r\necho "+tc.stdout+"\r\n",
-			)
-			result, err := (&grokAgent{bin: bin}).Run(context.Background(), RunOpts{
-				Prompt:     "fix",
-				Purpose:    "review-fix",
-				CWD:        dir,
-				JSONSchema: tc.schema,
-			})
-			if err != nil {
-				t.Fatalf("Run() error = %v", err)
-			}
-			if result.Text != tc.wantText || string(result.Output) != tc.wantOutput {
-				t.Fatalf("result = text %q output %s, want text %q output %s", result.Text, result.Output, tc.wantText, tc.wantOutput)
-			}
-			if result.Metrics != nil {
-				t.Fatalf("legacy non-review metrics = %+v, want unknown", result.Metrics)
-			}
-		})
-	}
-}
-
-func TestGrokAgentRunUsesWorktreeCWD(t *testing.T) {
-	dir := t.TempDir()
-	binDir := t.TempDir()
-	bin := writeFakeGrok(t, binDir,
-		"#!/bin/sh\npwd\n",
-		"@echo off\r\ncd\r\n",
-	)
-	a := &grokAgent{bin: bin}
-	result, err := a.Run(context.Background(), RunOpts{Prompt: "cwd", CWD: dir})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	want, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := filepath.EvalSymlinks(strings.TrimSpace(result.Text))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != want {
-		t.Fatalf("cwd = %q, want %q", got, want)
-	}
-}
-
-func TestGrokAgentRunReportsExitStderr(t *testing.T) {
-	dir := t.TempDir()
-	bin := writeFakeGrok(t, dir, "#!/bin/sh\necho 'provider unavailable' >&2\nexit 7\n", "@echo off\r\necho provider unavailable 1>&2\r\nexit /b 7\r\n")
-	a := &grokAgent{bin: bin}
-	_, err := a.runOnce(context.Background(), RunOpts{Prompt: "review", CWD: dir})
-	if err == nil {
-		t.Fatal("expected non-zero exit error")
-	}
-	if !strings.Contains(err.Error(), "provider unavailable") {
-		t.Fatalf("error = %v, want stderr detail", err)
-	}
-}
-
-func TestGrokAgentRunOnceEmitsBoundedStdoutOnParseFailure(t *testing.T) {
-	dir := t.TempDir()
-	raw := strings.Repeat("x", 240) + "TAIL_MARKER"
-	bin := writeFakeGrok(t, dir,
-		"#!/bin/sh\nprintf '%s\\n' '"+raw+"'\n",
-		"@echo off\r\necho "+raw+"\r\n",
-	)
-	var chunks []string
-	a := &grokAgent{bin: bin}
-	_, err := a.runOnce(context.Background(), RunOpts{
-		Prompt:  "review",
-		CWD:     dir,
-		Purpose: "review",
-		OnChunk: func(chunk string) { chunks = append(chunks, chunk) },
-	})
-	if err == nil || !strings.Contains(err.Error(), "no result event") {
-		t.Fatalf("runOnce() error = %v, want missing result event", err)
-	}
-	if want := outputSnippet(raw); !reflect.DeepEqual(chunks, []string{want}) {
-		t.Fatalf("chunks = %q, want bounded stdout snippet %q", chunks, want)
-	}
-	if strings.Contains(strings.Join(chunks, ""), "TAIL_MARKER") {
-		t.Fatalf("diagnostic leaked output beyond snippet bound: %q", chunks)
-	}
-}
-
-func writeFakeGrok(t *testing.T, dir, posixScript, windowsScript string) string {
-	t.Helper()
-	name := "grok"
-	script := posixScript
-	if runtime.GOOS == "windows" {
-		name = "grok.cmd"
-		script = windowsScript
-	}
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake grok: %v", err)
-	}
-	return path
 }

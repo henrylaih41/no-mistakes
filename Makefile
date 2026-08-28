@@ -57,17 +57,23 @@ test:
 # next to the pipeline-step code (e.g. coverage provider journeys).
 # Excluded from `make test` because it is behind the `e2e` build tag and
 # rebuilds binaries on each run.
+#
+# scripts/e2e.sh owns temporary-daemon inventory + EXIT/INT/TERM reaping so
+# an interrupted or timed-out go test child cannot leave detached e2e
+# daemons behind. Keepalive shells are out of scope. A SIGKILL of the
+# wrapper shell itself does not run its trap; next-run pre-reap recovers.
 e2e:
-	go test -tags=e2e -count=1 -timeout 300s ./internal/e2e/... ./internal/pipeline/steps/...
+	@bash scripts/e2e.sh
 
-# Re-record fixtures from the real claude/codex/opencode CLIs and overwrite
+# Re-record fixtures from the real claude/codex/opencode/antigravity CLIs and overwrite
 # internal/e2e/fixtures/. Spends real API quota — run only when the upstream
-# wire format changes or when adding a new flavour. Personal paths are
+# wire format changes or when adding a new agent or flavour. Personal paths are
 # scrubbed automatically; review the diff before committing.
 e2e-record:
 	go run ./cmd/recordfixture claude   --out internal/e2e/fixtures/claude
 	go run ./cmd/recordfixture codex    --out internal/e2e/fixtures/codex
 	go run ./cmd/recordfixture opencode --out internal/e2e/fixtures/opencode
+	go run ./cmd/recordfixture antigravity --out internal/e2e/fixtures/antigravity
 
 # Regenerate the committed agent skill (skills/no-mistakes/SKILL.md) from the
 # internal/skill source of truth.

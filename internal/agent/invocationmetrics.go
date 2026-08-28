@@ -74,23 +74,23 @@ func (c ToolCategoryCounts) Total() int {
 
 // InvocationMetrics is the bounded activity evidence an adapter extracts from
 // one invocation's event stream. A nil *InvocationMetrics means the adapter
-// reported nothing (recorded as NULL, never a fabricated zero). Fields with
-// independent reporting flags remain unknown unless their flag is set.
+// reported nothing (recorded as NULL, never a fabricated zero); a non-nil value
+// means every field is meaningful, including a genuine zero.
 type InvocationMetrics struct {
-	// ModelRoundtrips is an adapter-specific live-stream proxy for productive
-	// model work. Claude and Grok count distinct assistant messages; Codex counts
-	// completed agent-message and tool-call items because its exec stream does
-	// not expose internal model requests. It excludes wait/poll activity.
+	// ModelRoundtrips counts the model-authored items in the turn (assistant
+	// messages plus tool calls). It is a live-stream proxy for productive model
+	// round-trips: because codex batches an exec into a single turn and does not
+	// surface internal poll round-trips as items, every counted item is
+	// productive work, not "are-we-there-yet" polling.
 	ModelRoundtrips int
 	// ToolCalls counts whole tool invocations (one command_execution item is one
 	// tool call regardless of how many sub-commands it chains).
 	ToolCalls int
 	// ToolCategories is the per-sub-command histogram (see ToolCategoryCounts).
 	ToolCategories ToolCategoryCounts
-	// SubprocessWaitMS is the wall-clock spent inside tool subprocesses when
-	// SubprocessWaitReported is true, measured by the reader as the sum of each
-	// tool item's started->completed interval. Combined with invocation duration
-	// it separates subprocess wait from model/reasoning time (see ModelTimeMS).
+	// SubprocessWaitMS is meaningful only when SubprocessWaitReported is true.
+	// Codex reports it from tool-item timing; adapters without this event pair
+	// leave it unknown instead of fabricating zero wait.
 	SubprocessWaitMS       int64
 	SubprocessWaitReported bool
 }
@@ -172,9 +172,9 @@ func structuredToolCommand(input json.RawMessage) string {
 
 func classifyStructuredTool(name string) ToolCategory {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "read", "glob", "grep", "ls", "listfiles", "search":
+	case "read", "glob", "grep", "ls", "listfiles", "search", "view_file", "sed_file", "grep_search", "list_dir":
 		return ToolRead
-	case "edit", "write", "multiedit", "notebookedit":
+	case "edit", "write", "multiedit", "notebookedit", "replace_file_content", "multi_replace_file_content", "write_to_file", "notebook_edit":
 		return ToolEdit
 	default:
 		return ToolOther

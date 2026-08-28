@@ -53,6 +53,18 @@ func (a *fallbackAgent) SupportsSessionProvider(provider string) bool {
 
 func (a *fallbackAgent) ReportsAgentAttempts() bool { return true }
 
+func (a *fallbackAgent) ReportsReviewVerdictEvidence(provider string) bool {
+	if provider == "" {
+		return false
+	}
+	for _, current := range a.agents {
+		if current.Name() == provider {
+			return ReportsReviewVerdictEvidence(current, provider)
+		}
+	}
+	return false
+}
+
 // NeutralizesGateInstructions fails closed over the whole fallback set: the
 // wrapper may invoke any member, so it neutralizes the target repo's project
 // agent-instruction files only if EVERY member does. A single unverified member

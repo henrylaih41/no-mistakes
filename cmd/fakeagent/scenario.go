@@ -31,7 +31,7 @@ type Action struct {
 	Match string `yaml:"match"`
 
 	// Structured is the JSON body returned in the structured-output slot
-	// (claude.result.structured_output, opencode.info.structured, or the
+	// (claude/grok result.structured_output, opencode.info.structured, or the
 	// agent_message.text payload for codex). Encoded back to JSON when
 	// emitted, so YAML authors can write it inline without escaping.
 	Structured map[string]any `yaml:"structured,omitempty"`
@@ -92,7 +92,6 @@ func defaultScenario() *Scenario {
 				"risk_rationale":  "no risks detected in the diff",
 				"tested":          []string{"fakeagent: simulated test run"},
 				"testing_summary": "simulated tests passed",
-				"artifacts":       []any{},
 				"title":           "feat: fakeagent change",
 				"body":            "## Summary\nfakeagent canned PR body",
 			},
@@ -142,15 +141,14 @@ func applyActionInDir(wd string, action Action) error {
 	return stageFilesInDir(wd, action.Stage)
 }
 
-// waitForFakeReviewEvidence keeps successful fake review invocations above the
-// production review wall-time cap. The fake also emits explicit tool activity;
-// together those make e2e reviews representative without weakening the real
-// gate contract or adding a production-only bypass.
+// waitForFakeReviewEvidence keeps the repository's small fake source reviews
+// above their workload-scaled production floor. Adapter fixtures also emit
+// explicit activity evidence.
 func waitForFakeReviewEvidence(started time.Time, prompt string) {
 	if !isReviewPrompt(prompt) {
 		return
 	}
-	const minimum = 2100 * time.Millisecond
+	const minimum = 750 * time.Millisecond
 	if remaining := minimum - time.Since(started); remaining > 0 {
 		time.Sleep(remaining)
 	}

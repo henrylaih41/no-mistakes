@@ -129,31 +129,3 @@ func TestPatchClaudeFixtureStructuredRunPreservesNonTextAssistantContent(t *test
 		t.Fatalf("third content = %+v, want patched text item", assistant.Message.Content[2])
 	}
 }
-
-func TestAddClaudeReviewEvidenceAddsDistinctRepositoryToolMessage(t *testing.T) {
-	raw := []byte("{\"type\":\"assistant\",\"message\":{\"id\":\"recorded\",\"content\":[{\"type\":\"tool_use\",\"name\":\"StructuredOutput\"}]}}\n")
-	patched := addClaudeReviewEvidence(raw)
-	lines := bytes.Split(bytes.TrimSpace(patched), []byte("\n"))
-	if len(lines) != 2 {
-		t.Fatalf("got %d lines, want evidence + recorded event", len(lines))
-	}
-	var event struct {
-		Type    string `json:"type"`
-		Message struct {
-			ID      string `json:"id"`
-			Content []struct {
-				Type string `json:"type"`
-				Name string `json:"name"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal(lines[0], &event); err != nil {
-		t.Fatalf("unmarshal evidence event: %v", err)
-	}
-	if event.Type != "assistant" || event.Message.ID == "" || event.Message.ID == "recorded" {
-		t.Fatalf("evidence identity = %+v", event)
-	}
-	if len(event.Message.Content) != 1 || event.Message.Content[0].Type != "tool_use" || event.Message.Content[0].Name != "Read" {
-		t.Fatalf("evidence content = %+v, want repository Read tool", event.Message.Content)
-	}
-}

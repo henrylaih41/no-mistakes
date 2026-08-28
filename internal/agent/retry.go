@@ -14,9 +14,8 @@ import (
 // returning a short human-readable label for telemetry.
 type retryClassifier func(error) (label string, retry bool)
 
-// TransientError reports that an agent invocation exhausted bounded retries for
-// a provider/runtime failure that should park the pipeline for an explicit
-// retry instead of terminal-failing the run.
+// TransientError reports that bounded in-process retries were exhausted for a
+// provider/runtime failure that the pipeline can park and retry explicitly.
 type TransientError struct {
 	Agent string
 	Label string
@@ -115,14 +114,10 @@ func runWithRetry(
 		lastErr = err
 		lastLabel = label
 	}
-	if !parkableTransientLabel(lastLabel) {
+	if lastLabel == "" || lastLabel == "missing structured output" {
 		return nil, lastErr
 	}
 	return nil, &TransientError{Agent: name, Label: lastLabel, Err: lastErr}
-}
-
-func parkableTransientLabel(label string) bool {
-	return label != "" && label != "missing structured output"
 }
 
 func emitAgentAttempt(opts RunOpts, name string, result *Result, err error, startedAt, completedAt time.Time) {
@@ -154,18 +149,10 @@ func claudeRetryClassifier(err error) (string, bool) {
 	if errors.Is(err, errNoStructuredOutput) {
 		return "missing structured output", true
 	}
-	if isClaudeEmptyStderrExitOne(err) {
+	if strings.TrimSpace(err.Error()) == "claude exited: exit status 1:" {
 		return "empty-stderr exit-1", true
 	}
 	return classifyTransient(err)
-}
-
-func isClaudeEmptyStderrExitOne(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.TrimSpace(err.Error())
-	return msg == "claude exited: exit status 1:"
 }
 
 var transientStatusRE = regexp.MustCompile(`\b(429|503|529)\b`)
@@ -189,6 +176,31 @@ var transientNeedles = []struct {
 	{"temporary failure in name resolution", "dns temporary failure"},
 	{"tls handshake", "tls handshake failure"},
 	{"unexpected eof", "unexpected eof"},
+	// A model ending its turn with prose instead of the required JSON object
+	// is a stochastic behavior, not a deterministic defect: the step's real
+	// work is typically already complete, so a cold retry succeeds often
+	// enough to be worth more than a terminal failure.
+	{"ended its turn with prose", "prose final turn"},
+	// agy's strict tool-call validation kills the whole run when the model
+	// emits one malformed call; the step work is usually already complete.
+	{"declaring permissions", "agy permission declaration"},
+	{"invalid tool call", "invalid tool call"},
+}
+
+var terminalNeedles = []struct {
+	needle string
+	label  string
+}{
+	{"freeusagelimit", "free usage limit"},
+	{"free usage limit", "free usage limit"},
+	{"free_usage_limit", "free usage limit"},
+	{"insufficient quota", "insufficient quota"},
+	{"insufficient_quota", "insufficient quota"},
+	{"exceeded your current quota", "quota exceeded"},
+	{"quota exceeded", "quota exceeded"},
+	{"quota_exceeded", "quota exceeded"},
+	{"quota exhausted", "quota exhausted"},
+	{"quota_exhausted", "quota exhausted"},
 }
 
 // classifyTransient reports whether an error message looks like a transient
@@ -202,6 +214,9 @@ func classifyTransient(err error) (string, bool) {
 		return "", false
 	}
 	msg := strings.ToLower(err.Error())
+	if isTerminalRetryError(msg) {
+		return "", false
+	}
 	for _, sig := range transientNeedles {
 		if strings.Contains(msg, sig.needle) {
 			return sig.label, true
@@ -211,4 +226,13 @@ func classifyTransient(err error) (string, bool) {
 		return "http " + m, true
 	}
 	return "", false
+}
+
+func isTerminalRetryError(msg string) bool {
+	for _, sig := range terminalNeedles {
+		if strings.Contains(msg, sig.needle) {
+			return true
+		}
+	}
+	return false
 }

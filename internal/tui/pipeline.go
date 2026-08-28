@@ -70,6 +70,8 @@ func runStatusStyled(status types.RunStatus) string {
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiGreen))
 	case types.RunFailed, types.RunCancelled:
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiRed))
+	case types.RunCIMonitorInterrupted:
+		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
 	default:
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiBrightBlack))
 	}
@@ -210,9 +212,13 @@ func appendRightLabel(line, label string, width int) string {
 // Per DESIGN.md: "Sits below the pipeline box, above findings/diff"
 // showDiff controls whether the 'd' key label says "findings" (to toggle back) or "diff".
 // Selection actions are hidden in diff mode since they don't apply.
-func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool) string {
+func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool, approvalReady bool, retryAvailable bool) string {
 	step := awaitingStep(steps)
 	if step == nil {
+		if retryAvailable {
+			promptStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
+			return promptStyle.Render("Review state unavailable:") + "\n" + renderApprovalActions(false, false, false, 0, 0, confirmAbort, false, false, true)
+		}
 		return ""
 	}
 
@@ -229,32 +235,41 @@ func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allo
 	b.WriteString(promptStyle.Render(prompt))
 	b.WriteString("\n")
 	if step.Status == types.StepStatusAwaitingRetry {
-		b.WriteString(renderRetryActions(confirmAbort))
+		b.WriteString(renderAgentRetryActions(confirmAbort))
 		return b.String()
 	}
 	// Hide selection actions in diff mode since toggle/A/N keys don't work there.
 	effectiveSelection := showSelectionActions && !showDiff
-	b.WriteString(renderApprovalActions(effectiveSelection, allowFix, showDiff, selectedCount, totalCount, confirmAbort, hasDiff))
+	b.WriteString(renderApprovalActions(effectiveSelection, allowFix, showDiff, selectedCount, totalCount, confirmAbort, hasDiff, approvalReady, retryAvailable))
 	return b.String()
 }
 
-func renderRetryActions(confirmAbort bool) string {
+func renderAgentRetryActions(confirmAbort bool) string {
+	boldKey := lipgloss.NewStyle().Bold(true)
+	abortLabel := "abort"
+	if confirmAbort {
+		abortLabel = lipgloss.NewStyle().Foreground(lipgloss.Color(ansiRed)).Render("x again to abort")
+	}
+	return " " + strings.Join([]string{boldKey.Render("t") + " retry", boldKey.Render("x") + " " + abortLabel}, "  ")
+}
+
+func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool, approvalReady bool, retryAvailable bool) string {
 	boldKey := lipgloss.NewStyle().Bold(true)
 	renderAction := func(key, label string) string {
 		return boldKey.Render(key) + " " + label
 	}
+
 	abortLabel := "abort"
 	if confirmAbort {
 		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiRed))
 		abortLabel = warnStyle.Render("x again to abort")
 	}
-	return " " + strings.Join([]string{renderAction("u", "retry"), renderAction("x", abortLabel)}, "  ")
-}
-
-func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool) string {
-	boldKey := lipgloss.NewStyle().Bold(true)
-	renderAction := func(key, label string) string {
-		return boldKey.Render(key) + " " + label
+	if !approvalReady {
+		status := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiBrightBlack)).Render("loading fix diff...")
+		if retryAvailable {
+			status = renderAction("r", "retry")
+		}
+		return " " + strings.Join([]string{status, renderAction("x", abortLabel)}, "  ")
 	}
 
 	primary := []string{renderAction("a", "approve")}
@@ -264,11 +279,6 @@ func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bo
 			fixLabel = fmt.Sprintf("fix (%d/%d)", selectedCount, totalCount)
 		}
 		primary = append(primary, renderAction("f", fixLabel))
-	}
-	abortLabel := "abort"
-	if confirmAbort {
-		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiRed))
-		abortLabel = warnStyle.Render("x again to abort")
 	}
 	primary = append(primary, renderAction("s", "skip"), renderAction("x", abortLabel))
 	if hasDiff {
@@ -335,6 +345,9 @@ func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
 	case types.RunCancelled:
 		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiRed))
 		return style.Render("✗ Pipeline cancelled") + elapsed
+	case types.RunCIMonitorInterrupted:
+		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
+		return style.Render("CI monitor interrupted") + elapsed
 	default:
 		return ""
 	}
@@ -446,6 +459,7 @@ func renderHelpOverlay(width int, run *ipc.RunInfo, hasAwaitingStep bool, showDi
 		yoloDesc = "end yolo (auto-resolve)"
 	}
 	footerEntries = append(footerEntries, helpEntry{"y", yoloDesc})
+	footerEntries = append(footerEntries, helpEntry{"u", "refresh/sync local branch when offered"})
 	if canRerun(run) {
 		footerEntries = append(footerEntries, helpEntry{"r", "rerun pipeline"})
 	}

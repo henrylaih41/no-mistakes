@@ -1,8 +1,6 @@
 package bitbucket
 
 import (
-	"context"
-	"errors"
 	"slices"
 	"testing"
 
@@ -388,13 +386,5 @@ func TestFailedPipelineUUIDs(t *testing.T) {
 				t.Fatalf("failedPipelineUUIDs keys = %v, want %v", keys, want)
 			}
 		})
-	}
-}
-
-func TestReplyToReviewCommentUnsupported(t *testing.T) {
-	t.Parallel()
-	h := &Host{}
-	if err := h.ReplyToReviewComment(context.Background(), 1, 2, "body"); !errors.Is(err, scm.ErrUnsupported) {
-		t.Fatalf("ReplyToReviewComment() error = %v, want ErrUnsupported", err)
 	}
 }

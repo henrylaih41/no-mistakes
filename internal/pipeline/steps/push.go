@@ -1,11 +1,12 @@
 package steps
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -18,8 +19,15 @@ type PushStep struct{}
 func (s *PushStep) Name() types.StepName { return types.StepPush }
 
 func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
 	newHeadSHA := ""
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+		return nil, err
+	}
+	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 
 	// Run format command if configured (before committing, so changes are formatted)
 	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
@@ -32,18 +40,17 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 	}
 
-	// Commit any uncommitted changes from agent fixes
-	if err := s.stageInRepoEvidence(sctx); err != nil {
-		return nil, err
-	}
+	// Commit any uncommitted changes from pipeline agents or the formatter. Test
+	// evidence is deliberately not among them: it is collected outside the
+	// worktree and published to the orphan evidence branch (internal/evidence),
+	// so no artifact ever enters the pushed branch or the default branch's history.
 	status, _ := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
 	if strings.TrimSpace(status) != "" {
 		sctx.Log("committing agent changes...")
 		if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
 		}
-		_, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", "no-mistakes: apply agent fixes")
-		if err != nil {
+		if err := commitPipelineCorrection(ctx, sctx.WorkDir, "no-mistakes: apply agent fixes", sctx.Log); err != nil {
 			return nil, fmt.Errorf("commit agent changes: %w", err)
 		}
 		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
@@ -56,7 +63,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 
-	pushURL := sctx.Repo.PushURL()
+	pushURL := resolvePushURL(sctx)
 	pushTarget := "upstream"
 	usingFork := strings.TrimSpace(sctx.Repo.ForkURL) != ""
 	if usingFork {
@@ -70,14 +77,18 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
+	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
+		return nil, err
+	}
 
 	// Decide whether force-pushing would discard commits the pipeline never saw.
 	// The lease is anchored to the remote-tracking ref the rebase step freshly
-	// fetched (the exact commit this branch was rebased against), so a push that
-	// would clobber an out-of-band or stale-mirror commit fails loudly instead
-	// of silently dropping it. A bare --force-with-lease offers no protection
-	// when pushing to a URL (no remote-tracking refs), so the anchor is explicit.
-	lastSeen := lastFetchedBranchTip(ctx, sctx.WorkDir, branch, usingFork)
+	// fetched (the exact commit this branch was rebased against) or the run's
+	// own recorded prior push generation, so a push that would clobber an
+	// out-of-band or stale-mirror commit fails loudly instead of silently dropping it.
+	// A bare --force-with-lease offers no protection when pushing to a URL (no
+	// remote-tracking refs), so the anchor is explicit.
+	lastSeen := lastKnownBranchTip(ctx, sctx, branch, usingFork)
 	gitRun := func(args ...string) (string, error) { return git.Run(ctx, sctx.WorkDir, args...) }
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
 	if err != nil {
@@ -86,16 +97,32 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	switch {
 	case decision.newBranch:
 		// New branch: regular push (no force needed).
-		if err := git.Push(ctx, sctx.WorkDir, pushURL, ref, "", false); err != nil {
+		if err := git.PushCommit(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, "", false); err != nil {
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	case decision.upToDate:
-		// Remote already at this head: nothing to push, just reconcile refs below.
+		// Remote already at this exact head. This freshly verified equality is a
+		// successful binding even though no objects needed to move.
 	default:
 		// Existing branch: force-with-lease anchored to the verified remote head.
-		if err := git.Push(ctx, sctx.WorkDir, pushURL, ref, decision.remoteSHA, true); err != nil {
+		if err := git.PushCommit(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
+	}
+	verifiedRemote, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
+	if err != nil || verifiedRemote != headBeingPushed {
+		if err != nil {
+			return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
+		}
+		return nil, fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, verifiedRemote, headBeingPushed)
+	}
+	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+		HeadSHA:           headBeingPushed,
+		TargetKind:        pushTarget,
+		TargetFingerprint: branchsync.TargetFingerprint(pushURL),
+		Ref:               ref,
+	}); err != nil {
+		return nil, err
 	}
 
 	if newHeadSHA != "" {
@@ -104,13 +131,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 	}
 
-	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve HEAD after push: %w", err)
-	}
-	if headSHA != sctx.Run.HeadSHA {
-		sctx.Run.HeadSHA = headSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
+	// Persist the immutable source that was verified and delivered, never a
+	// fresh read of mutable worktree HEAD after the push.
+	if headBeingPushed != sctx.Run.HeadSHA {
+		sctx.Run.HeadSHA = headBeingPushed
+		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headBeingPushed); err != nil {
 			return nil, err
 		}
 	}
@@ -119,38 +144,66 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	return &pipeline.StepOutcome{}, nil
 }
 
-func (s *PushStep) stageInRepoEvidence(sctx *pipeline.StepContext) error {
-	ctx := sctx.Ctx
-	location := resolveTestEvidenceLocation(sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
-	if !location.StoreInRepo {
-		return nil
+func assertReviewApprovedPushHead(sctx *pipeline.StepContext, proposedHead string) error {
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		return fmt.Errorf("load durable review approval before push: %w", err)
 	}
-	if gitIgnoresPath(ctx, sctx.WorkDir, location.Dir) {
-		return nil
+	if run == nil || run.ReviewApprovedHeadSHA == nil || strings.TrimSpace(*run.ReviewApprovedHeadSHA) == "" {
+		return fmt.Errorf("refusing to push: run has no durably recorded review-approved head")
 	}
-	if !dirHasFiles(location.Dir) {
-		return nil
+	approvedHead := strings.TrimSpace(*run.ReviewApprovedHeadSHA)
+	if !isFullGitObjectID(approvedHead) {
+		return fmt.Errorf("refusing to push: durable review-approved head is malformed")
 	}
-	rel, err := filepath.Rel(sctx.WorkDir, location.Dir)
-	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return nil
+	resolved, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "--verify", approvedHead+"^{commit}")
+	if err != nil || !strings.EqualFold(strings.TrimSpace(resolved), approvedHead) {
+		return fmt.Errorf("refusing to push: durable review-approved head is unreachable")
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-f", "--", filepath.ToSlash(rel)); err != nil {
-		return fmt.Errorf("stage test evidence: %w", err)
+	if proposedHead != approvedHead {
+		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", approvedHead, proposedHead); err != nil {
+			return fmt.Errorf("refusing to push: proposed head %s violates continuity with review-approved head %s (it is not an equal or descendant commit)", shortObjectID(proposedHead), shortObjectID(approvedHead))
+		}
 	}
 	return nil
 }
 
-func dirHasFiles(dir string) bool {
-	found := false
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || found {
-			return nil
+func isFullGitObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
 		}
-		if !d.IsDir() {
-			found = true
+	}
+	return true
+}
+
+func shortObjectID(value string) string {
+	if len(value) > 12 {
+		return value[:12]
+	}
+	return value
+}
+
+// lastKnownBranchTip returns the commit SHA the pipeline last observed or
+// produced for this branch on the remote. It checks the current run's recorded
+// pushed head, then prior pipeline runs for the same repo and branch, and
+// finally falls back to the worktree's remote-tracking ref.
+func lastKnownBranchTip(ctx context.Context, sctx *pipeline.StepContext, branch string, fork bool) string {
+	if sctx.Run != nil && sctx.Run.LastPushedSHA != nil && strings.TrimSpace(*sctx.Run.LastPushedSHA) != "" {
+		return strings.TrimSpace(*sctx.Run.LastPushedSHA)
+	}
+	if sctx.DB != nil && sctx.Repo != nil {
+		runs, err := sctx.DB.GetRunsByRepo(sctx.Repo.ID)
+		if err == nil {
+			for _, r := range runs {
+				if strings.TrimPrefix(r.Branch, "refs/heads/") == strings.TrimPrefix(branch, "refs/heads/") && r.LastPushedSHA != nil && strings.TrimSpace(*r.LastPushedSHA) != "" {
+					return strings.TrimSpace(*r.LastPushedSHA)
+				}
+			}
 		}
-		return nil
-	})
-	return found
+	}
+	return lastFetchedBranchTip(ctx, sctx.WorkDir, branch, fork)
 }

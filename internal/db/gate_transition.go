@@ -110,7 +110,19 @@ func (d *DB) EnterApprovalGate(parent context.Context, runID, stepResultID strin
 
 // ExitApprovalGate atomically clears the run marker, accumulates parked time,
 // and moves the step to its next durable state.
-func (d *DB) ExitApprovalGate(parent context.Context, runID, stepResultID string, status types.StepStatus, parkedMS int64, reason *string) (err error) {
+func (d *DB) ExitApprovalGate(parent context.Context, runID, stepResultID string, status types.StepStatus, parkedMS int64, reason *string) error {
+	return d.exitApprovalGate(parent, runID, stepResultID, status, parkedMS, reason, false)
+}
+
+// ExitReconciledApprovalGate exits a gate unless the external reconciliation
+// already terminalized the run and step together. Terminal PR observation can
+// legitimately do that before the executor regains control; every other torn
+// or duplicate exit still fails closed.
+func (d *DB) ExitReconciledApprovalGate(parent context.Context, runID, stepResultID string, status types.StepStatus, parkedMS int64, reason *string) error {
+	return d.exitApprovalGate(parent, runID, stepResultID, status, parkedMS, reason, true)
+}
+
+func (d *DB) exitApprovalGate(parent context.Context, runID, stepResultID string, status types.StepStatus, parkedMS int64, reason *string, allowAlreadyTerminal bool) (err error) {
 	ctx, cancel := boundedGateContext(parent)
 	defer cancel()
 	if parkedMS < 0 {
@@ -121,6 +133,7 @@ func (d *DB) ExitApprovalGate(parent context.Context, runID, stepResultID string
 	started := time.Now()
 	fields := d.gateLogFields(transitionID, "exit", runID, stepResultID, status)
 	var since sql.NullInt64
+	var currentStatus types.StepStatus
 	defer func() {
 		var markerSince any
 		if since.Valid {
@@ -140,8 +153,25 @@ func (d *DB) ExitApprovalGate(parent context.Context, runID, stepResultID string
 		return fmt.Errorf("begin approval gate exit transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if scanErr := tx.QueryRowContext(ctx, `SELECT awaiting_agent_since FROM runs WHERE id = ?`, runID).Scan(&since); scanErr != nil {
-		return fmt.Errorf("read approval gate marker: %w", scanErr)
+	if scanErr := tx.QueryRowContext(ctx,
+		`SELECT runs.awaiting_agent_since, step_results.status
+		 FROM runs JOIN step_results ON step_results.run_id = runs.id
+		 WHERE runs.id = ? AND step_results.id = ?`,
+		runID, stepResultID,
+	).Scan(&since, &currentStatus); scanErr != nil {
+		return fmt.Errorf("read approval gate state: %w", scanErr)
+	}
+	if allowAlreadyTerminal && !since.Valid && isTerminalGateExitStatus(currentStatus) {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit already-reconciled approval gate exit: %w", err)
+		}
+		slog.Info("approval gate already resolved by external reconciliation", append(fields,
+			"current_step_status", currentStatus,
+			"run_rows_affected", 0,
+			"step_rows_affected", 0,
+			"elapsed_ms", time.Since(started).Milliseconds(),
+		)...)
+		return nil
 	}
 
 	activityAt := now()
@@ -197,6 +227,10 @@ func (d *DB) ExitApprovalGate(parent context.Context, runID, stepResultID string
 		"elapsed_ms", time.Since(started).Milliseconds(),
 	)...)
 	return nil
+}
+
+func isTerminalGateExitStatus(status types.StepStatus) bool {
+	return status == types.StepStatusCompleted || status == types.StepStatusSkipped || status == types.StepStatusFailed
 }
 
 // FailApprovalGate is the terminal fallback when an atomic gate exit fails.
@@ -446,7 +480,7 @@ func getRunWithQuery(ctx context.Context, queryer contextQuerier, query string, 
 
 func getStepsByRunWithQuery(ctx context.Context, queryer contextQuerier, runID string) ([]*StepResult, error) {
 	rows, err := queryer.QueryContext(ctx,
-		`SELECT `+stepResultColumns+` FROM step_results WHERE run_id = ? ORDER BY step_order`, runID,
+		`SELECT `+stepResultColumns+`, COALESCE(ci_fix_attempts, 0) FROM step_results WHERE run_id = ? ORDER BY step_order`, runID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get run snapshot steps: %w", err)
@@ -455,7 +489,7 @@ func getStepsByRunWithQuery(ctx context.Context, queryer contextQuerier, runID s
 	var steps []*StepResult
 	for rows.Next() {
 		step := &StepResult{}
-		if err := rows.Scan(&step.ID, &step.RunID, &step.StepName, &step.StepOrder, &step.Status, &step.ExitCode, &step.DurationMS, &step.LogPath, &step.FindingsJSON, &step.Error, &step.StartedAt, &step.CompletedAt, &step.LastActivityAt, &step.LastActivity, &step.AgentPID, &step.AutoFixLimit); err != nil {
+		if err := rows.Scan(&step.ID, &step.RunID, &step.StepName, &step.StepOrder, &step.Status, &step.ExitCode, &step.DurationMS, &step.LogPath, &step.FindingsJSON, &step.Error, &step.StartedAt, &step.CompletedAt, &step.LastActivityAt, &step.LastActivity, &step.AgentPID, &step.AutoFixLimit, &step.CIFixAttempts); err != nil {
 			return nil, fmt.Errorf("scan run snapshot step: %w", err)
 		}
 		steps = append(steps, step)

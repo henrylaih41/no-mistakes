@@ -26,25 +26,6 @@ func parseFindings(raw string) (*findings, error) {
 	return &f, nil
 }
 
-// isUserSource reports whether a finding's Source is the true user sentinel.
-// Only user-authored findings are user-editable at the gate; reviewer-panel
-// sources (e.g. "codex", "claude") must not match.
-func isUserSource(source string) bool {
-	return source == nmtypes.FindingSourceUser
-}
-
-// reviewerSourceTag returns the bracketed provenance tag for a reviewer-panel
-// finding (e.g. "[codex]"), or "" when the source is unattributed: empty, the
-// agent sentinel, or the user sentinel (which renders its own [user] tag).
-func reviewerSourceTag(source string) string {
-	switch source {
-	case "", nmtypes.FindingSourceAgent, nmtypes.FindingSourceUser:
-		return ""
-	default:
-		return "[" + source + "]"
-	}
-}
-
 // severityIcon returns the visual indicator for a finding severity.
 func severityIcon(severity string) string {
 	switch severity {
@@ -287,7 +268,6 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 	// Individual findings.
 	greenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiGreen))
 	blueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiBlue))
-	cyanStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiCyan))
 	for idx := start; idx < end; idx++ {
 		item := f.Items[idx]
 		// Blank line between findings per DESIGN.md Gutter System.
@@ -315,15 +295,10 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 		}
 		line := pointer + " " + checkbox + " " + iconStyled
 
-		// Tag the finding's provenance right after the icon so it stays visible
-		// when unfocused and does not shift the alignment of the ref. User
-		// findings get a [user] tag; reviewer-panel findings get a [<reviewer>]
-		// tag (e.g. [codex], [claude]) so each reviewer's findings are
-		// attributable at the gate.
-		if isUserSource(item.Source) {
+		// Tag user-authored findings right after the icon so they remain
+		// visible when unfocused and do not shift alignment of the ref.
+		if item.Source == nmtypes.FindingSourceUser {
 			line += " " + blueStyle.Render("[user]")
-		} else if tag := reviewerSourceTag(item.Source); tag != "" {
-			line += " " + cyanStyle.Render(tag)
 		}
 
 		// File:line reference, truncated to fit within content width.

@@ -1,11 +1,16 @@
 package agent
 
-import "github.com/kunchenguid/no-mistakes/internal/git"
+import (
+	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
+)
 
 // GateRoleEnvVar is exported into every spawned gate agent's environment as an
-// unspoofable-from-outside marker that the process is a no-mistakes gate agent
-// (a review/fix/document/test/lint/rebase/pr/ci invocation), NOT a fleet
-// operator. Its purpose is containment: when the target repository is itself an
+// coarse diagnostic marker that the process is a no-mistakes gate agent (a
+// review/fix/document/test/lint/rebase/pr/ci invocation), NOT a fleet operator.
+// It is defense in depth only: it can be removed, forged, or inherited, so
+// runtime authorization uses canonical managed Git identity plus authenticated
+// daemon peer process ancestry. Its purpose is containment: when the target repository is itself an
 // agent-orchestration harness (for example firstmate), the target's project
 // agent-instruction file can otherwise convince the gate agent it is the fleet
 // captain and drive it to spawn a crew and reset the shared branch it is
@@ -13,6 +18,24 @@ import "github.com/kunchenguid/no-mistakes/internal/git"
 // this marker and its fleet-lifecycle entrypoints fail closed. It is deliberately
 // coarse (`=1`): presence is the whole signal.
 const GateRoleEnvVar = "NO_MISTAKES_GATE"
+
+// subprocessContext centralizes environment policy shared by every agent
+// adapter, including persistent server-backed adapters.
+type subprocessContext struct {
+	environment runenv.Overlay
+}
+
+func newSubprocessContext(environment runenv.Overlay) subprocessContext {
+	return subprocessContext{environment: environment.Clone()}
+}
+
+func (c subprocessContext) gitSafeEnv(dir string, extra ...[]string) []string {
+	return gitSafeEnvWithOverlay(dir, c.environment, extra...)
+}
+
+func (c subprocessContext) overlay() runenv.Overlay {
+	return c.environment.Clone()
+}
 
 // gitSafeEnv returns the environment for a spawned agent subprocess with git
 // forced into non-interactive mode. Agents shell out to git directly (for
@@ -26,6 +49,15 @@ const GateRoleEnvVar = "NO_MISTAKES_GATE"
 //
 // dir must be the value assigned to cmd.Dir so PWD stays coupled to the working
 // directory; see git.NonInteractiveEnv for why this matters.
-func gitSafeEnv(dir string) []string {
-	return append(git.NonInteractiveEnv(dir), GateRoleEnvVar+"=1")
+func gitSafeEnv(dir string, extra ...[]string) []string {
+	return gitSafeEnvWithOverlay(dir, runenv.Overlay{}, extra...)
+}
+
+func gitSafeEnvWithOverlay(dir string, overlay runenv.Overlay, extra ...[]string) []string {
+	base := overlay.Apply(nil)
+	env := git.NonInteractiveEnvFrom(base, dir)
+	if len(extra) > 0 {
+		env = append(env, extra[0]...)
+	}
+	return append(env, GateRoleEnvVar+"=1")
 }

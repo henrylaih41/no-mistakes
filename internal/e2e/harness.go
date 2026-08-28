@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/daemon"
+	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -40,25 +42,18 @@ type Harness struct {
 	AgentLog    string // every fake-agent invocation appended here, one JSON per line
 	Scenario    string // optional path to a scenario yaml; empty = built-in default
 
-	agentName         string   // claude / codex / opencode / grok
-	agentArgs         []string // optional native CLI args for the implementation agent
-	allowRepoCommands *bool    // mirrors SetupOpts.AllowRepoCommands
-	reviewers         []string // mirrors SetupOpts.Reviewers (global config panel)
-	repoReviewers     []string // mirrors SetupOpts.RepoReviewers (trusted repo panel)
+	agentName         string // claude / codex / grok / opencode / antigravity
+	allowRepoCommands *bool  // mirrors SetupOpts.AllowRepoCommands
+	daemonOwn         *e2edaemon.Ownership
 }
 
 // SetupOpts controls per-test setup.
 type SetupOpts struct {
-	// Agent picks which fake the harness wires up: "claude", "codex",
-	// "opencode", or "grok". The other binaries are still on PATH (so `auto`
-	// detection finds the requested one first via config), but only the
-	// chosen one is exercised.
+	// Agent picks which fake the harness wires up: "claude", "codex", "grok",
+	// "opencode", or "antigravity". The other binaries are still on PATH (so
+	// `auto` detection finds the requested one first via config), but only
+	// the chosen one is exercised.
 	Agent string
-
-	// AgentArgs writes agent_args_override for Agent in the global config.
-	// This lets a journey prove that user-controlled model/reasoning flags reach
-	// the native CLI without taking over no-mistakes-managed arguments.
-	AgentArgs []string
 
 	// Scenario is an optional path to a YAML scenario file. If empty the
 	// fake agent uses its built-in clean-response default.
@@ -73,18 +68,6 @@ type SetupOpts struct {
 	// (commands must come from the trusted default branch) pass a pointer
 	// to false to exercise the secure default.
 	AllowRepoCommands *bool
-
-	// Reviewers, when non-empty, injects a cross-family review panel into the
-	// GLOBAL config (review.reviewers) via writeGlobalConfig. The global config
-	// is not security-gated, so this is the simplest way to make every run fan
-	// the review step out across the named agent families (e.g. claude, codex).
-	Reviewers []string
-
-	// RepoReviewers, when non-empty, injects a review panel into the TRUSTED
-	// default-branch .no-mistakes.yaml (via initGitRepos). Unlike a panel pushed
-	// on a feature branch, this trusted copy survives EffectiveRepoConfig, so it
-	// exercises the positive side of the review-panel security gate.
-	RepoReviewers []string
 }
 
 const e2eDaemonStartTimeout = "45s"
@@ -118,10 +101,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		AgentLog:          filepath.Join(root, "fakeagent.log"),
 		Scenario:          opts.Scenario,
 		agentName:         opts.Agent,
-		agentArgs:         append([]string(nil), opts.AgentArgs...),
 		allowRepoCommands: opts.AllowRepoCommands,
-		reviewers:         opts.Reviewers,
-		repoReviewers:     opts.RepoReviewers,
 	}
 
 	for _, dir := range []string{h.BinDir, h.NMHome, h.HomeDir, h.WorkDir} {
@@ -131,14 +111,17 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	}
 	h.writeLoginShellPathSeed()
 
-	// Symlink each agent name to the same fake binary. Codex and Claude
-	// dispatch by argv[0] basename; opencode and grok do the same. Symlinks (not
-	// copies) keep the build cheap on subsequent tests. The `gh` symlink
-	// is a guard rail: BinDir is prepended to PATH, so any stray invocation
-	// of gh by the pipeline (e.g. PR/CI on a misconfigured origin) hits
-	// the fakeagent stub instead of a real, authenticated system gh.
-	for _, name := range []string{"claude", "codex", "opencode", "grok", "gh"} {
-		linkPath := filepath.Join(h.BinDir, name)
+	// Symlink each agent name to the same fake binary. Native agents dispatch
+	// by argv[0] basename; opencode does the same. Symlinks (not
+	// copies) keep the build cheap on subsequent tests. The `gh` and `tea`
+	// symlinks are a guard rail: BinDir is prepended to PATH, so any stray
+	// invocation of gh/tea by the pipeline (e.g. PR/CI on a misconfigured
+	// origin) hits the fakeagent stub instead of a real, authenticated
+	// system CLI. antigravity gets a second link under its probed binary
+	// name "agy" (internal/cli/doctor.go searches that name, not the agent
+	// name).
+	for _, name := range []string{"claude", "codex", "grok", "opencode", "antigravity", "agy", "gh", "tea"} {
+		linkPath := filepath.Join(h.BinDir, executableName(name))
 		if err := os.Symlink(fakeBin, linkPath); err != nil {
 			t.Fatalf("symlink %s: %v", linkPath, err)
 		}
@@ -156,8 +139,9 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	}
 	// Point the fake at recorded real-agent fixtures by default. When
 	// the directory contains <agent>/structured.{jsonl,*}, the fake
-	// replays those bytes verbatim instead of generating synthetic
-	// output. This is what makes the e2e a real wire-format check.
+	// replays those recorded wire envelopes instead of generating synthetic
+	// output, patching scenario-dependent fields where the adapter needs to.
+	// This is what makes the e2e a real wire-format check.
 	fixtureRoot, err := defaultFixtureRoot()
 	if err != nil {
 		t.Fatalf("fixture root: %v", err)
@@ -179,6 +163,15 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 
 	h.writeGlobalConfig()
 	h.initGitRepos()
+
+	// Temporary-daemon ownership: inventory + concurrency slot. The suite
+	// wrapper (scripts/e2e.sh) and TestMain reaper recover if Cleanup never
+	// runs (timeout / SIGKILL of the test process).
+	own, err := e2edaemon.Acquire(h.NMHome, h.NMBin, 2*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire e2e daemon ownership: %v", err)
+	}
+	h.daemonOwn = own
 
 	t.Cleanup(h.shutdown)
 	return h
@@ -207,74 +200,22 @@ func (h *Harness) writeGlobalConfig() {
 	if err := os.MkdirAll(h.NMHome, 0o755); err != nil {
 		h.t.Fatalf("mkdir nm home: %v", err)
 	}
-	// Pin an absolute fake-agent path for every family the run can launch: the
-	// impl agent AND every configured reviewer family. The daemon resolves a
-	// login-shell PATH at startup that does NOT contain BinDir, so a bare
-	// reviewer name (e.g. "codex") would otherwise resolve to a real system
-	// binary and hit the live API. Absolute overrides keep every family on the
-	// fake regardless of the daemon's PATH.
-	var overrides strings.Builder
-	for _, family := range h.pathOverrideFamilies() {
-		fmt.Fprintf(&overrides, "  %s: %s\n", family, filepath.Join(h.BinDir, family))
-	}
+	binLink := filepath.Join(h.BinDir, h.agentName)
 	cfg := fmt.Sprintf(`agent: %s
 log_level: debug
 agent_path_override:
-%sauto_fix:
+  %s: %s
+auto_fix:
   rebase: 0
   lint: 0
   test: 0
   review: 0
   document: 0
   ci: 0
-`, h.agentName, overrides.String())
-	if len(h.agentArgs) > 0 {
-		cfg += "agent_args_override:\n  " + h.agentName + ":\n"
-		for _, arg := range h.agentArgs {
-			cfg += fmt.Sprintf("    - %q\n", arg)
-		}
-	}
-	cfg += reviewPanelYAML(h.reviewers, 0)
+`, h.agentName, h.agentName, binLink)
 	if err := os.WriteFile(configPath, []byte(cfg), 0o644); err != nil {
 		h.t.Fatalf("write config: %v", err)
 	}
-}
-
-// pathOverrideFamilies returns the deduped set of agent families that need an
-// absolute fake-agent path override: the impl agent plus every reviewer family
-// configured on either the global panel or the trusted repo panel. Order is
-// deterministic (impl agent first) so the rendered config is stable.
-func (h *Harness) pathOverrideFamilies() []string {
-	var families []string
-	seen := map[string]bool{}
-	for _, name := range append([]string{h.agentName}, append(append([]string{}, h.reviewers...), h.repoReviewers...)...) {
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		families = append(families, name)
-	}
-	return families
-}
-
-// reviewPanelYAML renders a review-panel config block (review.reviewers +
-// max_parallel + fail_open) at the given indentation, or "" when no reviewers
-// are configured. The same shape is valid in both the global config and a
-// repo .no-mistakes.yaml, so both harness injection points reuse it.
-func reviewPanelYAML(reviewers []string, indent int) string {
-	if len(reviewers) == 0 {
-		return ""
-	}
-	pad := strings.Repeat(" ", indent)
-	var b strings.Builder
-	fmt.Fprintf(&b, "%sreview:\n", pad)
-	fmt.Fprintf(&b, "%s  reviewers:\n", pad)
-	for _, name := range reviewers {
-		fmt.Fprintf(&b, "%s    - agent: %s\n", pad, name)
-	}
-	fmt.Fprintf(&b, "%s  max_parallel: 2\n", pad)
-	fmt.Fprintf(&b, "%s  fail_open: false\n", pad)
-	return b.String()
 }
 
 // initGitRepos creates a bare upstream repo and a working clone with one
@@ -320,10 +261,6 @@ func (h *Harness) initGitRepos() {
 	}
 	repoConfig := filepath.Join(h.WorkDir, ".no-mistakes.yaml")
 	repoCfg := fmt.Sprintf("ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\nallow_repo_commands: %t\n", allowRepoCommands)
-	// A panel committed to the trusted default branch survives
-	// EffectiveRepoConfig and drives the pipeline, unlike one pushed only on a
-	// feature branch (which is stripped). This is the positive security case.
-	repoCfg += reviewPanelYAML(h.repoReviewers, 0)
 	if err := os.WriteFile(repoConfig, []byte(repoCfg), 0o644); err != nil {
 		h.t.Fatalf("write repo config: %v", err)
 	}
@@ -355,7 +292,21 @@ func (h *Harness) RunInDirWithEnv(dir string, env map[string]string, args ...str
 	cmd.Dir = dir
 	cmd.Env = mergedEnv(os.Environ(), env)
 	out, err := cmd.CombinedOutput()
+	h.syncDaemonOwnership()
 	return string(out), err
+}
+
+// syncDaemonOwnership records a live daemon PID into the suite inventory when
+// a harness command has (possibly) started or restarted the detached daemon.
+func (h *Harness) syncDaemonOwnership() {
+	if h == nil || h.daemonOwn == nil || h.NMHome == "" {
+		return
+	}
+	pid, err := daemon.ReadPID(paths.WithRoot(h.NMHome))
+	if err != nil || pid <= 0 {
+		return
+	}
+	_ = h.daemonOwn.SyncPID(pid)
 }
 
 func mergedEnv(base []string, overrides map[string]string) []string {
@@ -429,23 +380,11 @@ func (h *Harness) CommitChange(branch, path, content, message string) string {
 // run. Returns the IPC client connected to the daemon's socket.
 func (h *Harness) PushToGate(branch string) {
 	h.t.Helper()
-	h.PushToGateWithOptions(branch)
-}
-
-// PushToGateWithOptions is PushToGate plus one or more git push options (each
-// forwarded as `-o <opt>`), e.g. "no-mistakes.route=parent". The post-receive
-// hook forwards every GIT_PUSH_OPTION_* to notify-push.
-func (h *Harness) PushToGateWithOptions(branch string, pushOptions ...string) {
-	h.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	args := []string{"push", "no-mistakes", branch}
-	for _, opt := range pushOptions {
-		args = append(args, "-o", opt)
-	}
-	out, err := h.runGit(ctx, h.WorkDir, args...)
+	out, err := h.runGit(ctx, h.WorkDir, "push", "no-mistakes", branch)
 	if err != nil {
-		h.t.Fatalf("git push no-mistakes %s %v: %v\n%s", branch, pushOptions, err, out)
+		h.t.Fatalf("git push no-mistakes %s: %v\n%s", branch, err, out)
 	}
 }
 
@@ -517,12 +456,7 @@ func (h *Harness) WorktreeRefSHA(ref string) string {
 func (h *Harness) WaitForRun(branch string, timeout time.Duration) *ipc.RunInfo {
 	h.t.Helper()
 	return h.waitForRunStatus(branch, timeout, func(status types.RunStatus) bool {
-		switch status {
-		case types.RunCompleted, types.RunFailed, types.RunCancelled:
-			return true
-		default:
-			return false
-		}
+		return status.Terminal()
 	}, "finish")
 }
 
@@ -730,12 +664,11 @@ func (h *Harness) AgentInvocations() []Invocation {
 
 // Invocation is a single fake-agent call captured in $FAKEAGENT_LOG.
 type Invocation struct {
-	Time       string   `json:"time"`
-	Agent      string   `json:"agent"`
-	Executable string   `json:"executable,omitempty"`
-	Args       []string `json:"args"`
-	Prompt     string   `json:"prompt"`
-	CWD        string   `json:"cwd,omitempty"`
+	Time   string   `json:"time"`
+	Agent  string   `json:"agent"`
+	Args   []string `json:"args"`
+	Prompt string   `json:"prompt"`
+	CWD    string   `json:"cwd,omitempty"`
 }
 
 func (h *Harness) runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
@@ -767,7 +700,16 @@ func (h *Harness) repoID() string {
 // cleanup. Ignoring errors here is intentional: the daemon may already
 // be gone, the binary may have failed to build, etc. We just want the
 // next test (or the developer's real daemon) not to inherit our state.
+// Ownership release also unregisters the inventory entry and frees the
+// concurrency slot; suite-wrapper / TestMain reapers cover the path where
+// this Cleanup never runs.
 func (h *Harness) shutdown() {
+	if h.daemonOwn != nil {
+		h.daemonOwn.NMBin = h.NMBin
+		h.daemonOwn.Release()
+		h.daemonOwn = nil
+		return
+	}
 	if _, err := os.Stat(h.NMBin); err != nil {
 		return
 	}

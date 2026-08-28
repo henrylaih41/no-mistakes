@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/kunchenguid/no-mistakes/internal/ipc"
+import (
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
 
 // eventMsg wraps an IPC event received from the daemon.
 type eventMsg struct {
@@ -30,6 +34,43 @@ type rerunErrMsg struct {
 }
 
 type spinnerTickMsg struct{}
+
+type syncRefreshedMsg struct{ state branchsync.State }
+type syncAppliedMsg struct{ state branchsync.State }
+
+// runReconciledMsg carries an authoritative get_run snapshot requested after a
+// stream gap or a resubscribe.
+type runReconciledMsg struct {
+	run            *ipc.RunInfo
+	err            error
+	subscriptionID uint64
+}
+
+// stepDiffMsg carries a fix-review gate's working-tree diff, read on demand
+// because it is derived state that the event stream deliberately does not
+// carry.
+type stepDiffMsg struct {
+	step           types.StepName
+	diff           string
+	truncated      bool
+	err            error
+	requestID      uint64
+	subscriptionID uint64
+}
+
+type stepDiffRequest struct {
+	step      types.StepName
+	requestID uint64
+}
+
+type stepDiffReadyMsg struct {
+	step           types.StepName
+	requestID      uint64
+	subscriptionID uint64
+}
+
+// resubscribeMsg fires after the reconnect delay for a dropped stream.
+type resubscribeMsg struct{ subscriptionID uint64 }
 
 // connectedMsg signals that the event subscription is ready.
 type connectedMsg struct {

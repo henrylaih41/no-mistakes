@@ -47,6 +47,7 @@ func newAxiCmd() *cobra.Command {
 	cmd.AddCommand(newAxiRunCmd())
 	cmd.AddCommand(newAxiRespondCmd())
 	cmd.AddCommand(newAxiStatusCmd())
+	cmd.AddCommand(newAxiSyncCmd())
 	cmd.AddCommand(newAxiLogsCmd())
 	cmd.AddCommand(newAxiAbortCmd())
 	return cmd
@@ -66,6 +67,7 @@ type axiEnv struct {
 type axiEnvOptions struct {
 	ensureDaemonConn                       bool
 	deferGlobalConfigErrorForRunningDaemon bool
+	explicitRunID                          string
 }
 
 func (e *axiEnv) close() {
@@ -113,12 +115,28 @@ func openAxiEnvWithOptions(opts axiEnvOptions) (*axiEnv, error) {
 		globalCfg = config.DefaultGlobalConfig()
 	}
 	env := &axiEnv{p: p, d: d, cfg: globalCfg, globalConfigErr: err}
-	repo, err := findRepo(d)
-	if err != nil {
-		d.Close()
-		return nil, err
+	if opts.explicitRunID != "" {
+		run, lookupErr := d.GetRun(opts.explicitRunID)
+		if lookupErr != nil {
+			d.Close()
+			return nil, fmt.Errorf("get run: %w", lookupErr)
+		}
+		if run != nil {
+			repo, repoErr := d.GetRepo(run.RepoID)
+			if repoErr != nil {
+				d.Close()
+				return nil, fmt.Errorf("get run repository: %w", repoErr)
+			}
+			env.repo = repo
+		}
+	} else {
+		repo, findErr := findRepo(d)
+		if findErr != nil {
+			d.Close()
+			return nil, findErr
+		}
+		env.repo = repo
 	}
-	env.repo = repo
 	if opts.ensureDaemonConn {
 		if err := daemon.EnsureDaemon(p); err != nil {
 			env.close()
@@ -132,6 +150,10 @@ func openAxiEnvWithOptions(opts axiEnvOptions) (*axiEnv, error) {
 		env.client = client
 	}
 	return env, nil
+}
+
+func openAxiQueryEnv(explicitRunID string) (*axiEnv, error) {
+	return openAxiEnvWithOptions(axiEnvOptions{explicitRunID: strings.TrimSpace(explicitRunID)})
 }
 
 // runAxiHome renders the content-first home view: tool identity, repo, daemon
@@ -149,7 +171,7 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 	if alive, _ := daemon.IsRunning(env.p); alive {
 		daemonState = "running"
 	}
-	branch := currentBranchForRunResolve(cmd.Context())
+	branch, _ := currentBranchForRunResolve(cmd.Context())
 	branchDisplay := branch
 	if branchDisplay == "" {
 		branchDisplay = "unknown"
@@ -184,12 +206,17 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 
 	gated := false
 	retryGate := false
+	hasBranchSync := false
 	fingerprint := env.repo.ID + "|" + daemonState
 	if currentActive != nil {
 		steps, _ := env.d.GetStepsByRun(currentActive.ID)
 		rv := runViewFromDB(currentActive, steps)
 		annotateRunView(env, &rv)
 		fields = append(fields, runObjectFieldWithKey("active_run", rv))
+		if syncField := cachedBranchSyncField(cmd, currentActive.ID); syncField != nil {
+			fields = append(fields, *syncField)
+			hasBranchSync = true
+		}
 		if gate, ok := rv.awaitingStep(); ok {
 			gated = true
 			retryGate = gate.Status == string(types.StepStatusAwaitingRetry)
@@ -204,6 +231,10 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 		fingerprint += "|other:" + runStateFingerprint(rv)
 	} else {
 		fingerprint += "|idle"
+		if syncField := cachedBranchSyncField(cmd, ""); syncField != nil {
+			fields = append(fields, *syncField)
+			hasBranchSync = true
+		}
 	}
 
 	runs, err := env.d.GetRunsByRepo(env.repo.ID)
@@ -228,6 +259,9 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 		}
 	default:
 		help = append(help, "Run `no-mistakes axi status` to inspect the active run")
+	}
+	if hasBranchSync {
+		help = append(help, branchSyncAgentGuidance)
 	}
 	help = append(help, preserveGateFixCommitsGuidance)
 	help = append(help, "The calling agent drives AXI gates but does not replace the configured pipeline agent; run `no-mistakes doctor` if no native agent or ACP runner is available")

@@ -38,7 +38,7 @@
 把分支推给 `no-mistakes` 而不是 `origin`，它会拉起一个用完即弃的 worktree，跑一条 AI 驱动的校验流水线，**只有每一项检查都通过后**才把分支转发到配置的推送目标，并自动开出一个干净的 PR。
 
 - **不阻塞** —— 流水线在隔离的 worktree 里跑，不打断你手头的工作。
-- **不挑 agent** —— 支持 `claude`、`codex`、`rovodev`、`opencode`、`pi`、`copilot`、`grok`，或通过 `acpx` 用 `acp:<target>`，并支持有序 fallback。
+- **不挑 agent** —— 支持 `claude`、`codex`、`grok`、`rovodev`、`opencode`、`pi`、`copilot`、`antigravity`，也可通过 `acpx` 使用 `cursor` / `acp:<target>`，并支持有序 fallback。
 - **agent 原生** —— `/no-mistakes` 既能让编码 agent 完成一个任务再过网关，也能直接为已提交的工作过网关：它跑完流水线、让流水线应用安全的修复，剩下的升级给你。
 - **人始终说了算** —— 自动修复，还是逐条审查 findings，你决定。
 - **默认就是干净 PR** —— 推送、开 PR、盯 CI、自动修复失败，一气呵成。
@@ -101,7 +101,7 @@ $ no-mistakes
 
 如果是 GitHub fork 贡献，让 `origin` 指向父仓库，并用 `no-mistakes init --fork-url <your-fork-url>` 初始化。
 
-在 TUI 里，每条 **finding** 的处理权限由其 `action` 决定；完整语义和失败关闭规则以 [Finding actions](docs/src/content/docs/concepts/auto-fix.md#finding-actions) 为准。
+TUI 会明确标出每条 finding 的决定权限：**auto-fix** 表示结果已确定、边界清楚的修复，**ask-master** 交由网关负责人作实现判断，**ask-user** 才需要你决定产品行为或保证。
 每项检查变绿后，网关会把你的分支转发到配置的推送目标并替你开好 PR，不用手动 `git push origin`，也不用手写 PR 正文。
 想让编码 agent 无人值守地走完同一套流程？
 用 `/no-mistakes`（见下文）。
@@ -112,7 +112,7 @@ $ no-mistakes
 
 - **`git push no-mistakes`** —— 显式的 Git 路径。把已提交的分支推给网关 remote，而不是 `origin`。
 - **`no-mistakes`** —— TUI。改完之后运行它（无需先提交），向导会带你建分支、提交、推过网关，然后挂到这次运行上。`no-mistakes -y` 会把这一切自动做完。
-- **`/no-mistakes`** —— agent skill。用 `/no-mistakes <task>` 让编码 agent 完成一个任务再过网关，或用裸 `/no-mistakes` 为已提交的工作过网关。它跑完流水线、让流水线应用安全的修复，并在任何需要人来拍板的地方停下来问你。
+- **`/no-mistakes`** —— agent skill。用 `/no-mistakes <task>` 让编码 agent 完成一个任务再过网关，或用裸 `/no-mistakes` 为已提交的工作过网关。它跑完流水线、让流水线应用安全的修复，只在真正属于用户的产品行为或保证选择上停下来询问你。
 
 `no-mistakes init` 会为 Claude Code 及其他 agent 安装 `/no-mistakes` skill。底层上这个 skill 驱动的是 `no-mistakes axi` —— 同一套审批流程的非交互式 TOON 接口。
 
@@ -134,7 +134,7 @@ make docs    # 在 docs/dist 构建 Astro 文档站
 
 完整 target 列表见 `Makefile`。
 
-`make e2e-record` 会用真实的 `claude`、`codex`、`opencode` CLI 覆盖 `internal/e2e/fixtures/`，会消耗真实 API 额度，提交前应当审查。
+`make e2e-record` 会用真实的 `claude`、`codex`、`opencode` 和 `antigravity` CLI 覆盖 `internal/e2e/fixtures/`，会消耗真实 API 额度，提交前应当审查。
 
 ## Star 历史
 

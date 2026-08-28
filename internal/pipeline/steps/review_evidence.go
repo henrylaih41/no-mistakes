@@ -17,9 +17,8 @@ const (
 	reviewVerdictMaximumDuration = 2 * time.Second
 )
 
-// minimumReviewVerdictDuration is deliberately based only on bounded workload
-// counts. It is a sanity floor, not a prediction of model latency: activity
-// evidence remains independently mandatory even after the floor is met.
+// minimumReviewVerdictDuration is a bounded sanity floor, not a latency
+// prediction. Instrumented adapters must also report activity evidence.
 func minimumReviewVerdictDuration(workload *agent.InvocationWorkload) time.Duration {
 	floor := reviewVerdictBaseDuration
 	if workload != nil {
@@ -30,15 +29,25 @@ func minimumReviewVerdictDuration(workload *agent.InvocationWorkload) time.Durat
 	return min(floor, reviewVerdictMaximumDuration)
 }
 
-// validateReviewVerdictEvidence rejects syntactically successful review
-// answers that do not prove a real review turn occurred. Unknown adapter
-// metrics fail closed. A single model response is accepted only when the
-// adapter observed tool activity; otherwise multiple model round-trips are
-// required. Wall time is an independent lower bound scaled by diff workload.
 func validateReviewVerdictEvidence(result *agent.Result, elapsed time.Duration, workload *agent.InvocationWorkload) error {
 	return validateReviewVerdictEvidenceAtFloor(result, elapsed, minimumReviewVerdictDuration(workload))
 }
 
+func validateReportedReviewVerdictEvidence(a agent.Agent, result *agent.Result, elapsed, floor time.Duration) error {
+	provider := ""
+	if result != nil {
+		provider = result.Provider
+	}
+	if !agent.ReportsReviewVerdictEvidence(a, provider) {
+		return nil
+	}
+	return validateReviewVerdictEvidenceAtFloor(result, elapsed, floor)
+}
+
+// validateReviewVerdictEvidenceAtFloor rejects syntactically successful
+// answers that do not prove a real review turn occurred. Unknown adapter
+// metrics fail closed. A single model response requires observed tool use;
+// otherwise the adapter must report multiple productive model rounds.
 func validateReviewVerdictEvidenceAtFloor(result *agent.Result, elapsed, floor time.Duration) error {
 	if result == nil || result.Metrics == nil {
 		return fmt.Errorf("review adapter reported no activity metrics")
@@ -83,39 +92,20 @@ type reviewVerdictFailure struct {
 	reason   error
 }
 
-func reviewVerdictTriageOutcome(failures []reviewVerdictFailure, preserved types.Findings, fixSummary string) *pipeline.StepOutcome {
-	parts := make([]string, 0, len(failures))
-	for _, failure := range failures {
-		parts = append(parts, fmt.Sprintf("%s: %v", failure.reviewer, failure.reason))
-	}
-	detail := strings.Join(parts, "; ")
-	items := make([]types.Finding, 0, len(preserved.Items)+1)
-	items = append(items, types.Finding{
-		ID:          types.FindingIDReviewVerdictEvidence,
-		Severity:    "error",
-		Description: "The review verdict failed the minimum evidence contract after one cold retry (" + detail + "). Triage the reviewer or adapter before accepting this review.",
-		Action:      types.ActionAskMaster,
-		Source:      types.FindingSourceReviewGate,
-		ReviewScope: types.FindingReviewScopeSource,
-	})
-	items = append(items, preserved.Items...)
-	summary := "review verdict evidence invalid after cold retry"
-	if preserved.Summary != "" {
-		summary += "; valid reviewer reports: " + preserved.Summary
-	}
-	riskRationale := "No trustworthy complete source review verdict was produced."
-	if preserved.RiskRationale != "" {
-		riskRationale += " Valid reviewer reports: " + preserved.RiskRationale
-	}
+func reviewVerdictTriageOutcome(failure reviewVerdictFailure, fixSummary string) *pipeline.StepOutcome {
 	findings := types.Findings{
-		Items:          items,
-		Summary:        summary,
-		Tested:         preserved.Tested,
-		TestingSummary: preserved.TestingSummary,
-		Artifacts:      preserved.Artifacts,
-		RiskLevel:      "high",
-		RiskRationale:  riskRationale,
-		RiskScope:      types.FindingsRiskScopeSourceOrExternal,
+		Items: []types.Finding{{
+			ID:          types.FindingIDReviewVerdictEvidence,
+			Severity:    types.FindingSeverityError,
+			Description: fmt.Sprintf("The %s review verdict failed the minimum evidence contract after one cold retry (%v). Triage the reviewer or adapter before accepting this review.", failure.reviewer, failure.reason),
+			Action:      types.ActionAskMaster,
+			Source:      types.FindingSourceReviewGate,
+			ReviewScope: types.FindingReviewScopeSource,
+		}},
+		Summary:       "review verdict evidence invalid after cold retry",
+		RiskLevel:     "high",
+		RiskRationale: "No trustworthy complete source review verdict was produced.",
+		RiskScope:     types.FindingsRiskScopeSourceOrExternal,
 	}
 	encoded, _ := types.MarshalFindingsJSON(findings)
 	return &pipeline.StepOutcome{

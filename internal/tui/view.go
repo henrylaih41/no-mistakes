@@ -39,6 +39,7 @@ func (m Model) View() string {
 	}
 	pipelineView := renderPipelineView(m.run, pipelineSteps, leftWidth, m.spinnerFrame, pipelineHeight)
 	banner := renderOutcomeBanner(m.run, m.steps)
+	localBranch := renderLocalBranchStatus(m.branchSync, m.syncRefreshing, leftWidth)
 
 	// Action bar between pipeline box and findings/diff per DESIGN.md.
 	hasDiff := false
@@ -46,7 +47,15 @@ func (m Model) View() string {
 		raw, ok := m.stepDiffs[step.StepName]
 		hasDiff = ok && raw != ""
 	}
-	actionBar := renderActionBar(m.steps, showSelectionActions, allowFix, m.showDiff, selectedCount, totalCount, m.confirmAbort, hasDiff)
+	stepAwaiting := awaitingStep(m.steps)
+	approvalReady := m.approvalReady(stepAwaiting)
+	retryAvailable := m.reviewRetryAvailable()
+	actionBar := renderActionBar(m.steps, showSelectionActions, allowFix, m.showDiff, selectedCount, totalCount, m.confirmAbort, hasDiff, approvalReady, retryAvailable)
+	if stepAwaiting != nil && m.stepDiffTruncated[stepAwaiting.StepName] {
+		warning := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow)).
+			Render("⚠ Diff truncated at 512 KiB. Approval applies to the full diff.")
+		actionBar = warning + "\n" + actionBar
+	}
 
 	footer := renderFooter(m.done, m.showHelp, m.confirmAbort, m.yoloMode, m.run, m.latestVersion, m.width)
 	contentBudget := -1
@@ -60,6 +69,9 @@ func (m Model) View() string {
 			baseSections = append(baseSections, pipelineView)
 			if banner != "" {
 				baseSections = append(baseSections, banner)
+			}
+			if localBranch != "" {
+				baseSections = append(baseSections, localBranch)
 			}
 			if actionBar != "" {
 				baseSections = append(baseSections, actionBar)
@@ -91,8 +103,18 @@ func (m Model) View() string {
 		return true
 	}
 
-	if m.err != nil {
-		appendExtraSection(renderErrorBox(m.err, rightWidth))
+	visibleErr := m.err
+	if reviewErr := m.reviewRetryError(); reviewErr != nil {
+		visibleErr = reviewErr
+	}
+	if visibleErr != nil {
+		appendExtraSection(renderErrorBox(visibleErr, rightWidth))
+	}
+	if m.syncConfirm && m.branchSync != nil {
+		extraSections = append(extraSections, renderSyncConfirmation(*m.branchSync, rightWidth))
+	}
+	if m.recoverConfirm && m.branchSync != nil {
+		extraSections = append(extraSections, renderRecoverConfirmation(*m.branchSync, rightWidth))
 	}
 
 	// Modal editor takes priority over findings/logs so it always renders
@@ -237,6 +259,9 @@ func (m Model) View() string {
 		if banner != "" {
 			leftSections = append(leftSections, banner)
 		}
+		if localBranch != "" {
+			leftSections = append(leftSections, localBranch)
+		}
 		rightSections := make([]string, 0, len(extraSections)+1)
 		if actionBar != "" {
 			rightSections = append(rightSections, actionBar)
@@ -249,6 +274,9 @@ func (m Model) View() string {
 	sections := []string{pipelineView}
 	if banner != "" {
 		sections = append(sections, banner)
+	}
+	if localBranch != "" {
+		sections = append(sections, localBranch)
 	}
 	if actionBar != "" {
 		sections = append(sections, actionBar)

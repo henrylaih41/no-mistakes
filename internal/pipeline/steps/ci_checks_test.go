@@ -1,113 +1,38 @@
 package steps
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
+	"time"
 
-	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestDevinSeverityToFinding(t *testing.T) {
-	t.Parallel()
-	cases := map[string]string{
-		"high":    "error",
-		"HIGH":    "error",
-		" medium": "warning",
-		"low":     "info",
-		"":        "warning",
-		"unknown": "warning",
+func TestAllChecksPassedFailsClosed(t *testing.T) {
+	tests := []struct {
+		name  string
+		check scm.Check
+		ready bool
+	}{
+		{name: "pass", check: scm.Check{Bucket: scm.CheckBucketPass}, ready: true},
+		{name: "skip", check: scm.Check{Bucket: scm.CheckBucketSkip}, ready: true},
+		{name: "pending", check: scm.Check{Bucket: scm.CheckBucketPending}},
+		{name: "failure", check: scm.Check{Bucket: scm.CheckBucketFail}},
+		{name: "cancel", check: scm.Check{Bucket: scm.CheckBucketCancel}},
+		{name: "unknown", check: scm.Check{}, ready: false},
 	}
-	for in, want := range cases {
-		if got := devinSeverityToFinding(in); got != want {
-			t.Errorf("devinSeverityToFinding(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-// TestDevinFailureOutcomeMapsSeveritiesAndBlocks proves escalated Devin findings
-// carry the pipeline's error/warning/info severities (not the raw high/medium/low
-// buckets, which SeverityRank scores 0 and hasBlockingFindings ignores).
-func TestDevinFailureOutcomeMapsSeveritiesAndBlocks(t *testing.T) {
-	t.Parallel()
-	findings := []scm.ReviewComment{
-		{Path: "a.go", Line: 12, Severity: "high", Body: "off-by-one"},
-		{Path: "b.go", Line: 3, Severity: "low", Body: "nit"},
-		{Severity: "high", Body: "top-level summary"}, // no path -> skipped
-	}
-	outcome := devinFailureOutcome(findings, "exhausted")
-	if outcome == nil || !outcome.NeedsApproval {
-		t.Fatalf("expected approval-gated outcome, got %+v", outcome)
-	}
-	var parsed Findings
-	if err := json.Unmarshal([]byte(outcome.Findings), &parsed); err != nil {
-		t.Fatalf("unmarshal findings: %v", err)
-	}
-	if len(parsed.Items) != 2 {
-		t.Fatalf("items = %d, want 2 (top-level summary skipped)", len(parsed.Items))
-	}
-	if parsed.Items[0].Severity != "error" {
-		t.Errorf("items[0].Severity = %q, want error (mapped from high)", parsed.Items[0].Severity)
-	}
-	if parsed.Items[1].Severity != "info" {
-		t.Errorf("items[1].Severity = %q, want info (mapped from low)", parsed.Items[1].Severity)
-	}
-	if parsed.Items[0].Description != "a.go:12 off-by-one" {
-		t.Errorf("items[0].Description = %q, want file-scoped form", parsed.Items[0].Description)
-	}
-	// The high finding must now classify as blocking; under the old raw
-	// high/medium/low severities it would not.
-	if !hasBlockingFindings(parsed.Items) {
-		t.Error("expected mapped findings to be blocking")
-	}
-}
-
-// TestWithDevinManualVerify_FoldsSignalIntoCIFailureOutcome is the review-codex-2-1
-// regression: when checks are failing AND Devin reported a body-only not-green
-// signal, the CI-failure park must still carry the manual-verify finding so the
-// not-green Devin signal is never hidden behind a CI-only gate (ruling #3). An
-// empty reason (no manual-review state) must be a byte-identical no-op.
-func TestWithDevinManualVerify_FoldsSignalIntoCIFailureOutcome(t *testing.T) {
-	t.Parallel()
-
-	base := ciFailureOutcome([]string{"build"}, false, "CI failures require manual intervention")
-	if got := withDevinManualVerify(base, ""); got.Findings != base.Findings {
-		t.Fatalf("empty reason must not alter findings:\n got %q\nwant %q", got.Findings, base.Findings)
-	}
-
-	combined := withDevinManualVerify(
-		ciFailureOutcome([]string{"build"}, false, "CI failures require manual intervention"),
-		cimonitor.ReviewManualVerifyMsg,
-	)
-	if !combined.NeedsApproval {
-		t.Fatal("combined outcome must still be a NeedsApproval park")
-	}
-	var parsed Findings
-	if err := json.Unmarshal([]byte(combined.Findings), &parsed); err != nil {
-		t.Fatalf("unmarshal findings: %v", err)
-	}
-	if !strings.Contains(parsed.Summary, cimonitor.ReviewManualVerifyMsg) {
-		t.Errorf("summary must mention the manual-verify reason, got %q", parsed.Summary)
-	}
-	foundCheck, foundManual := false, false
-	for _, it := range parsed.Items {
-		if strings.Contains(it.Description, "build") {
-			foundCheck = true
-		}
-		if it.Description == cimonitor.ReviewManualVerifyMsg {
-			foundManual = true
-			if it.Action != types.ActionAskMaster {
-				t.Errorf("manual-verify finding action = %q, want %q", it.Action, types.ActionAskMaster)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checks := []scm.Check{tt.check}
+			if got := allChecksPassed(checks); got != tt.ready {
+				t.Fatalf("allChecksPassed() = %v, want %v", got, tt.ready)
 			}
-		}
+			if !tt.ready && !hasUnresolvedChecks(checks) && tt.check.Bucket != scm.CheckBucketFail {
+				t.Fatal("non-ready check must be unresolved or failing")
+			}
+		})
 	}
-	if !foundCheck {
-		t.Error("combined outcome must still carry the failing-check finding")
-	}
-	if !foundManual {
-		t.Error("combined outcome must carry the Devin manual-verify finding")
+	if allChecksPassed(nil) {
+		t.Fatal("empty checks must not pass")
 	}
 }
 
@@ -128,5 +53,60 @@ func TestPendingCheckMatchesLastFixed_SpecialCheckNames(t *testing.T) {
 	}
 	if pendingCheckMatchesLastFixed(checks, lastFixedChecks) {
 		t.Fatalf("expected unrelated pending check not to match encoded last fixed checks %q", lastFixedChecks)
+	}
+}
+
+// A cancelled check can be a fix target, so the completion snapshot that lets
+// the step notice its own CI re-run has to cover it. Keyed on the fail bucket
+// alone, a cancelled-only fix round records nothing and the step can only log
+// "fix already attempted" until its idle timeout.
+func TestTerminalFailureCompletionTimesCoverCancelledChecks(t *testing.T) {
+	t.Parallel()
+
+	completed := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	cancelled := scm.Check{Name: "build", Bucket: scm.CheckBucketCancel, State: "CANCELLED", CompletedAt: completed}
+
+	before := terminalFailureCompletionTimes([]scm.Check{cancelled})
+	if got, ok := before["build"]; !ok || !got.Equal(completed) {
+		t.Fatalf("completion times = %v, want the cancelled check recorded at %v", before, completed)
+	}
+
+	if terminalFailureCompletedAfter([]scm.Check{cancelled}, before) {
+		t.Fatal("the same observation must not read as a re-run")
+	}
+
+	rerun := cancelled
+	rerun.CompletedAt = completed.Add(2 * time.Minute)
+	if !terminalFailureCompletedAfter([]scm.Check{rerun}, before) {
+		t.Fatal("a cancelled check that completed again after the fix push must read as a re-run")
+	}
+}
+
+// The fail bucket keeps the behavior it always had.
+func TestTerminalFailureCompletionTimesStillCoverFailingChecks(t *testing.T) {
+	t.Parallel()
+
+	completed := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	failing := scm.Check{Name: "lint", Bucket: scm.CheckBucketFail, State: "FAILURE", CompletedAt: completed}
+
+	before := terminalFailureCompletionTimes([]scm.Check{failing})
+	if got, ok := before["lint"]; !ok || !got.Equal(completed) {
+		t.Fatalf("completion times = %v, want the failing check recorded at %v", before, completed)
+	}
+
+	rerun := failing
+	rerun.CompletedAt = completed.Add(time.Minute)
+	if !terminalFailureCompletedAfter([]scm.Check{rerun}, before) {
+		t.Fatal("a failing check that completed again after the fix push must read as a re-run")
+	}
+
+	// Passing and skipped checks are not failures and must stay out of the
+	// snapshot, or an unrelated green check would reset the fix bookkeeping.
+	quiet := terminalFailureCompletionTimes([]scm.Check{
+		{Name: "docs", Bucket: scm.CheckBucketPass, State: "SUCCESS", CompletedAt: completed},
+		{Name: "flaky", Bucket: scm.CheckBucketSkip, State: "SKIPPED", CompletedAt: completed},
+	})
+	if quiet != nil {
+		t.Fatalf("completion times = %v, want nothing recorded for non-failures", quiet)
 	}
 }

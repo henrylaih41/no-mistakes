@@ -9,9 +9,12 @@ import (
 
 func TestMerge_GlobalOnly(t *testing.T) {
 	global := &GlobalConfig{
-		Agent:     types.AgentClaude,
-		CITimeout: 4 * time.Hour,
-		LogLevel:  "info",
+		Agent:              types.AgentClaude,
+		CITimeout:          4 * time.Hour,
+		ReviewAgentTimeout: 2 * time.Hour,
+		AgentTimeout:       15 * time.Minute,
+		TestAgentTimeout:   45 * time.Minute,
+		LogLevel:           "info",
 	}
 	repo := &RepoConfig{}
 
@@ -21,6 +24,30 @@ func TestMerge_GlobalOnly(t *testing.T) {
 	}
 	if cfg.CITimeout != 4*time.Hour {
 		t.Errorf("ci_timeout = %v", cfg.CITimeout)
+	}
+	if cfg.ReviewAgentTimeout != 2*time.Hour {
+		t.Errorf("review_agent_timeout = %v", cfg.ReviewAgentTimeout)
+	}
+	if cfg.AgentTimeout != 15*time.Minute {
+		t.Errorf("agent_timeout = %v", cfg.AgentTimeout)
+	}
+	if cfg.TestAgentTimeout != 45*time.Minute {
+		t.Errorf("test_agent_timeout = %v", cfg.TestAgentTimeout)
+	}
+}
+
+func TestMergeLeavesEvalProvenanceDisabledUntilExplicitlyEnabled(t *testing.T) {
+	global := &GlobalConfig{SourceYAML: []byte("agent: claude\n"), Agent: types.AgentClaude}
+	repo := &RepoConfig{IgnorePatterns: []string{"vendor/**"}}
+	cfg := Merge(global, repo)
+	if cfg.CaptureEvalProvenance || len(cfg.ReplayGlobalYAML) != 0 || len(cfg.ReplayRepoYAML) != 0 {
+		t.Fatalf("ordinary merged config contains eval provenance: %#v", cfg)
+	}
+	if err := cfg.EnableEvalProvenance(global, repo); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CaptureEvalProvenance || string(cfg.ReplayGlobalYAML) != "agent: claude\n" || len(cfg.ReplayRepoYAML) == 0 {
+		t.Fatalf("enabled eval provenance = %#v", cfg)
 	}
 }
 

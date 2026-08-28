@@ -77,10 +77,7 @@ func TestAssertGateTrustedConfigReadable_PresentAndParseableIsOK(t *testing.T) {
 		t.Errorf("present parseable trusted config must NOT abort, got: %v", err)
 	}
 	// And the value is honored trusted-only.
-	got, err := loadTrustedRepoConfig(context.Background(), wt, sha, "run")
-	if err != nil {
-		t.Fatalf("load trusted repo config: %v", err)
-	}
+	got := loadTrustedRepoConfig(context.Background(), wt, sha, "run")
 	if got == nil || !got.DisableProjectSettings {
 		t.Errorf("trusted config must carry disable_project_settings=true, got %+v", got)
 	}

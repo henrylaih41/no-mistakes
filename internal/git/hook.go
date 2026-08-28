@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -10,7 +11,111 @@ import (
 	"strings"
 )
 
-var runGit = Run
+var runGit = RunBare
+
+const gateConfigStampFile = "no-mistakes-gate-config"
+const preservedPreReceiveHook = "pre-receive.no-mistakes-user"
+
+// PreReceiveHookScript returns the fail-closed admission hook that runs before
+// Git mutates any managed gate ref. The daemon authenticates the hook process's
+// ancestry, so a validation-step descendant cannot bypass CLI guards with a
+// direct push.
+func PreReceiveHookScript() string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "no-mistakes"
+	}
+	return preReceiveHookScript(exe)
+}
+
+func preReceiveHookScript(command string) string {
+	return `#!/bin/sh
+# no-mistakes pre-receive hook
+# Authorize the pushing process before any managed gate ref changes.
+NM_BIN=` + shellSingleQuote(command) + `
+if [ ! -f "$NM_BIN" ]; then
+  NM_BIN="$(command -v no-mistakes 2>/dev/null || echo no-mistakes)"
+fi
+GATE_DIR=$(git rev-parse --absolute-git-dir 2>/dev/null || :)
+case "$GATE_DIR" in
+  /*) ;;
+  *)
+    HOOK_PATH=$0
+    case "$HOOK_PATH" in
+      */*) HOOK_DIR=${HOOK_PATH%/*} ;;
+      *) HOOK_DIR=. ;;
+    esac
+    GATE_DIR=$(cd "$HOOK_DIR/.." 2>/dev/null && (/bin/pwd -P 2>/dev/null || pwd -P) || :)
+    ;;
+esac
+out=$(NM_HOOK_HELPER=1 "$NM_BIN" daemon admit-push --gate "$GATE_DIR" 2>&1)
+status=$?
+if [ $status -ne 0 ]; then
+  printf 'no-mistakes: gate push refused before ref mutation:\n%s\n' "$out" >&2
+  exit $status
+fi
+USER_HOOK="$GATE_DIR/hooks/` + preservedPreReceiveHook + `"
+if [ -x "$USER_HOOK" ]; then
+  exec "$USER_HOOK"
+fi
+exit 0
+`
+}
+
+func isManagedPreReceiveHook(content []byte) bool {
+	text := string(content)
+	return strings.Contains(text, "# no-mistakes pre-receive hook") && strings.Contains(text, "daemon admit-push")
+}
+
+// RefreshManagedPreReceiveHook installs or refreshes admission while preserving
+// an existing user hook behind the managed wrapper.
+func RefreshManagedPreReceiveHook(bareDir string) (bool, error) {
+	hooksDir := filepath.Join(bareDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return false, err
+	}
+	hookPath := filepath.Join(hooksDir, "pre-receive")
+	companion := filepath.Join(hooksDir, preservedPreReceiveHook)
+	desired := []byte(PreReceiveHookScript())
+	existing, err := os.ReadFile(hookPath)
+	if err == nil {
+		if string(existing) == string(desired) {
+			return false, nil
+		}
+		if !isManagedPreReceiveHook(existing) {
+			if _, companionErr := os.Stat(companion); companionErr == nil {
+				return false, fmt.Errorf("preserve pre-receive hook: companion already exists")
+			} else if !os.IsNotExist(companionErr) {
+				return false, companionErr
+			}
+			if err := os.Rename(hookPath, companion); err != nil {
+				return false, fmt.Errorf("preserve pre-receive hook: %w", err)
+			}
+			if err := writeGateFileAtomic(hookPath, desired, 0o755, ".pre-receive-*"); err != nil {
+				_ = os.Rename(companion, hookPath)
+				return false, err
+			}
+			return true, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := writeGateFileAtomic(hookPath, desired, 0o755, ".pre-receive-*"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// RefreshManagedGateHooks owns the complete receive boundary.
+func RefreshManagedGateHooks(bareDir string) error {
+	if _, err := RefreshManagedPreReceiveHook(bareDir); err != nil {
+		return err
+	}
+	if _, err := RefreshManagedPostReceiveHook(bareDir); err != nil {
+		return err
+	}
+	return nil
+}
 
 // PostReceiveHookScript returns the shell script for the post-receive hook.
 // The hook notifies the daemon via the CLI so it works across platforms.
@@ -150,8 +255,12 @@ func RefreshManagedPostReceiveHook(bareDir string) (bool, error) {
 }
 
 func writeHookFileAtomic(path string, content []byte) error {
+	return writeGateFileAtomic(path, content, 0o755, ".post-receive-*")
+}
+
+func writeGateFileAtomic(path string, content []byte, mode os.FileMode, pattern string) error {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".post-receive-*")
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}
@@ -161,7 +270,7 @@ func writeHookFileAtomic(path string, content []byte) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Chmod(0o755); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -169,6 +278,38 @@ func writeHookFileAtomic(path string, content []byte) error {
 		return err
 	}
 	return os.Rename(tmpPath, path)
+}
+
+// GateConfigCurrent is a subprocess-free restart check for a gate that has
+// completed the current hook and config migration. The stamp includes the
+// rendered managed hook and a version marker for the non-hook config contract.
+// Bump the marker when receive or worktree config requirements change.
+func GateConfigCurrent(bareDir string) bool {
+	content, err := os.ReadFile(filepath.Join(bareDir, gateConfigStampFile))
+	if err != nil || string(content) != gateConfigStampContent() {
+		return false
+	}
+	// Admission is a security boundary, not merely notification. Verify the
+	// managed pre-receive bytes on every startup so a stale stamp cannot hide a
+	// removed or replaced guard. This remains filesystem-only for current gates.
+	preReceive, err := os.ReadFile(filepath.Join(bareDir, "hooks", "pre-receive"))
+	return err == nil && string(preReceive) == PreReceiveHookScript()
+}
+
+// MarkGateConfigCurrent atomically records a fully completed gate migration.
+// Callers must validate the gate and finish every mutation before marking it.
+func MarkGateConfigCurrent(bareDir string) error {
+	return writeGateFileAtomic(
+		filepath.Join(bareDir, gateConfigStampFile),
+		[]byte(gateConfigStampContent()),
+		0o644,
+		".no-mistakes-gate-config-*",
+	)
+}
+
+func gateConfigStampContent() string {
+	sum := sha256.Sum256([]byte("gate-config-v2\x00" + PreReceiveHookScript() + "\x00" + PostReceiveHookScript()))
+	return fmt.Sprintf("v2:%x\n", sum)
 }
 
 // IsolateHooksPath protects the gate's post-receive hook from being
@@ -198,25 +339,33 @@ func writeHookFileAtomic(path string, content []byte) error {
 // Idempotent: safe to call on an already-configured bare repo to
 // migrate older installs when per-worktree config is available.
 func IsolateHooksPath(ctx context.Context, bareDir string) error {
+	_, err := EnsureHooksPathIsolation(ctx, bareDir)
+	return err
+}
+
+func EnsureHooksPathIsolation(ctx context.Context, bareDir string) (bool, error) {
 	if _, err := runGit(ctx, bareDir, "config", "--worktree", "--get", "core.hookspath"); err != nil {
 		if isWorktreeConfigUnsupported(err) {
-			return nil
+			return false, nil
 		}
 	}
 	if _, err := runGit(ctx, bareDir, "config", "extensions.worktreeConfig", "true"); err != nil {
-		return fmt.Errorf("enable worktree config: %w", err)
+		return false, fmt.Errorf("enable worktree config: %w", err)
 	}
 	hooksDir, err := filepath.Abs(filepath.Join(bareDir, "hooks"))
 	if err != nil {
-		return fmt.Errorf("resolve hooks dir: %w", err)
+		return false, fmt.Errorf("resolve hooks dir: %w", err)
 	}
 	if _, err := runGit(ctx, bareDir, "config", "--worktree", "core.hookspath", hooksDir); err != nil {
 		if isWorktreeConfigUnsupported(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("pin core.hookspath per-worktree: %w", err)
+		return false, fmt.Errorf("pin core.hookspath per-worktree: %w", err)
 	}
-	return relocateCoreBareToWorktreeScope(ctx, bareDir)
+	if err := relocateCoreBareToWorktreeScope(ctx, bareDir); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // relocateCoreBareToWorktreeScope moves core.bare out of shared local config

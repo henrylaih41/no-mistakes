@@ -25,25 +25,38 @@ Valid step names are `intent`, `rebase`, `review`, `test`, `document`, `lint`, `
 
 Initialize or refresh the gate for the current repository.
 
+`init` requires an `origin` remote to identify the upstream repository: later pipeline steps push validated branches to the configured target and open pull requests against that upstream. If `origin` is missing, add it with `git remote add origin <url>`, replacing `<url>` with the upstream repository's URL, then re-run `init`.
+
 ```sh
 no-mistakes init
 no-mistakes init --fork-url git@github.com:you/my-repo.git
+no-mistakes init --worktree-root ~/work/my-repo-runs
 ```
 
-| Flag         | Type     | Default | Description                                                                   |
-| ------------ | -------- | ------- | ----------------------------------------------------------------------------- |
-| `--fork-url` | `string` | (none)  | GitHub fork remote URL to push branches to while opening PRs against `origin` |
+| Flag              | Type     | Default | Description                                                                                      |
+| ----------------- | -------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `--fork-url`      | `string` | (none)  | GitHub fork remote URL to push branches to while opening PRs against `origin`                  |
+| `--worktree-root` | `string` | (none)  | Directory to create this repository's run worktrees in; prints the `worktree_roots` entry to add |
 
-Creates or refreshes a local bare repo, installs the post-receive hook, best-effort isolates the gate repo's hook path from shared git config changes when Git supports `config --worktree`, adds or repairs the `no-mistakes` git remote, detects the default branch, records or updates the repo in SQLite, installs the `/no-mistakes` agent skill at user level into `~/.claude/skills/no-mistakes/SKILL.md` and `~/.agents/skills/no-mistakes/SKILL.md`, and ensures the daemon is running, installing the managed service when available and falling back to a detached daemon otherwise.
-`init` writes no skill files into the repo; the user-level copies cover the supported skill-aware agents that read those locations (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex, OpenCode, Rovo Dev, and Pi) across all repos.
+Creates or refreshes a local bare repo, installs the managed pre-receive admission and post-receive notification hooks, best-effort isolates the gate repo's hook path from shared git config changes when Git supports `config --worktree`, adds or repairs the `no-mistakes` git remote, detects the default branch, records or updates the repo in SQLite, installs the `/no-mistakes` agent skill at user level into `~/.claude/skills/no-mistakes/SKILL.md` and `~/.agents/skills/no-mistakes/SKILL.md`, and ensures the daemon is running, installing the managed service when available and falling back to a detached daemon otherwise.
+`init` writes no skill files into the repo; the user-level copies serve Claude Code (`~/.claude/skills`) and agents that use the vendor-neutral `~/.agents/skills` convention (Codex, OpenCode, Rovo Dev, and Pi) across all repos. Grok Build is a pipeline runner and does not consume this installed skill.
 If the home `.claude` links to `.agents`, `.claude/skills` links to `.agents/skills`, or the reverse, `init` follows that layout and still makes the skill readable from both logical paths.
 If the repo still contains a vendored skill copy written by an older no-mistakes version, `init` leaves it untouched and prints a notice that it is no longer needed and can be removed.
 The gate advertises Git push-option support, so you can skip steps for one push with `git push -o no-mistakes.skip=test,lint no-mistakes <branch>`.
-You can also disable only the auxiliary Devin review loop for one push with `git push -o no-mistakes.review-loop=off no-mistakes <branch>`; the `ci` step still monitors checks, merge, and close state.
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and pass `--fork-url` with your fork remote URL.
-The push, rebase branch-sync, and CI auto-fix pushes use the fork, while GitHub PR and CI commands stay scoped to the parent repository and create PRs with `--head <fork-owner>:<branch>`.
+The Push step and rebase branch-sync use the fork, including when CI repair restarts validation and reaches Push again, while GitHub PR and CI commands stay scoped to the parent repository and create PRs with `--head <fork-owner>:<branch>`.
 Fork routing currently requires both `origin` and `--fork-url` to be GitHub remotes with owner/repo paths.
+
+`--worktree-root` is for directory-scoped toolchain configuration (mise, direnv), which resolves by path ancestry and so never reaches a run worktree under `NM_HOME`.
+The flag resolves the directory, then prints the [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) entry to add to `~/.no-mistakes/config.yaml`; the global config is hand-maintained, so `init` never rewrites it for you.
+When the file already has a `worktree_roots:` block, `init` prints just the entry line to add under it - a second `worktree_roots:` key would make the config unparseable and stop the daemon.
+Runs are created at `<dir>/<run id>` once the entry is in place; no-mistakes only ever touches the directories its own run records name, and everything else in that directory is left alone.
+`init` rejects the directories the daemon would refuse to start on, so the entry it prints is always one you can paste: a directory inside `NM_HOME`, inside the repository being initialized or any other gated checkout, already used by another checkout (it names that checkout), or that exists as a non-directory.
+
+Two refusals apply to every `init`, with or without the flag.
+It refuses to register a checkout that contains a directory an existing [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) entry points at, naming that entry, because registering it is what would make the placement unusable and stop the daemon; place the checkout elsewhere or repoint the entry first.
+It also refuses to register anything while `~/.no-mistakes/config.yaml` does not load, naming the fault, because the daemon refuses to start on that same config.
 
 Re-running `init` on an already-initialized repo succeeds and reports `Gate already initialized (refreshed)`.
 It refreshes managed gate wiring, origin/default-branch metadata, hook-path isolation, and the installed agent skill, overwriting any stale `SKILL.md` content from an older binary.
@@ -59,6 +72,8 @@ Skill installation is best-effort: if the skill write fails, init reports it and
 Agent eXperience Interface for non-interactive agents.
 Most agent workflows use the installed `/no-mistakes` skill, which drives this command surface underneath.
 It prints TOON to stdout, prints progress to stderr, and uses structured stdout errors with exit code `1` for operational failures and `2` for bad usage.
+At the TOON output boundary, unsupported C0 control bytes are rendered as visible `\xNN` escapes while tabs, carriage returns, newlines, printable Unicode, and the underlying durable logs remain unchanged.
+If TOON encoding still fails, AXI prints a structured error instead of returning successful empty stdout.
 The calling agent drives AXI approval gates but does not replace the configured pipeline agent that performs validation.
 
 ```sh
@@ -71,8 +86,9 @@ If an active run object is parked at a decision gate, it includes `awaiting_agen
 That field is observability only; the `gate:` object still tells the agent which response to send.
 If a step is actively `running` or `fixing`, the run object can also include an `active_steps` table with `active_for`, `last_activity`, native `agent_pid` when one is currently running, and the current execution or fix round.
 When only another branch has an active run, that run appears as `other_branch_active_run`; the help tells agents to leave it alone and start validation for the current branch.
-AXI help and outputs also repeat the preserve-prior-gate-progress contract: after a gate round has already produced fix commits, additional fixes belong on the same branch followed by a fresh `no-mistakes axi run --intent "..."` with the original user intent.
-Agents must not abort-and-restart, reset, or create a replacement branch in a way that drops prior gate-fix commits.
+AXI help and outputs always repeat the preserve-prior-gate-progress contract: after a gate round has already produced fix commits, additional fixes belong on the same branch.
+When a relevant `branch_sync` object is present, they also include version-matched synchronization guidance to follow before a post-pipeline local commit or fresh run.
+Agents must not abort-and-restart, reset, replace the branch, or improvise Git recovery in a way that drops prior gate-fix commits.
 A fresh run re-validates the current branch state, so already-resolved findings do not re-surface.
 
 ## no-mistakes axi run
@@ -83,50 +99,42 @@ An active run on another branch does not block starting validation for the curre
 ```sh
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
-no-mistakes axi run --intent "the user's goal" --design-context docs/design.md
-no-mistakes axi run --intent "the user's goal" --review-loop=off
+no-mistakes axi run --intent "the user's goal" --design-context docs/architecture.md
 no-mistakes axi run --intent "the user's goal" --yes
 ```
 
-| Flag               | Type       | Default | Description                                                                |
-| ------------------ | ---------- | ------- | -------------------------------------------------------------------------- |
-| `--intent`         | `string`   | (none)  | What the user set out to accomplish; required to start a new run           |
-| `-y`, `--yes`      | `bool`     | `false` | Auto-resolve readable gates until a decision point or outcome              |
-| `--skip`           | `string`   | (none)  | Comma-separated pipeline steps to skip                                     |
-| `--design-context` | `string[]` | Empty   | Repeatable design-context text file path for review and fix prompts        |
-| `--review-loop`    | `string`   | (none)  | Set to `off` to disable only Devin for this run; CI monitoring still runs  |
+| Flag               | Type       | Default | Description                                                          |
+| ------------------ | ---------- | ------- | -------------------------------------------------------------------- |
+| `--intent`         | `string`   | (none)  | What the user set out to accomplish; required to start a new run     |
+| `--design-context` | `string[]` | (none)  | Design-context text file to materialize for this run; repeatable     |
+| `-y`, `--yes`      | `bool`     | `false` | Auto-resolve readable gates until a decision point or outcome        |
+| `--skip`           | `string`   | (none)  | Comma-separated pipeline steps to skip                               |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
 Err on the side of completeness: include the goal, important decisions and tradeoffs, constraints or approaches ruled in or out, and explicit requests that might otherwise look surprising in the diff.
+`--design-context` supplies design notes, ADRs, or issue agreements that reviewers and fixers must check the change against. Relative paths resolve from the invoking working directory, `~/` is expanded, explicit files may live outside the repository, and the flag can be repeated. The files must be regular UTF-8 text files and are copied into the new run once; reattaching to an active run keeps its already-materialized context and does not replace it. The repo-config [`design_context.files`](/no-mistakes/reference/repo-config/#design_contextfiles) field owns the shared size limits, immutable-copy behavior, and prompt safety contract.
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 `axi run` starts a run even when there are no new commits to push, including the first run for a branch the gate already mirrors but has never validated — for example a push whose hook notification was dropped while the daemon was down — rather than failing with `no previous run for branch`.
 Reattaching to an in-flight run does not require `--intent`.
+Reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
+When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
+That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
 Reattaching to an in-flight run can proceed while the daemon is already running even if the global config file has become invalid, but starting a fresh run still requires valid global config.
 Starting a fresh run also requires a runnable effective pipeline agent.
-If the configured native agent or ACP bridge is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
-`--design-context` supplies run-scoped design notes, ADRs, issue agreements, or other text context that reviewers and fixers should check the implementation against.
-Relative paths resolve from the current working tree before the run is triggered; absolute paths are allowed because the flag is explicit local user input.
-The daemon reads those files once at run start and stores the materialized context on the run, so later review and fix rounds use the same contract even if the files change.
-Missing, unreadable, non-text, or invalid context files fail loudly instead of being silently ignored.
-Reattaching to an in-flight run does not add or replace its design context.
-`--review-loop=off` disables only the post-PR Devin review loop for the run.
-Use it when the PR base repo is not Devin-applicable or the run should rely on normal CI checks only; it does not skip the `ci` step, so GitHub checks, merge, and close monitoring continue.
+If the configured native agent or ACP runner is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
 With `--yes`, `axi run` treats `action: auto-fix`, `action: ask-master`, and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
+If an agent invocation exhausts its bounded transient provider/runtime retries, `--yes` retries that parked step once. That automatic retry is persisted per step; another consecutive transient failure remains at `awaiting_agent_retry` for an explicit decision. `--yes` never crosses an `awaiting_triage` Review gate.
 If a parked gate's findings JSON cannot be parsed, AXI renders `findings_unreadable` with a command for the full step log and `--yes` stops without fixing or approving that gate. The same fail-closed rule applies to `fix_review` and to a gate that `--yes` already tried to fix.
-`--yes` does not override a review step parked at `awaiting_triage`; it returns that gate for master triage instead.
-When a step parks at `awaiting_agent_retry` after an exhausted transient agent/provider failure, `--yes` auto-retries that step at most once, records the retry on the run, and leaves a second consecutive transient parked for an explicit `--action retry`.
 Without `--yes`, `ask-master` routes to the documented gate owner for implementation judgment; if none exists it falls back to the user. `ask-user` routes only the concise unresolved choice, options, consequences, and recommendation to the user.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking findings plus `ask-master` and `ask-user` review findings park for a decision unless configuration explicitly opts back into review auto-fix.
-Review gates render `status: awaiting_triage` after a second invalid [review verdict evidence](/no-mistakes/reference/pipeline-steps/#review) result, when `review.max_fix_rounds` is reached, or when both causes apply.
-The diagnostic `review-verdict-evidence` finding cannot be selected for a source-fix round. At evidence-only triage, preserved real reviewer findings remain selectable through a normal `axi respond --action fix`; when the fix-round cap applies, a plain fix is refused and another fix round requires explicit master triage with `--fix-override --override-reason`.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
-When the CI step is still monitoring an open PR and checks are green, `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge.
+When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
 Treat that as the agent stopping point: ask the user to review and merge the PR from the `help` line.
 If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
-The monitor auto-rebases onto the base, resolves actual conflicts, and re-pushes the branch; a PR that is merely behind but clean needs no command.
+The monitor auto-rebases onto the base, resolves actual conflicts, restarts validation at Review, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
 Use `no-mistakes rerun` only after that monitor is no longer running, such as a closed PR, aborted or superseded run, idle timeout, or exhausted CI auto-fix attempts.
 Successful outcomes (`checks-passed` and `passed`) also carry `help` instructions telling the agent to summarize the run.
 When the pipeline applied fixes, they include a `fixes` table and a `help` instruction to acknowledge the misses and list those fixes for the user's review.
@@ -139,26 +147,27 @@ Answer the current approval gate and continue until the next gate, CI-ready deci
 no-mistakes axi respond --action approve
 no-mistakes axi respond --action fix --findings F1,F2 --instructions "optional guidance"
 no-mistakes axi respond --action fix --add-finding '{"description":"...","action":"auto-fix"}'
-no-mistakes axi respond --action fix --fix-override --override-reason "master triage: merge-blocking" --findings F1
 no-mistakes axi respond --action retry
+no-mistakes axi respond --action fix --fix-override --override-reason "master triage ruling" --findings F1
 no-mistakes axi respond --action skip
 ```
 
-| Flag             | Type     | Default       | Description                                                          |
-| ---------------- | -------- | ------------- | -------------------------------------------------------------------- |
-| `--action`       | `string` | (none)        | `approve`, `fix`, `retry`, or `skip`; required                       |
-| `--step`         | `string` | awaiting step | Step to respond to                                                   |
-| `--findings`     | `string` | (none)        | Comma-separated finding IDs for `--action fix`                       |
-| `--instructions` | `string` | (none)        | Guidance applied to selected findings                                |
-| `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
-| `--fix-override` | `bool`   | `false`       | Permit one review fix round when `max_fix_rounds` caused `awaiting_triage` |
-| `--override-reason` | `string` | (none)     | Required master triage reason for `--fix-override`; persisted         |
-| `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve readable subsequent gates until a decision point or outcome |
+| Flag                | Type     | Default       | Description                                                               |
+| ------------------- | -------- | ------------- | ------------------------------------------------------------------------- |
+| `--action`          | `string` | (none)        | `approve`, `fix`, `retry`, or `skip`; required                            |
+| `--step`            | `string` | awaiting step | Step to respond to                                                        |
+| `--findings`        | `string` | (none)        | Comma-separated finding IDs for `--action fix`                            |
+| `--instructions`    | `string` | (none)        | Guidance applied to selected findings                                     |
+| `--add-finding`     | `string` | (none)        | JSON finding object to add and fix                                        |
+| `--fix-override`    | `bool`   | `false`       | Allow one more Review fix round after the configured cap                  |
+| `--override-reason` | `string` | (none)        | Master triage ruling required by `--fix-override`                         |
+| `-y`, `--yes`       | `bool`   | `false`       | Auto-resolve readable subsequent gates until a decision point or outcome  |
 
-After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix`, `ask-master`, and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when CI is green but the PR still needs a human merge.
-It also stops at `awaiting_triage`; it never supplies `--fix-override` implicitly.
-Use `--action retry` only when a step is parked at `awaiting_agent_retry` after an agent invocation exhausted bounded retries for a transient provider/runtime failure; it takes no findings, fix instructions, or `--fix-override`, and does not create a review fix round.
-Under `--yes`, that transient park auto-retries at most once per step, with the auto retry persisted on the run; a second consecutive transient stays parked for an explicit `--action retry`.
+`--action retry` is valid only at `awaiting_agent_retry`. It retries the same agent step without selecting findings or creating a Review fix round, and it cannot be combined with findings, fix instructions, user-added findings, or `--fix-override`.
+
+An `awaiting_triage` Review gate caused by [`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds) accepts another fix only with `--fix-override`, a non-empty `--override-reason`, and the findings to fix. The reason is persisted for attribution and authorizes one additional round. A verdict-evidence triage item is diagnostic and cannot be selected for source-fix work; inspect the gate's `triage` field and log before approving or skipping it.
+
+After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix`, `ask-master`, and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when the CI monitor reports readiness but the PR still needs a human merge.
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome.
 If it returns another `gate:`, answer that gate; do not idle-wait for the run to move forward by itself.
 When the daemon is already running, `axi respond` can continue an active run even if the global config file has become invalid, because it is not starting a fresh run.
@@ -166,23 +175,86 @@ The same successful-output reporting instructions apply to `axi respond` results
 
 ## no-mistakes axi status
 
-Show a run, preferring the current branch's active or most recent run before falling back to repo-wide active or recent runs.
+When `--run` is omitted, show this branch's run: its active run, else its most recent one.
+Resolution is scoped to the current branch and never falls back to another branch's run, because one clone commonly has several worktrees on different branches.
+On a successful status response, when the current branch has no run of its own - including a detached `HEAD`, which owns no branch and so reports `current_branch: unknown` - the output carries no run object at all.
+It reports `current_branch`, `runs_on_current_branch: 0` where a branch is known, and the recent-runs listing, so an unrelated run can never be read as this worktree's.
+If the implicit current-branch lookup itself fails, status returns that error instead of presenting the failure as a detached or no-run result.
+Detached-`HEAD` help offers deliberate `--run <id>` inspection or checking out a branch; it does not offer `axi run`, which requires a branch.
+With `--run <id>`, inspect exactly that run regardless of branch; when its branch differs from a known current branch, it is rendered under `other_branch_run:` instead of `run:`, alongside a top-level `current_branch`, so a parser keyed on `run:` never picks up a run proven to be on another branch.
+An explicit `--run <id>` rendered under `run:` while the current branch is unknown (detached `HEAD` or a branch-lookup failure) encodes no branch relationship.
 
 ```sh
 no-mistakes axi status
 no-mistakes axi status --run <id>
 ```
 
-| Flag    | Type     | Default      | Description               |
-| ------- | -------- | ------------ | ------------------------- |
-| `--run` | `string` | resolved run | Inspect a specific run ID |
+| Flag    | Type     | Default            | Description               |
+| ------- | -------- | ------------------ | ------------------------- |
+| `--run` | `string` | current-branch run | Inspect a specific run ID |
 
-When the resolved run is parked at an `awaiting_approval`, `awaiting_agent_retry`, `fix_review`, or `awaiting_triage` gate, its top-level `run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
-The field disappears after `axi respond`, on cancel, and on terminal outcomes; use it to distinguish a run waiting for the driving agent from one actively running, fixing, or watching CI.
+When the resolved run is parked at an `awaiting_approval`, `awaiting_agent_retry`, `fix_review`, or `awaiting_triage` gate, its top-level `run:` or `other_branch_run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
+The field disappears after that run's gate is answered, on cancel, and on terminal outcomes; use it to distinguish a run waiting for the driving agent from one actively running, fixing, or watching CI.
+An `awaiting_agent_retry` gate reports its transient failure `reason` and the persisted automatic-retry count, with no findings table. An `awaiting_triage` Review gate reports why ordinary automation stopped and offers an attributed override only when the fix-round cap caused the park.
+Status offers branch-scoped `axi respond` commands only for the current branch's implicitly resolved run. An explicitly selected gate stays inspection-only even when its branch matches, because a newer active run on that branch could receive the bare response command instead; the gate remains visible and its log commands retain `--run <id>`.
 When the resolved run has a `running` or `fixing` step, the run object includes `active_steps`.
 Each row reports how long the step has been active, the latest meaningful log or native-agent lifecycle activity, the native agent PID if one is currently running, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
 If no activity arrives for longer than `step_quiet_warning`, `last_activity` is prefixed with `quiet`; this is only a liveness signal and does not cancel the step.
 For older active runs with no recorded activity timestamp, AXI falls back to the step log file modification time.
+Gate summaries and finding descriptions are bounded in this default status view; truncated values disclose their original length, and the gate help points to `no-mistakes axi logs --step <step> --full` for an implicitly resolved run or `no-mistakes axi logs --run <id> --step <step> --full` for an explicitly selected run.
+Relevant current-branch states also include a cached `branch_sync` object with full SHAs, the run's status, the persisted pipeline push binding, target kind and ref, relation, safety result, PR lifecycle, and a structured next action.
+Cached home and status rendering performs no network read and labels the remote observation `pipeline_push`; only explicit sync check or apply reports `live` freshness.
+
+## no-mistakes axi sync
+
+Freshly check or apply the guarded synchronization offered by a `branch_sync.next_action`.
+
+```sh
+no-mistakes axi sync --check
+no-mistakes axi sync
+no-mistakes axi sync --recover
+no-mistakes axi sync --recover --keep-local
+```
+
+| Flag           | Type   | Default | Description                                                                  |
+| -------------- | ------ | ------- | ---------------------------------------------------------------------------- |
+| `--check`      | `bool` | `false` | Verify the live target and exact plan without changing `HEAD`                |
+| `--recover`    | `bool` | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch) |
+| `--keep-local` | `bool` | `false` | With `--recover`: keep the current local head; never touches the worktree   |
+
+The default command is an explicit non-interactive apply request and never prompts.
+All modes return the complete `branch_sync` object as TOON.
+Exit code `0` means an eligible check, applied synchronization or recovery, already-synchronized, custody-returned, or user-owned no-op, or expected merged-and-removed no-op; blocked operational states return `1`.
+The ordinary worktree mutation is either a strict fast-forward of the invoking clean checked-out branch to the freshly verified pipeline-owned pushed SHA, or an equivalent-diverged advance.
+When a clean local branch and the pipeline-pushed head are diverged but the local unique work is content-equivalent to work already represented in the live pipeline head, `sync` reports `safety: safe_equivalent_advance`, anchors the pre-sync head under `refs/no-mistakes/sync-anchor/<run>`, and moves to the pipeline head with reset semantics.
+Genuine divergence still reports `safety: blocked_diverged` and changes nothing.
+Under `--recover`, the possible worktree mutation is a strict fast-forward to the preserved pipeline head, or an adoption of a preserved head proven to carry every local change, both after relation-specific preservation checks.
+When the local gate branch is exactly at a newer same-branch pushed binding and Git proves that an older terminal run's unpublished preserved head is its ancestor, branch synchronization selects the newer binding; missing gate evidence, non-ancestor heads, or different or ambiguous target provenance remain blocked.
+Fork configurations verify the configured fork URL and exact feature ref rather than assuming `origin`.
+Dirty, in-progress, ahead, genuinely diverged, detached, wrong-branch, offline, changed-target, rewritten, deleted, legacy, or retired states fail closed without destructive recovery.
+Run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
+
+### Custody recovery
+
+A run that goes terminal (cancelled, failed, or completed without a push stage) after moving the pipeline head leaves the branch `pipeline_owned`. Status offers `next_action.code: recover_custody` only when recovery can establish the same eligibility it will enforce: an equal or ahead local head proves the source locally and can create the local anchor when the gate is unavailable, but any existing gate recovery ref must still match the recorded head; importing a missing preserved head requires an exact run-specific gate anchor (or legacy commit evidence that can be anchored), a clean worktree, and either local ancestry or the content-preservation proof described below. The eligible state reports `safety: blocked_pipeline_owned_recoverable`, the run's terminal `pipeline.status`, and the exact `submitted_head`/`current_head`/`relation` ownership facts.
+A run whose terminalization verifies that the managed worktree head never changed from the submitted head releases the branch instead: the terminal outcome, including cancellation, ends ownership; status reports `state: user_owned` with the same exact ownership facts and no `next_action`; the branch and head are immediately usable for any separately authorized delivery; and nothing blocks a direct push or PR.
+Without positive evidence that the submitted head stayed unchanged, custody is not guessed away. Missing or conflicting evidence, and import cases with a dirty worktree or genuinely divergent history, require manual reconciliation instead of advertising a recovery that will refuse.
+While a run is still active, it reports `state: pipeline_owned`, the exact submitted/current heads and their relation, and `next_action.code: continue_active_run` with `no-mistakes axi status`, even when its head has not moved yet.
+`--recover` verifies the run is terminal, anchors the preserved head under `refs/no-mistakes/recover/<run>` in the invoking repository, and stamps custody returned so a fresh run can start.
+For equal or ahead worktrees where the preserved head is already locally reachable, recovery writes that anchor locally without requiring gate access. If the gate is available, an existing symbolic, non-commit, or mismatched recovery ref is conflicting evidence and recovery refuses without overwriting it.
+For behind or diverged worktrees, recovery verifies the preserved head at the run-specific recovery ref in the local gate and fetches it into the anchor before moving or refusing. Legacy recorded heads that remain available as unreferenced gate objects are anchored before recovery continues.
+A clean behind worktree fast-forwards.
+A diverged worktree is adopted only when the preserved head provably carries every local change, proven by an executable three-way merge whose result is exactly the preserved head's tree.
+This covers a pipeline rebase onto a newer base without requiring the gate branch to advance to the preserved head.
+Terminalization pins a verified unpublished pipeline head under a run-specific recovery ref, so recovery does not require the gate branch itself to have advanced. If the recorded head is genuinely missing, status reports manual reconciliation instead of advertising `recover_custody`.
+That adoption anchors the pre-recovery local head under `refs/no-mistakes/recover-local/<run>`, then moves the branch with Git operations that refuse on their own rather than after a preceding check: an atomic compare-and-swap on the branch ref, and a working-tree update that aborts instead of overwriting a modified or untracked file.
+The proof is deliberately narrow and never uses patch identity, which discards hunk locations and whitespace and so cannot tell a genuine replay from a same-shaped edit elsewhere.
+Anything it cannot decide - unlanded local commits, or a rebase whose fix rounds also rewrote your own lines - still refuses with the anchor named, because only escalation can tell a deliberate pipeline fix apart from a dropped change.
+A dirty worktree refuses with explicit choices.
+When you explicitly keep a behind or diverged local head instead of taking the preserved head, `--keep-local` returns custody at the current head without touching the worktree and atomically points the gate branch at it. If the gate branch moved independently, recovery first preserves that head under `refs/no-mistakes/recover-gate/<run>`; a conflicting pre-existing anchor makes recovery refuse, and a concurrent gate push wins the compare-and-swap and also makes recovery refuse.
+`no-mistakes rerun` is the alternative exit that resumes validating the preserved head instead of taking the branch back.
+A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run reports its ordinary classification against the last push binding, typically `local_ahead`.
+On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.
 
 ## no-mistakes axi logs
 
@@ -194,13 +266,16 @@ no-mistakes axi logs --step review --full
 no-mistakes axi logs --step review --run <id>
 ```
 
-| Flag     | Type     | Default      | Description                             |
-| -------- | -------- | ------------ | --------------------------------------- |
-| `--step` | `string` | (none)       | Step name; required                     |
-| `--run`  | `string` | resolved run | Run ID to inspect                       |
-| `--full` | `bool`   | `false`      | Show the entire log instead of the tail |
+| Flag     | Type     | Default            | Description                             |
+| -------- | -------- | ------------------ | --------------------------------------- |
+| `--step` | `string` | (none)             | Step name; required                     |
+| `--run`  | `string` | current-branch run | Run ID to inspect                       |
+| `--full` | `bool`   | `false`            | Show the entire log instead of the tail |
 
-Without `--full`, long logs show the last 40 lines and a help hint for the full log.
+When `--run` is omitted, the run is resolved the same way as [`axi status`](#no-mistakes-axi-status): this branch's run, never another branch's.
+With `--run <id>`, logs are read from exactly that run regardless of branch.
+An unknown explicit run ID exits nonzero with `error: run "<id>" not found` instead of reporting that the current branch has no run.
+Without `--full`, long logs show the last 40 lines and a help hint for the full log; when `--run <id>` selected the log, that hint retains the same run ID.
 Step logs include native subprocess agent lifecycle lines such as `codex started pid=4242`, `codex exited pid=4242 status=success`, and transient retry messages when the selected agent supports lifecycle events.
 They also include fix-loop markers such as `auto-fix round 1/3 starting after round 1` and `user-fix round starting after round 2`.
 
@@ -223,8 +298,12 @@ no-mistakes axi abort --run <id>
 
 `--run` does not need a repo, branch, or worktree, so it works from anywhere.
 Use it to reap an orphaned CI monitor whose worktree was torn down before the PR merged - the run id is shown in `axi run` output and in the `axi` home view.
-Aborting an id that is not an active run is a successful no-op.
+A `--run` id that is not currently active is resolved against the exact run's durable record rather than trusted blindly: a known already-terminal run returns an idempotent success carrying its terminal `run_status` with no fabricated new cancellation, a positively proven unknown id keeps the documented successful no-op with no fabricated state, and a run that is recorded as still nonterminal or cannot be read returns the nonzero terminal-unconfirmed contract.
+When the daemon is not running, nothing can be cancelled and abort never starts one: the durable record alone decides the same three outcomes, and a recorded nonterminal run reports that cancellation could not be requested.
 When the daemon is already running, `axi abort` can cancel an active run even if the global config file has become invalid, because it is not starting a fresh run.
+Both abort surfaces report a completed cancellation only after the exact run positively confirms a terminal state within the bounded wait; success then includes the terminal `run_status`, and branch-scoped abort renders the refreshed `branch_sync` object and its exact next action, if any.
+When terminal quiescence cannot be confirmed - the bounded wait expires, the wait is cancelled, or a status read fails - abort exits nonzero, states explicitly that cancellation was requested but terminal quiescence is unconfirmed, includes the last structured run state when one is available, and never claims `aborted: true` or presents user-owned or recoverable ownership guidance as authoritative; re-run the abort or watch `axi status --run <id>` until a terminal status is confirmed.
+Pipeline-created commits remain preserved in the gate and a recoverable cancellation points directly to `no-mistakes axi sync --recover`; when the submitted head never moved, cancellation instead reports `state: user_owned` with no sync action.
 While a run is active, do not use `axi abort` or `no-mistakes rerun` to go fix a finding yourself.
 That cancels the pipeline's in-flight work and forces a full re-validation; use `axi respond --action fix` at the gate so the pipeline applies and re-checks the fix.
 
@@ -238,34 +317,6 @@ no-mistakes eject
 
 Removes the `no-mistakes` remote, deletes the bare repo directory, cleans up worktrees, and deletes the database record (cascades to runs and steps).
 It does not remove any legacy repo-local agent skill files left by older versions; current `init` installs the skill at user level instead.
-
-## no-mistakes route
-
-Manage local push **routes** so one clone can raise PRs to different targets, chosen per push, without re-init or a second clone. A route is a PR base (upstream) URL plus an optional fork push URL — generalizing `init --fork-url` into named targets.
-
-```sh
-no-mistakes route add <name> --base <url> [--fork-url <url>]
-no-mistakes route list
-no-mistakes route remove <name>
-no-mistakes route set-default <name>
-```
-
-Select a route on a push with the `no-mistakes.route` push-option:
-
-```sh
-git push no-mistakes <branch> -o no-mistakes.route=<name>
-```
-
-| Subcommand | Description |
-|---|---|
-| `add <name>` | Add a route. `--base` (required) is the PR base URL; `--fork-url` (optional) is the branch push target and cross-repo PR head. Base/fork are validated with the same rules as `init --fork-url`; duplicate and invalid names are rejected. |
-| `list` | List routes for the current repo, marking the default and showing the implicit default target (the gate's recorded upstream/fork) when no named route applies. |
-| `remove <name>` | Remove a route. Clears the default when the removed route was the default. |
-| `set-default <name>` | Set the route applied to a push that selects none. The route must already exist. |
-
-Resolution precedence for a push is: an explicit `-o no-mistakes.route=<name>` &rarr; the configured default route &rarr; the gate's own recorded upstream/fork (the pre-routes behavior). An explicit but unknown route name fails the push fast with a clear error instead of silently falling back.
-
-**Trust:** routes are local-only — stored in the gate database, never read from a pushed branch or any in-repo file — so a contributor's feature branch can neither define nor redirect a route. The push-option only *selects* a pre-defined local route by name; it can never supply a base or fork URL. Base and fork URLs are always redacted in `route list` output — a fork-less route's base doubles as its push target, so it too can embed credentials — the same way `init`/`eject` redact fork-routed remotes.
 
 ## no-mistakes attach
 
@@ -287,16 +338,57 @@ Rerun the pipeline for the current branch.
 
 ```sh
 no-mistakes rerun
+no-mistakes rerun --intent "the revised user goal"
 ```
 
-Starts a new pipeline run using the last-known head SHA on the current branch.
-Unlike `axi run`, plain `rerun` is replay-only: it requires a prior run on the branch and reports `no previous run for branch` when none exists, so use `no-mistakes axi run` to bootstrap the first run for a branch that has never been validated.
-If another run is active on that branch, rerun cancels it before starting over.
-Treat rerun as a between-runs action after a failed or cancelled outcome, or after you have committed a separate fix outside an active run; do not use it to bypass a gate.
+Starts a new pipeline run from the current gate branch, except when the latest
+terminal run has a verified unpublished head whose custody has not been
+returned: rerun then uses that preserved terminal head even if the gate branch
+is stale. The command refuses instead of falling back to the gate branch when
+the run-specific recovery ref is conflicting, invalid, or the recorded head is
+unavailable. Use `no-mistakes axi status` and reconcile custody first in that
+case.
+If the selected prior run has explicit intent, rerun inherits it exactly by default;
+otherwise it performs fresh intent inference. `--intent` supplies a new canonical
+explicit intent in either case. Inherited intent keeps distinct rerun provenance;
+an override is recorded as newly supplied explicit intent, while fresh inference
+records the transcript source. If another run is active on that branch, rerun
+cancels it before starting over. Treat rerun as a between-runs action after a
+failed or cancelled outcome, or after you have committed a separate fix outside
+an active run; do not use it to bypass a gate.
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--intent` | `string` | (none) | Explicit intent overriding inherited intent or fresh inference |
+
+## no-mistakes sync
+
+Freshly verify and, with confirmation, safely move the invoking branch to an exact pipeline-owned push binding.
+
+```sh
+no-mistakes sync
+no-mistakes sync --check
+no-mistakes sync --yes
+no-mistakes sync --recover
+no-mistakes sync --recover --keep-local
+```
+
+| Flag           | Type   | Default | Description                                                     |
+| -------------- | ------ | ------- | --------------------------------------------------------------- |
+| `--check`      | `bool` | `false` | Verify and print the fresh plan without changing `HEAD`         |
+| `-y`, `--yes`  | `bool` | `false` | Apply an eligible guarded synchronization without an interactive prompt |
+| `--recover`    | `bool` | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch) |
+| `--keep-local` | `bool` | `false` | With `--recover`: keep the current local head; never touches the worktree |
+
+Without `--yes`, apply prints the exact full-SHA plan and requires TTY confirmation; `--recover` prompts the same way before returning custody.
+A non-TTY apply or recovery refuses with a direct `--yes` hint.
+The command uses the same service and safety contract as `no-mistakes axi sync`, including the guarded equivalent advance and custody recovery documented there; it never stashes, rebases, creates a merge commit, switches branches, deletes a branch, or updates an external remote.
+
+Unlike `axi run`, plain `rerun` still requires a prior run on the branch and reports `no previous run for branch` when none exists; use `no-mistakes axi run` to bootstrap a branch the gate already mirrors but has never validated.
 
 ## no-mistakes status
 
-Show repo, daemon, and active run status.
+Show repo, daemon, active run, and relevant cached local-branch synchronization status.
 
 ```sh
 no-mistakes status
@@ -323,6 +415,12 @@ no-mistakes runs [--limit <n>]
 
 Shows runs newest-first with branch, status (styled), short SHA, timestamp, and PR URL if set.
 
+## no-mistakes eval
+
+Inspect the locally collected review-case corpus before spending tokens, replay an explicit agent and model in isolation, and report finding-level scores, token cost, wall time, and the recall-versus-cost frontier. Eligible cases are collected automatically as runs finish; `eval capture <run-id>` collects one on demand; `eval miss ingest <run-id> --finding '<json>'` labels a confirmed post-PR miss (review passed green, later caught) as false-negative gold.
+
+See [Evaluation toolkit](/no-mistakes/reference/eval/) for the local-only boundary, collection and retention, command flags, label policy, and reporting semantics.
+
 ## no-mistakes stats
 
 Show historical usage stats across all repos.
@@ -334,7 +432,7 @@ no-mistakes stats
 Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
 
 Use `--agents` for local, per-purpose agent performance aggregates: duration and the subprocess-vs-model time split, session mode, errors, the token totals (input, output, cache-read, cache-creation, fresh input, reasoning), and the model round-trip and tool-category activity histogram, with a `METRICS` coverage count that tells a real zero apart from missing instrumentation.
-Use `--run <id>` to inspect the recorded pipeline-agent invocations for one run - including each invocation's per-round token deltas next to the raw (cumulative for resumed sessions) counters, tool-category breakdown, workload size, finding count, and fallback reason - plus the total time parked at approval gates; it implies `--agents`.
+Use `--run <id>` to inspect the individual agent invocations for one run - including each invocation's per-round token deltas next to the raw counters (cumulative across a resumed session for codex; per-invocation for pi), tool-category breakdown, workload size, finding count, and fallback reason - plus the total time parked at approval gates; it implies `--agents`.
 Nullable fields an adapter did not report render as `-` (unknown), which is distinct from a recorded `0`; the legacy raw input, output, and cache-read counters remain numeric.
 
 ```sh
@@ -361,17 +459,20 @@ Checks:
 - Data directory (`~/.no-mistakes/`)
 - SQLite database
 - Daemon status
-- Agent runners: native binaries `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`, and `grok`, plus the optional ACP bridge `acpx`
+- Agent runners: native binaries `claude`, `codex`, `grok`, `acli`, `opencode`, `pi`, `copilot`, and `agy` (Antigravity), plus the optional ACP bridge `acpx`
+- ACP alias default binaries: `cursor-agent` plus `acpx` for `cursor`
 - Effective global agent configuration, reported as `gate validation`; an unavailable configured runner is a failed check because the gate cannot validate without it
+- Every configured [`forge_profiles`](/no-mistakes/reference/global-config/#forge_profiles) entry, reported as `forge <host>`: the profile resolves and validates, its provider CLI is installed, and that CLI is authenticated for the profile's host
 
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 
-For `agent: acp:<target>`, `doctor` verifies that `acpx` resolves but does not invoke the target or test its credentials.
+The standalone runner rows inspect default binary names; the `cursor` row reports whichever of `cursor-agent` and `acpx` are missing.
+The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP gate-validation availability and probing semantics.
 Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
 
-During `gate validation`, Rovo Dev and Grok pipeline-agent candidates additionally require `acli rovodev --help` and `grok --version` to succeed, whether selected explicitly, through `auto`, or from a fallback list.
+`doctor` checks `gh` and `az` availability. [Provider Integration](/no-mistakes/guides/provider-integration/) owns the separate setup checks for GitLab, Forgejo, Bitbucket Cloud, Gitea, and the Azure DevOps extension and PAT.
 
-`doctor` checks `gh` and `az` availability. For GitLab PR and CI steps, install and authenticate `glab`. For Bitbucket Cloud PR and CI steps, set `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN`. For Azure DevOps PR and CI steps, install the `azure-devops` extension and provide a PAT.
+`tea` stays docs-only like `glab`, `forgejo-axi`, and Bitbucket's env vars, rather than an active `doctor` check like `gh`/`az`: Gitea is almost always self-hosted, so a bare "`tea` not found" row would be a near-universal, low-value warning for the vast majority of users who have no Gitea instance at all.
 
 ## no-mistakes update
 
@@ -387,11 +488,13 @@ no-mistakes update --force
 Downloads the latest release, verifies the SHA-256 checksum, atomically replaces the running binary, and resets the daemon when it is running or stale daemon artifacts exist so the new executable is picked up, preferring the managed service path and falling back to a detached daemon if service startup is unavailable or fails.
 By default this installs the latest stable release.
 Pass `--beta` to include prereleases and install the latest beta when one is newer than the current stable release.
-If pending or running pipeline runs exist, update refuses to restart the daemon by default, prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart the daemon anyway and accept that those runs may fail; `-y`/`--yes` does **not** bypass this guard.
 If the daemon is running from a different executable path, update still prompts before replacing it; pass `-y`/`--yes` to answer that prompt non-interactively.
 If the daemon executable path cannot be determined, the update aborts before replacement.
 If the daemon does not come back cleanly after a successful replacement, the command reports that failure.
 On macOS, removes the quarantine extended attribute.
+[Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping)
+owns the active-run guard, the scope of `--force` and `--yes`, and recursive
+validation-step containment.
 
 Because `update` installs the latest official release binary, the replacement binary includes the default self-hosted telemetry host and website ID. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
 
@@ -405,9 +508,7 @@ Start the daemon, installing or refreshing the managed service when possible.
 no-mistakes daemon start
 ```
 
-Prefers the managed service path and falls back to a detached daemon if service install or startup is unavailable or fails. If the daemon is already running, the command refreshes a stale macOS `launchd` or Linux `systemd` service definition and restarts through the managed service; if the definition is unchanged, it reports that the daemon is already running.
-
-Only one live daemon can own an `NM_HOME`: at startup the daemon takes an exclusive OS lock on `$NM_HOME/daemon.lock`, so a second daemon started against the same root - however it was launched - fails with "a no-mistakes daemon is already running for this NM_HOME" instead of stealing the running daemon's socket.
+Prefers the managed service path and falls back to a detached daemon if service install or startup is unavailable or fails. If the daemon is already running, the command refreshes a stale macOS `launchd` or Linux `systemd` service definition and restarts through the managed service; if the definition is unchanged, it reports that the daemon is already running. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the startup readiness, timeout, fallback cleanup, and singleton lifecycle details.
 
 ## no-mistakes daemon stop
 
@@ -418,7 +519,9 @@ no-mistakes daemon stop
 no-mistakes daemon stop --force
 ```
 
-If pending or running pipeline runs exist, `daemon stop` refuses by default and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to stop the daemon anyway and accept that those runs may fail.
+[Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping)
+owns the active-run guard, the scope of `--force`, and recursive
+validation-step containment.
 
 This does not remove the managed service. A later `no-mistakes`, `no-mistakes daemon start`, `init`, `attach`, `rerun`, or `update` can start the daemon again through the same service manager when available, or as a detached daemon otherwise.
 
@@ -432,7 +535,9 @@ no-mistakes daemon restart --force
 ```
 
 Stops the current daemon and starts it again. This works whether the daemon is currently running or not.
-If pending or running pipeline runs exist, `daemon restart` refuses by default and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart the daemon anyway and accept that those runs may fail.
+[Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping)
+owns the active-run guard, the scope of `--force`, and recursive
+validation-step containment.
 
 ## no-mistakes daemon status
 

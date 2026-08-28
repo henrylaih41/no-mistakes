@@ -2,17 +2,15 @@
 package github
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"net/url"
 	"os/exec"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -58,51 +56,31 @@ func NewWithFork(cmd CmdFactory, cliAvailable func() bool, host, repo, forkRepo 
 	return h
 }
 
-// RepoSlug extracts the "owner/name" identifier from a GitHub remote or PR URL.
-// It supports https URLs, scp-style ssh URLs (git@github.com:owner/name.git),
-// ssh:// URLs, and longer paths such as PR links (the leading two path segments
-// are used). It returns "" when the input has no owner/name pair.
+// RepoSlug extracts the "owner/name" identifier from a GitHub remote or PR
+// URL. Longer paths such as PR links are reduced to their leading two segments.
 func RepoSlug(remoteURL string) string {
-	raw := strings.TrimSpace(remoteURL)
-	if raw == "" {
-		return ""
-	}
-	raw = strings.TrimSuffix(raw, ".git")
-
-	// Reduce raw to the path portion after the host.
-	switch {
-	case strings.Contains(raw, "://"):
-		rest := raw[strings.Index(raw, "://")+len("://"):]
-		slash := strings.IndexByte(rest, '/')
-		if slash < 0 {
-			return ""
-		}
-		raw = rest[slash+1:]
-	case strings.Contains(raw, ":"):
-		// scp-style ssh: [user@]host:owner/name
-		raw = raw[strings.IndexByte(raw, ':')+1:]
-	}
-
-	parts := strings.Split(strings.Trim(raw, "/"), "/")
+	parts := strings.Split(scm.RepoPath(remoteURL), "/")
 	if len(parts) < 2 {
 		return ""
 	}
-	owner, name := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-	if owner == "" || name == "" {
-		return ""
-	}
-	return owner + "/" + name
+	return parts[0] + "/" + parts[1]
 }
 
 // HostPrefixedSlug returns "host/owner/name" for GitHub Enterprise Server
 // instances and plain "owner/name" for github.com. This is the format that
 // the gh CLI's --repo flag requires for GHE.
 func HostPrefixedSlug(remoteURL string) string {
+	return HostPrefixedSlugForHost(remoteURL, scm.ExtractHost(remoteURL))
+}
+
+// HostPrefixedSlugForHost is HostPrefixedSlug using an already-resolved host.
+// This lets callers honor SSH HostName aliases without rewriting the remote.
+func HostPrefixedSlugForHost(remoteURL, host string) string {
 	slug := RepoSlug(remoteURL)
 	if slug == "" {
 		return ""
 	}
-	host := scm.ExtractHost(remoteURL)
+	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" || strings.EqualFold(host, "github.com") {
 		return slug
 	}
@@ -116,6 +94,26 @@ func (h *Host) repoArgs() []string {
 		return nil
 	}
 	return []string{"--repo", h.repo}
+}
+
+// prSelector returns the explicit gh PR selector for pr, preferring the numeric
+// PR number and falling back to the canonical PR URL; both name the exact pull
+// request to gh regardless of the process working directory. It fails closed
+// when neither is known: an empty positional makes `gh pr <verb>` fall back to
+// resolving the current branch of the cwd, and the daemon runs from a detached
+// bare gate repo whose HEAD is the default branch (main), so an inferred
+// selector silently targets the wrong PR (or none — "no pull requests found for
+// branch main") instead of the feature PR the pipeline already knows.
+func prSelector(pr *scm.PR) (string, error) {
+	if pr != nil {
+		if n := strings.TrimSpace(pr.Number); n != "" {
+			return n, nil
+		}
+		if u := strings.TrimSpace(pr.URL); u != "" {
+			return u, nil
+		}
+	}
+	return "", errors.New("no PR number or URL known; refusing to run gh with a cwd-inferred branch")
 }
 
 func (h *Host) headRef(branch string) string {
@@ -136,7 +134,7 @@ func repoOwner(slug string) string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitHub }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, Reviews: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
 }
 
 func (h *Host) Available(ctx context.Context) error {
@@ -159,15 +157,55 @@ func (h *Host) Available(ctx context.Context) error {
 	return nil
 }
 
+func parsePullRequestURL(raw, expectedHost, expectedRepo string) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return 0, errors.New("expected absolute GitHub pull request URL")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return 0, errors.New("expected HTTP GitHub pull request URL")
+	}
+	if expectedHost != "" && !strings.EqualFold(parsed.Hostname(), expectedHost) {
+		return 0, fmt.Errorf("URL host %q does not match GitHub host %q", parsed.Hostname(), expectedHost)
+	}
+	segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(segments) != 4 || segments[2] != "pull" {
+		return 0, errors.New("expected GitHub /owner/repo/pull/number URL")
+	}
+	for _, segment := range segments[:2] {
+		if segment == "" || segment == "." || segment == ".." {
+			return 0, errors.New("expected unambiguous GitHub owner/repository path")
+		}
+	}
+	actualRepo := segments[0] + "/" + segments[1]
+	expectedRepo = strings.Trim(strings.TrimSpace(expectedRepo), "/")
+	if expectedRepo != "" && !strings.EqualFold(actualRepo, expectedRepo) {
+		return 0, fmt.Errorf("URL repository %q does not match GitHub repository %q", actualRepo, expectedRepo)
+	}
+	number, err := strconv.Atoi(segments[3])
+	if err != nil || number <= 0 {
+		return 0, errors.New("expected positive GitHub pull request number")
+	}
+	escapedSegments := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	if len(escapedSegments) != len(segments) || escapedSegments[len(escapedSegments)-1] != strconv.Itoa(number) {
+		return 0, errors.New("expected canonical GitHub pull request number path")
+	}
+	if parsed.ForceQuery || parsed.RawQuery != "" || strings.Contains(trimmed, "#") {
+		return 0, errors.New("expected GitHub pull request URL without query or fragment")
+	}
+	return number, nil
+}
+
 func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error) {
 	args := []string{"pr", "list", "--head", branch}
 	if strings.TrimSpace(base) != "" {
 		args = append(args, "--base", base)
 	}
 	args = append(args, h.repoArgs()...)
-	jsonFields := "number,url"
+	jsonFields := "number,url,baseRefName"
 	if h.forkOwner != "" {
-		jsonFields = "number,url,headRefName,headRepositoryOwner"
+		jsonFields = "number,url,baseRefName,headRefName,headRepositoryOwner"
 	}
 	args = append(args, "--state", "open", "--json", jsonFields)
 	cmd := h.cmd(ctx, "gh", args...)
@@ -178,26 +216,55 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	var prs []struct {
 		Number              int    `json:"number"`
 		URL                 string `json:"url"`
+		BaseRefName         string `json:"baseRefName"`
 		HeadRefName         string `json:"headRefName"`
 		HeadRepositoryOwner *struct {
 			Login string `json:"login"`
 		} `json:"headRepositoryOwner"`
 	}
-	if err := json.Unmarshal(out, &prs); err != nil || len(prs) == 0 {
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, fmt.Errorf("parse gh pr list JSON: %w", err)
+	}
+	if prs == nil {
+		return nil, errors.New("parse gh pr list JSON: expected array")
+	}
+	if len(prs) == 0 {
 		return nil, nil
 	}
-	for _, candidate := range prs {
+	prNumbers := make([]string, len(prs))
+	for i, candidate := range prs {
+		if candidate.Number <= 0 {
+			return nil, fmt.Errorf("parse gh pr list JSON: entry %d missing positive PR number", i)
+		}
+		url := strings.TrimSpace(candidate.URL)
+		if url == "" {
+			return nil, fmt.Errorf("parse gh pr list JSON: entry %d missing PR URL", i)
+		}
+		number, err := parsePullRequestURL(url, h.host, h.repoSlug())
+		if err != nil {
+			return nil, fmt.Errorf("parse gh pr list JSON: entry %d invalid PR URL: %w", i, err)
+		}
+		if candidate.Number != number {
+			return nil, fmt.Errorf("parse gh pr list JSON: entry %d PR number %d does not match URL number %d", i, candidate.Number, number)
+		}
+		prNumbers[i] = strconv.Itoa(candidate.Number)
+		if h.forkOwner != "" {
+			if strings.TrimSpace(candidate.HeadRefName) == "" {
+				return nil, fmt.Errorf("parse gh pr list JSON: entry %d missing headRefName", i)
+			}
+			if candidate.HeadRepositoryOwner == nil || strings.TrimSpace(candidate.HeadRepositoryOwner.Login) == "" {
+				return nil, fmt.Errorf("parse gh pr list JSON: entry %d missing headRepositoryOwner login", i)
+			}
+		}
+	}
+	for i, candidate := range prs {
 		if !h.matchesHead(candidate.HeadRefName, candidate.HeadRepositoryOwner, branch) {
 			continue
 		}
-		pr := &scm.PR{URL: strings.TrimSpace(candidate.URL)}
-		if candidate.Number > 0 {
-			pr.Number = fmt.Sprintf("%d", candidate.Number)
-		} else if num, nerr := scm.ExtractPRNumber(pr.URL); nerr == nil {
-			pr.Number = num
-		}
-		if pr.URL == "" {
-			return nil, nil
+		pr := &scm.PR{
+			Number:     prNumbers[i],
+			URL:        strings.TrimSpace(candidate.URL),
+			BaseBranch: strings.TrimSpace(candidate.BaseRefName),
 		}
 		return pr, nil
 	}
@@ -240,11 +307,11 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 }
 
 func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
-	id := pr.Number
-	if id == "" {
-		id = pr.URL
+	selector, err := prSelector(pr)
+	if err != nil {
+		return nil, err
 	}
-	args := append([]string{"pr", "edit", id}, h.repoArgs()...)
+	args := append([]string{"pr", "edit", selector}, h.repoArgs()...)
 	args = append(args, "--title", content.Title, "--body-file", "-")
 	cmd := h.cmd(ctx, "gh", args...)
 	cmd.Stdin = strings.NewReader(content.Body)
@@ -255,7 +322,11 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
-	args := append([]string{"pr", "view", pr.Number}, h.repoArgs()...)
+	selector, err := prSelector(pr)
+	if err != nil {
+		return "", err
+	}
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "state", "--jq", ".state")
 	cmd := h.cmd(ctx, "gh", args...)
 	out, err := cmd.Output()
@@ -265,22 +336,78 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	return normalizePRState(strings.TrimSpace(string(out))), nil
 }
 
+func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
+	selector, err := prSelector(pr)
+	if err != nil {
+		return "", err
+	}
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
+	args = append(args, "--json", "baseRefName", "--jq", ".baseRefName")
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view base branch: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
-	args := append([]string{"pr", "checks", pr.Number}, h.repoArgs()...)
-	args = append(args, "--json", "name,state,bucket,completedAt")
+	selector, err := prSelector(pr)
+	if err != nil {
+		return nil, err
+	}
+	headSHA := ""
+	if strings.TrimSpace(pr.HeadSHA) != "" {
+		headSHA, err = h.getPRHeadSHA(ctx, selector)
+		if err != nil {
+			return nil, err
+		}
+		pr.HeadSHA = headSHA
+	}
+	var checks []scm.Check
+	if headSHA != "" {
+		checks, err = h.getCommitChecks(ctx, headSHA)
+	} else {
+		checks, err = h.getPRChecks(ctx, selector)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if headSHA != "" {
+		runs, err := h.getWorkflowRunChecks(ctx, headSHA)
+		if err != nil {
+			return nil, err
+		}
+		checks = h.appendUnrepresentedWorkflowRuns(checks, runs)
+		checks = h.collapseLatestByName(checks)
+		currentHeadSHA, err := h.getPRHeadSHA(ctx, selector)
+		if err != nil {
+			return nil, err
+		}
+		if currentHeadSHA != headSHA {
+			return nil, fmt.Errorf("PR head changed during check discovery from %s to %s", headSHA, currentHeadSHA)
+		}
+	}
+	return checks, nil
+}
+
+func (h *Host) getPRChecks(ctx context.Context, selector string) ([]scm.Check, error) {
+	args := append([]string{"pr", "checks", selector}, h.repoArgs()...)
+	args = append(args, "--json", "name,state,bucket,completedAt,link")
 	cmd := h.cmd(ctx, "gh", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "no checks reported") {
-			return nil, nil
+			out = []byte("[]")
+		} else {
+			return nil, fmt.Errorf("gh pr checks: %s: %w", strings.TrimSpace(string(out)), err)
 		}
-		return nil, fmt.Errorf("gh pr checks: %w", err)
 	}
 	var raw []struct {
 		Name        string `json:"name"`
 		State       string `json:"state"`
 		Bucket      string `json:"bucket"`
 		CompletedAt string `json:"completedAt"`
+		Link        string `json:"link"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("parse CI checks: %w", err)
@@ -293,13 +420,573 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 				completedAt = parsed
 			}
 		}
-		checks = append(checks, scm.Check{Name: r.Name, Bucket: normalizeCheckBucket(r.Bucket, r.State), CompletedAt: completedAt})
+		checks = append(checks, scm.Check{
+			Name:        r.Name,
+			Bucket:      normalizeCheckBucket(r.Bucket, r.State),
+			State:       strings.ToUpper(strings.TrimSpace(r.State)),
+			CompletedAt: completedAt,
+			Link:        strings.TrimSpace(r.Link),
+		})
 	}
 	return checks, nil
 }
 
+const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{name status conclusion completedAt startedAt detailsUrl} ... on StatusContext{context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
+
+func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check, error) {
+	repo := h.repoSlug()
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return nil, fmt.Errorf("resolve GitHub repository for commit checks: invalid repository %q", repo)
+	}
+	var checks []scm.Check
+	cursor := ""
+	for {
+		args := []string{"api"}
+		if h.host != "" {
+			args = append(args, "--hostname", h.host)
+		}
+		args = append(args, "graphql", "-f", "query="+commitChecksQuery,
+			"-F", "owner="+parts[0], "-F", "name="+parts[1], "-F", "oid="+strings.TrimSpace(headSHA))
+		if cursor != "" {
+			args = append(args, "-F", "cursor="+cursor)
+		}
+		out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("gh api checks for head commit: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+		var response struct {
+			Data struct {
+				Repository *struct {
+					Object *struct {
+						Rollup *struct {
+							Contexts struct {
+								Nodes []struct {
+									Type        string `json:"__typename"`
+									Name        string `json:"name"`
+									Status      string `json:"status"`
+									Conclusion  string `json:"conclusion"`
+									CompletedAt string `json:"completedAt"`
+									StartedAt   string `json:"startedAt"`
+									DetailsURL  string `json:"detailsUrl"`
+									Context     string `json:"context"`
+									State       string `json:"state"`
+									TargetURL   string `json:"targetUrl"`
+								} `json:"nodes"`
+								PageInfo struct {
+									HasNextPage bool   `json:"hasNextPage"`
+									EndCursor   string `json:"endCursor"`
+								} `json:"pageInfo"`
+							} `json:"contexts"`
+						} `json:"statusCheckRollup"`
+					} `json:"object"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(out, &response); err != nil {
+			return nil, fmt.Errorf("parse checks for head commit: %w", err)
+		}
+		if response.Data.Repository == nil || response.Data.Repository.Object == nil {
+			return nil, errors.New("head commit check discovery returned no commit")
+		}
+		if response.Data.Repository.Object.Rollup == nil {
+			return checks, nil
+		}
+		contexts := response.Data.Repository.Object.Rollup.Contexts
+		for _, node := range contexts.Nodes {
+			check := scm.Check{}
+			switch node.Type {
+			case "CheckRun":
+				check.Kind = scm.CheckKindRun
+				check.Name = strings.TrimSpace(node.Name)
+				check.State = strings.ToUpper(strings.TrimSpace(node.Conclusion))
+				if check.State == "" {
+					check.State = strings.ToUpper(strings.TrimSpace(node.Status))
+				}
+				check.Bucket = normalizeCheckBucket("", node.Conclusion)
+				if check.Bucket == "" {
+					check.Bucket = normalizeCheckBucket("", node.Status)
+				}
+				check.Link = strings.TrimSpace(node.DetailsURL)
+				if parsed, parseErr := time.Parse(time.RFC3339, node.CompletedAt); parseErr == nil {
+					check.CompletedAt = parsed
+				}
+				if parsed, parseErr := time.Parse(time.RFC3339, node.StartedAt); parseErr == nil {
+					check.StartedAt = parsed
+				}
+			case "StatusContext":
+				check.Kind = scm.CheckKindStatus
+				check.Name = strings.TrimSpace(node.Context)
+				check.State = strings.ToUpper(strings.TrimSpace(node.State))
+				check.Bucket = normalizeCheckBucket("", node.State)
+				check.Link = strings.TrimSpace(node.TargetURL)
+			default:
+				return nil, fmt.Errorf("head commit check discovery returned unsupported context type %q", node.Type)
+			}
+			if check.Name == "" || check.Bucket == "" {
+				return nil, errors.New("head commit check discovery returned an incomplete context")
+			}
+			checks = append(checks, check)
+		}
+		if !contexts.PageInfo.HasNextPage {
+			return checks, nil
+		}
+		if contexts.PageInfo.EndCursor == "" || contexts.PageInfo.EndCursor == cursor {
+			return nil, errors.New("head commit check discovery returned an invalid page cursor")
+		}
+		cursor = contexts.PageInfo.EndCursor
+	}
+}
+
+func (h *Host) repoSlug() string {
+	repo := strings.TrimSpace(h.repo)
+	if prefix := strings.TrimSpace(h.host) + "/"; h.host != "" && len(repo) > len(prefix) && strings.EqualFold(repo[:len(prefix)], prefix) {
+		repo = repo[len(prefix):]
+	}
+	return repo
+}
+
+func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.Check {
+	represented := make(map[string][]int, len(checks))
+	for i, check := range checks {
+		if runID := h.actionsRunID(check.Link); runID != "" {
+			represented[runID] = append(represented[runID], i)
+		}
+	}
+	for _, run := range runs {
+		runID := h.actionsRunID(run.Link)
+		if indices := represented[runID]; runID != "" && len(indices) > 0 {
+			for _, i := range indices {
+				if checks[i].StartedAt.IsZero() && !run.StartedAt.IsZero() {
+					checks[i].StartedAt = run.StartedAt
+				}
+				checks[i].WorkflowID = run.WorkflowID
+			}
+			continue
+		}
+		checks = append(checks, run)
+		if runID != "" {
+			represented[runID] = []int{len(checks) - 1}
+		}
+	}
+	return checks
+}
+
+// collapseLatestByName collapses orderable same-name reruns of one workflow
+// to the most recently started one. Independent workflows and records whose
+// provider metadata cannot establish an order remain visible. GitHub's raw
+// commit statusCheckRollup returns every check run ever attached to the commit,
+// including runs a later same-named run has
+// already superseded - e.g. a CI monitor's auto-fix push re-triggers the
+// same gate check, and the rollup keeps both the old FAILURE and the new
+// SUCCESS forever. Without this collapse the superseded failure stays
+// visible even after the later run at the same head turns green, which
+// manufactures an unrecoverable auto-fix loop (see AGENTS.md "CI Monitor
+// Lifecycle"). This restores the semantics `gh pr checks` already applies
+// (collapse by startedAt) to the commit-rollup path, which never had it.
+//
+// Must run AFTER appendUnrepresentedWorkflowRuns, never before: that call
+// dedupes by Actions run ID against the FULL uncollapsed rollup. Collapsing
+// first would drop a superseded run's ID out of the "represented" set the
+// union checks against, letting the union re-add the same stale run under
+// its own workflow run name - resurrecting exactly the failure this is
+// meant to hide.
+func (h *Host) collapseLatestByName(checks []scm.Check) []scm.Check {
+	collapsed := make([]scm.Check, 0, len(checks))
+	for _, check := range checks {
+		keep := true
+		for i := 0; i < len(collapsed); {
+			other := collapsed[i]
+			if !h.sameCheckReplacementGroup(check, other) {
+				i++
+				continue
+			}
+			after, ordered := h.checkStartedAfter(check, other)
+			if !ordered {
+				i++
+				continue
+			}
+			if !after {
+				keep = false
+				break
+			}
+			collapsed = append(collapsed[:i], collapsed[i+1:]...)
+		}
+		if keep {
+			collapsed = append(collapsed, check)
+		}
+	}
+	return collapsed
+}
+
+func (h *Host) sameCheckReplacementGroup(a, b scm.Check) bool {
+	if a.Kind != scm.CheckKindRun || b.Kind != scm.CheckKindRun || a.Name != b.Name {
+		return false
+	}
+	// Only distinct runs of the same known workflow establish rerun identity.
+	// Missing workflow/run identities may be independent external checks, while
+	// equal run identities may be independent same-name jobs within one run.
+	// Collapsing either case could hide a failing requirement.
+	aRunID := h.actionsRunID(a.Link)
+	bRunID := h.actionsRunID(b.Link)
+	return a.WorkflowID != 0 && a.WorkflowID == b.WorkflowID &&
+		aRunID != "" && bRunID != "" && aRunID != bRunID
+}
+
+// checkStartedAfter reports whether a is newer and whether the available
+// provider metadata establishes an order between the checks.
+func (h *Host) checkStartedAfter(a, b scm.Check) (bool, bool) {
+	if !a.StartedAt.IsZero() && !b.StartedAt.IsZero() && !a.StartedAt.Equal(b.StartedAt) {
+		return a.StartedAt.After(b.StartedAt), true
+	}
+	if aID, aErr := strconv.ParseUint(h.actionsRunID(a.Link), 10, 64); aErr == nil {
+		if bID, bErr := strconv.ParseUint(h.actionsRunID(b.Link), 10, 64); bErr == nil && aID != bID {
+			return aID > bID, true
+		}
+	}
+	if a.StartedAt.IsZero() != b.StartedAt.IsZero() {
+		return false, false
+	}
+	if !a.CompletedAt.IsZero() && !b.CompletedAt.IsZero() && !a.CompletedAt.Equal(b.CompletedAt) {
+		return a.CompletedAt.After(b.CompletedAt), true
+	}
+	return false, false
+}
+
+func (h *Host) getPRHeadSHA(ctx context.Context, selector string) (string, error) {
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
+	args = append(args, "--json", "headRefOid", "--jq", ".headRefOid")
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view head commit: %w", err)
+	}
+	headSHA := strings.TrimSpace(string(out))
+	if headSHA == "" {
+		return "", errors.New("gh pr view returned an empty head commit")
+	}
+	return headSHA, nil
+}
+
+func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.Check, error) {
+	repo := h.repoSlug()
+	endpoint := "repos/{owner}/{repo}/actions/runs"
+	if repo != "" {
+		endpoint = "repos/" + repo + "/actions/runs"
+	}
+	args := []string{"api"}
+	if h.host != "" {
+		args = append(args, "--hostname", h.host)
+	}
+	args = append(args, "--method", "GET", endpoint,
+		"-f", "head_sha="+strings.TrimSpace(headSHA),
+		"-f", "per_page=100",
+		"--paginate", "--slurp",
+	)
+	out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("gh api workflow runs for head commit: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	type workflowRun struct {
+		ID           int64  `json:"id"`
+		WorkflowID   int64  `json:"workflow_id"`
+		Name         string `json:"name"`
+		DisplayName  string `json:"display_title"`
+		Status       string `json:"status"`
+		Conclusion   string `json:"conclusion"`
+		RunStartedAt string `json:"run_started_at"`
+		CreatedAt    string `json:"created_at"`
+		UpdatedAt    string `json:"updated_at"`
+		HTMLURL      string `json:"html_url"`
+	}
+	var pages []struct {
+		TotalCount   *int          `json:"total_count"`
+		WorkflowRuns []workflowRun `json:"workflow_runs"`
+	}
+	if err := json.Unmarshal(out, &pages); err != nil {
+		return nil, fmt.Errorf("parse workflow runs for head commit: %w", err)
+	}
+	if len(pages) == 0 {
+		return nil, errors.New("workflow run discovery returned no pages")
+	}
+	var raw []workflowRun
+	totalCount := -1
+	runIDs := make(map[int64]struct{})
+	for pageIndex, page := range pages {
+		if page.TotalCount == nil || *page.TotalCount < 0 {
+			return nil, fmt.Errorf("workflow run page %d has no valid total_count", pageIndex+1)
+		}
+		if totalCount == -1 {
+			totalCount = *page.TotalCount
+		} else if *page.TotalCount != totalCount {
+			return nil, fmt.Errorf("workflow run page %d total_count is %d, want %d", pageIndex+1, *page.TotalCount, totalCount)
+		}
+		for _, run := range page.WorkflowRuns {
+			if run.ID == 0 {
+				return nil, fmt.Errorf("workflow run page %d contains a run without an id", pageIndex+1)
+			}
+			if _, exists := runIDs[run.ID]; exists {
+				return nil, fmt.Errorf("workflow run id %d appears more than once", run.ID)
+			}
+			runIDs[run.ID] = struct{}{}
+			raw = append(raw, run)
+		}
+	}
+	if len(runIDs) != totalCount {
+		return nil, fmt.Errorf("workflow run discovery returned %d unique runs, want %d", len(runIDs), totalCount)
+	}
+	checks := make([]scm.Check, 0, len(raw))
+	for _, run := range raw {
+		name := strings.TrimSpace(run.Name)
+		if name == "" {
+			name = strings.TrimSpace(run.DisplayName)
+		}
+		if name == "" {
+			name = "GitHub Actions workflow"
+		}
+		var startedAt time.Time
+		for _, timestamp := range []string{run.RunStartedAt, run.CreatedAt} {
+			if parsed, parseErr := time.Parse(time.RFC3339, timestamp); parseErr == nil {
+				startedAt = parsed
+				break
+			}
+		}
+		var completedAt time.Time
+		if run.UpdatedAt != "" {
+			if parsed, parseErr := time.Parse(time.RFC3339, run.UpdatedAt); parseErr == nil {
+				completedAt = parsed
+			}
+		}
+		bucket := normalizeCheckBucket("", run.Conclusion)
+		if bucket == "" {
+			bucket = normalizeCheckBucket("", run.Status)
+		}
+		if bucket == "" {
+			// An unrecognized or incomplete run state must not certify the
+			// commit as green. Keep monitoring until GitHub reports a terminal
+			// state that can be classified.
+			bucket = scm.CheckBucketPending
+		}
+		state := strings.ToUpper(strings.TrimSpace(run.Conclusion))
+		if state == "" {
+			state = strings.ToUpper(strings.TrimSpace(run.Status))
+		}
+		link := strings.TrimSpace(run.HTMLURL)
+		if link == "" {
+			host := strings.TrimSpace(h.host)
+			if host == "" {
+				host = "github.com"
+			}
+			link = fmt.Sprintf("https://%s/%s/actions/runs/%d", host, repo, run.ID)
+		}
+		checks = append(checks, scm.Check{Name: name, Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, Link: link})
+	}
+	return checks, nil
+}
+
+// RerunCheck re-runs the Actions work behind check for the same commit, so a
+// check the provider cancelled rather than failed can be retried without a new
+// push. The job is identified from the check's details link, which is the only
+// run/job identity `gh pr checks` reports: a link naming a job re-runs just that
+// job (and its dependencies), and a cancelled check naming only a run re-runs
+// the whole run. Anything else - a third-party status pointing at an external
+// dashboard, or a run path this backend cannot read - names no re-runnable work,
+// and the error says so rather than falling back to a wider rerun.
+func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error {
+	rerunArgs, ok := h.rerunTargetArgs(check)
+	if !ok {
+		return fmt.Errorf("check %q has no GitHub Actions job to re-run", check.Name)
+	}
+	args := append([]string{"run", "rerun"}, rerunArgs...)
+	args = append(args, h.repoArgs()...)
+	cmd := h.cmd(ctx, "gh", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gh run rerun: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// rerunTargetArgs turns a check into the `gh run rerun` arguments that re-run
+// exactly that work, or reports that the link names nothing this backend can
+// re-run.
+func (h *Host) rerunTargetArgs(check scm.Check) ([]string, bool) {
+	runID, jobID, ok := h.actionsRerunTarget(check.Link)
+	switch {
+	case !ok:
+		return nil, false
+	case jobID != "":
+		return []string{"--job", jobID}, true
+	case strings.EqualFold(strings.TrimSpace(check.State), "CANCELLED"):
+		return []string{runID}, true
+	default:
+		return []string{runID, "--failed"}, true
+	}
+}
+
+func (h *Host) actionsRunID(link string) string {
+	segments, ok := h.actionsRunSegments(link)
+	if !ok {
+		return ""
+	}
+	return segments[0]
+}
+
+func (h *Host) actionsRunSegments(link string) ([]string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(link))
+	if err != nil {
+		return nil, false
+	}
+	host := strings.TrimSpace(h.host)
+	if host == "" {
+		host = "github.com"
+	}
+	if !strings.EqualFold(parsed.Hostname(), host) {
+		return nil, false
+	}
+	repo := h.repoSlug()
+	if repo == "" {
+		return nil, false
+	}
+	runsPrefix := "/" + strings.Trim(repo, "/") + "/actions/runs/"
+	if len(parsed.Path) <= len(runsPrefix) || !strings.EqualFold(parsed.Path[:len(runsPrefix)], runsPrefix) {
+		return nil, false
+	}
+	segments := strings.Split(strings.Trim(parsed.Path[len(runsPrefix):], "/"), "/")
+	if len(segments) == 0 || !isNumericID(segments[0]) {
+		return nil, false
+	}
+	return segments, true
+}
+
+// actionsRerunTarget resolves the Actions run, and where possible the exact job,
+// that a check's details URL names. It parses the URL and reads only its path:
+// a real details URL routinely carries a query (?check_suite_focus=true) or a
+// step fragment (#step:4:12), and neither belongs to the job identity.
+//
+// Only ".../actions/runs/<run-id>/job/<id>" yields a job id, because that `id`
+// is the job's databaseId, which is what `gh run rerun --job` requires. Two
+// shapes are deliberately rejected rather than downgraded to the whole run:
+// the browser's ".../runs/<run-id>/jobs/<n>" form, whose number is a per-run
+// display index the API answers with 404, and any other unrecognized path under
+// a run. Re-running a run can restart more than one job, so widening one
+// check's rerun on an unparsable link is a blast radius this policy must not
+// take.
+func (h *Host) actionsRerunTarget(link string) (runID, jobID string, ok bool) {
+	segments, ok := h.actionsRunSegments(link)
+	if !ok {
+		return "", "", false
+	}
+	runID = segments[0]
+	switch {
+	case len(segments) == 1:
+		return runID, "", true
+	case len(segments) == 3 && segments[1] == "job" && isNumericID(segments[2]):
+		return runID, segments[2], true
+	default:
+		return "", "", false
+	}
+}
+
+// PreRunFailures reports which of the given failed checks GitHub Actions failed
+// during the job's setup phase - before any repository step ran. Actions
+// resolves and downloads every action a job uses inside "Set up job", so an
+// action-download outage ("Failed to resolve action download info", HTTP 503)
+// fails that step and the job never executes a repository step. It reads the
+// job's own step-level conclusions, never log text, and fails closed: a check
+// whose job it cannot resolve or read is simply not flagged, so it stays a
+// genuine failure. The result is positional (parallel to checks), so a
+// same-named genuine failure never inherits another check's infrastructure flag.
+func (h *Host) PreRunFailures(ctx context.Context, checks []scm.Check) ([]bool, error) {
+	result := make([]bool, len(checks))
+	// Cache each run's jobs so several checks from one run cost one API call.
+	runJobs := map[string][]githubRunJob{}
+	for i, check := range checks {
+		runID, jobID, ok := h.actionsRerunTarget(check.Link)
+		if !ok {
+			continue
+		}
+		jobs, seen := runJobs[runID]
+		if !seen {
+			jobs = h.fetchRunJobs(ctx, runID)
+			runJobs[runID] = jobs
+		}
+		job, found := matchRunJob(jobs, jobID, check.Name)
+		if found && jobFailedAtSetup(job) {
+			result[i] = true
+		}
+	}
+	return result, nil
+}
+
+// fetchRunJobs reads a run's jobs (with their steps) from Actions. A run it
+// cannot read yields no jobs, so every check on it fails closed to a genuine
+// failure rather than being guessed as infrastructure.
+func (h *Host) fetchRunJobs(ctx context.Context, runID string) []githubRunJob {
+	viewArgs := append([]string{"run", "view", runID}, h.repoArgs()...)
+	viewArgs = append(viewArgs, "--json", "jobs")
+	out, err := h.cmd(ctx, "gh", viewArgs...).Output()
+	if err != nil {
+		return nil
+	}
+	var payload githubRunView
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return nil
+	}
+	return payload.Jobs
+}
+
+// matchRunJob finds the job a check names: by databaseId when the check's link
+// carried one, otherwise by job name. A re-run can renumber jobs, so the name
+// fallback keeps a check matchable when its link named only the run.
+func matchRunJob(jobs []githubRunJob, jobID, checkName string) (githubRunJob, bool) {
+	if jobID != "" {
+		for _, job := range jobs {
+			if strconv.Itoa(job.DatabaseID) == jobID {
+				return job, true
+			}
+		}
+	}
+	for _, job := range jobs {
+		if normalizeRunName(job.Name) == normalizeRunName(checkName) {
+			return job, true
+		}
+	}
+	return githubRunJob{}, false
+}
+
+// jobFailedAtSetup reports whether a failed job failed in its setup step, before
+// any repository step ran. It requires the job itself to be failed and its setup
+// step ("Set up job", always step 1) to carry a failure conclusion; a job whose
+// setup succeeded and failed a later step is a real failure and is never matched.
+func jobFailedAtSetup(job githubRunJob) bool {
+	if !isFailedJob(job) {
+		return false
+	}
+	for _, step := range job.Steps {
+		if step.Number == 1 || strings.EqualFold(strings.TrimSpace(step.Name), "Set up job") {
+			return strings.EqualFold(strings.TrimSpace(step.Conclusion), "failure")
+		}
+	}
+	return false
+}
+
+func isNumericID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.MergeableState, error) {
-	args := append([]string{"pr", "view", pr.Number}, h.repoArgs()...)
+	selector, err := prSelector(pr)
+	if err != nil {
+		return "", err
+	}
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "mergeable", "--jq", ".mergeable")
 	cmd := h.cmd(ctx, "gh", args...)
 	out, err := cmd.Output()
@@ -361,686 +1048,6 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, _ *scm.PR, branch, head
 	return "", nil
 }
 
-// DefaultBotLogin is the GitHub account a reviewing bot posts under when the
-// caller does not override it. It mirrors the config default; the two layers are
-// independent (the github package does not import config), so the literal is
-// duplicated deliberately.
-const DefaultBotLogin = "devin-ai-integration[bot]"
-
-// botLoginSuffix is the type-marker REST glues onto a bot actor's login to
-// fit it into the User namespace. GraphQL's Bot type does NOT carry it (the
-// __typename field carries the type instead), so the same bot has two login
-// strings across the two APIs. normalizeBotLogin strips it from both sides
-// before comparison so a config in either form matches an API value in
-// either form.
-const botLoginSuffix = "[bot]"
-
-// normalizeBotLogin strips a trailing "[bot]" (case-insensitive) and lowercases
-// the rest, returning the bare app slug for a bot or the bare login for a
-// human. GitHub reserves app slugs — a human cannot register a bot's slug — so
-// slug equality is a safe identity match. Trimming the suffix on both sides
-// means a config value "devin-ai-integration[bot]" (REST form) and a GraphQL
-// author login "devin-ai-integration" (slug form) compare equal, and a
-// slug-form config also matches a REST "[bot]" login.
-func normalizeBotLogin(s string) string {
-	s = strings.TrimSpace(s)
-	if strings.HasSuffix(strings.ToLower(s), botLoginSuffix) {
-		s = s[:len(s)-len(botLoginSuffix)]
-	}
-	return strings.ToLower(strings.TrimSpace(s))
-}
-
-// botLoginMatch reports whether apiLogin identifies the same actor as
-// configuredLogin, normalizing the REST "[bot]" suffix on both sides. Use this
-// instead of a bare strings.EqualFold against a bot login: GitHub's REST and
-// GraphQL APIs return different login strings for the same bot (REST glues a
-// "[bot]" type-marker into the login; GraphQL's Bot type does not), so an
-// exact comparison silently never matches the GraphQL form — the root cause of
-// the false-green bug where every bot thread was skipped and the verdict read
-// as APPROVED with zero findings.
-func botLoginMatch(apiLogin, configuredLogin string) bool {
-	return strings.EqualFold(normalizeBotLogin(apiLogin), normalizeBotLogin(configuredLogin))
-}
-
-// actorKind returns "bot" if the API actor is a Bot-type actor, "human" if it
-// is a User, or "" if the type is unknown/missing. GraphQL exposes the actor
-// type as __typename; REST exposes it as user.type. This is the positive
-// bot-vs-human discriminator GitHub designed for exactly this purpose —
-// stronger than inferring from a "[bot]" suffix on the login, and it does not
-// rely on app-slug reservation as the sole guarantee. Callers should require
-// the actor to be a bot (actorKind == "bot") before honoring its findings as
-// review-bot findings.
-func actorKind(typename, restType string) string {
-	t := strings.TrimSpace(typename)
-	if t == "" {
-		t = strings.TrimSpace(restType)
-	}
-	switch strings.ToLower(t) {
-	case "bot":
-		return "bot"
-	case "user":
-		return "human"
-	}
-	return ""
-}
-
-// apiArgs builds the args for `gh api repos/{owner}/{repo}/<suffix>`. The repo
-// slug is embedded in the path because `gh api` (unlike `gh pr`) does not accept
-// --repo; this is the gh-api equivalent of repoArgs(). When the slug is unknown
-// the {owner}/{repo} placeholder lets gh resolve the repo from its working dir.
-func (h *Host) apiArgs(suffix string) []string {
-	repo := h.repo
-	if repo == "" {
-		repo = "{owner}/{repo}"
-	}
-	return []string{"api", "repos/" + repo + "/" + suffix}
-}
-
-// paginatedAPIArgs is apiArgs plus --paginate, so gh follows the Link headers
-// and fetches every page. Without it a list read (PR review comments, issue
-// comments, or reviews) silently stops at the first page (~30 items): a severe
-// finding or the head-SHA review object that lands beyond page 1 would be
-// dropped, and the review gate could then wrongly treat a changes-requested PR
-// as approved.
-//
-// NOTE: for a JSON-array endpoint, `gh api --paginate` (without --slurp) emits
-// each page as its OWN top-level array document concatenated back-to-back
-// ([...][...]), not one merged array. Callers must stream-decode the output
-// (see decodePaginatedArray), since a single json.Unmarshal fails once a second
-// page exists.
-func (h *Host) paginatedAPIArgs(suffix string) []string {
-	return append(h.apiArgs(suffix), "--paginate")
-}
-
-// decodePaginatedArray flattens the multi-document output of a paginated
-// `gh api` array read (see paginatedAPIArgs) into a single slice. Each page is a
-// separate top-level JSON array, so it decodes the stream value-by-value and
-// concatenates every page; a single-page (one array) response decodes as one
-// value. An empty/whitespace-only body yields a nil slice.
-func decodePaginatedArray[T any](out []byte) ([]T, error) {
-	dec := json.NewDecoder(bytes.NewReader(out))
-	var items []T
-	for {
-		var page []T
-		if err := dec.Decode(&page); err != nil {
-			if errors.Is(err, io.EOF) {
-				return items, nil
-			}
-			return nil, err
-		}
-		items = append(items, page...)
-	}
-}
-
-type ghUser struct {
-	Login string `json:"login"`
-	// Type carries the actor type ("Bot" or "User") from the REST API. GraphQL
-	// does not populate it (it uses __typename instead); see ghThreadAuthor.
-	Type string `json:"type,omitempty"`
-}
-
-// reviewThreadsQuery reads the PR's review threads together with their
-// resolution and outdated state so the read layer can keep only LIVE findings.
-// GitHub re-anchors a bot's old inline comments onto the latest commit, so a
-// REST read of pulls/{n}/comments reports already-addressed comments as live and
-// the verdict never clears. The GraphQL reviewThreads API exposes the truth:
-// isResolved (a human/bot resolved the thread) and isOutdated (the code the
-// comment was anchored to has changed = effectively addressed). The first
-// comment in a thread carries its author, anchor (path/line), and databaseId
-// (the REST id needed to reply); replies follow.
-//
-// It is CURSOR-PAGINATED via $cursor / pageInfo: reviewThreads returns threads
-// oldest-first and counts live, outdated, and resolved threads alike toward the
-// first:100 window. On a busy PR a newest live severe finding could land past
-// the first page, get truncated, and wrongly read as APPROVED, so GetBotFindings
-// walks every page (after:$cursor) before filtering.
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved isOutdated comments(first:10){nodes{author{login __typename} databaseId path line originalLine body url originalCommit{oid}}}}}}}}`
-
-// ghReviewThreadsResponse is the `gh api graphql` payload for reviewThreadsQuery.
-type ghReviewThreadsResponse struct {
-	Data struct {
-		Repository *struct {
-			PullRequest struct {
-				ReviewThreads struct {
-					PageInfo struct {
-						HasNextPage bool   `json:"hasNextPage"`
-						EndCursor   string `json:"endCursor"`
-					} `json:"pageInfo"`
-					Nodes []ghReviewThread `json:"nodes"`
-				} `json:"reviewThreads"`
-			} `json:"pullRequest"`
-		} `json:"repository"`
-	} `json:"data"`
-}
-
-// ghReviewThread is one PR review thread: its resolution/outdated state plus the
-// ordered comments it contains (the first is the anchoring comment).
-type ghReviewThread struct {
-	IsResolved bool `json:"isResolved"`
-	IsOutdated bool `json:"isOutdated"`
-	Comments   struct {
-		Nodes []ghThreadComment `json:"nodes"`
-	} `json:"comments"`
-}
-
-// ghThreadComment is a single comment node within a review thread. DatabaseID is
-// the comment's REST id, used as ReviewComment.ID so the loop can reply to it.
-// OriginalCommit.OID is the head SHA the thread was originally posted on, used by
-// GetBotFindings to filter stale threads from older heads (see the headSHA filter).
-type ghThreadComment struct {
-	Author         ghThreadAuthor `json:"author"`
-	DatabaseID     int64          `json:"databaseId"`
-	Path           string         `json:"path"`
-	Line           int            `json:"line"`
-	OriginalLine   int            `json:"originalLine"`
-	Body           string         `json:"body"`
-	URL            string         `json:"url"`
-	OriginalCommit struct {
-		OID string `json:"oid"`
-	} `json:"originalCommit"`
-}
-
-// ghThreadAuthor is the author of a GraphQL review-thread comment. GraphQL
-// returns the actor type as __typename ("Bot" or "User"), NOT as a `type`
-// field like REST does. The login for a Bot is the bare app slug (no "[bot]"
-// suffix); see normalizeBotLogin for why both forms must compare equal.
-type ghThreadAuthor struct {
-	Login    string `json:"login"`
-	Typename string `json:"__typename"`
-}
-
-// ownerName resolves the configured repo slug into its GraphQL variables.
-// Unlike REST endpoint placeholders, GraphQL field values cannot infer the
-// repository from the working directory, so an unresolved slug is an error.
-func (h *Host) ownerName() (string, string, error) {
-	owner, name, ok := strings.Cut(h.repo, "/")
-	owner, name = strings.TrimSpace(owner), strings.TrimSpace(name)
-	if !ok || owner == "" || name == "" {
-		return "", "", fmt.Errorf("github repository slug %q is not owner/name", h.repo)
-	}
-	return owner, name, nil
-}
-
-// reviewThreadsArgs builds the `gh api graphql` invocation that fetches one page
-// of the PR's review threads (reviewThreadsQuery) bound to this host's repo and
-// prNumber. cursor is the endCursor of the previous page ("" for the first page,
-// where $cursor resolves to null = start from the beginning). It reuses the same
-// CmdFactory as every other gh call; only the args differ.
-//
-// owner and name are passed with -f (raw string), not -F: -F magic-coerces an
-// all-numeric value (e.g. a repo literally named "123") into a JSON number,
-// which then fails to bind to the String! GraphQL variable. The integer number
-// variable still uses -F so it binds to Int!.
-func (h *Host) reviewThreadsArgs(prNumber int, cursor string) ([]string, error) {
-	owner, name, err := h.ownerName()
-	if err != nil {
-		return nil, err
-	}
-	args := []string{
-		"api", "graphql",
-		"-f", "query=" + reviewThreadsQuery,
-		"-f", "owner=" + owner,
-		"-f", "name=" + name,
-		"-F", fmt.Sprintf("number=%d", prNumber),
-	}
-	if cursor != "" {
-		args = append(args, "-f", "cursor="+cursor)
-	}
-	return args, nil
-}
-
-// ghReview is a PR review object from `gh api repos/{owner}/{repo}/pulls/{n}/reviews`.
-type ghReview struct {
-	State       string `json:"state"`
-	CommitID    string `json:"commit_id"`
-	SubmittedAt string `json:"submitted_at"`
-	HTMLURL     string `json:"html_url"`
-	Body        string `json:"body"`
-	User        ghUser `json:"user"`
-}
-
-// GetBotFindings returns botLogin's LIVE, file-scoped findings on the PR. It
-// reads the PR's review threads via `gh api graphql` (reviewThreadsQuery) and
-// keeps only threads that are still actionable:
-//
-//   - the thread's FIRST comment was authored by botLogin (replies are ignored);
-//   - the thread is NOT resolved (isResolved==false) and NOT outdated
-//     (isOutdated==false); and
-//   - the thread is file-scoped (its anchor has a path).
-//
-// isOutdated is the primary liveness signal — more reliable than commit_id
-// matching. GitHub re-anchors a bot's old inline comments onto the latest
-// commit, so a REST commit_id read reports already-addressed comments as live;
-// an outdated thread means the anchored code changed (the comment was
-// effectively addressed) and a resolved thread means someone closed it. Both are
-// excluded so a fixed-but-lingering comment no longer counts as a phantom
-// finding and the post-PR review loop can converge.
-//
-// Top-level (issue) comments are not review threads and so never appear here:
-// they carry no path, are review summaries rather than actionable file-scoped
-// findings, and do not drive the verdict. Severity is parsed from each body.
-func (h *Host) GetBotFindings(ctx context.Context, prNumber int, headSHA, botLogin string) ([]scm.ReviewComment, error) {
-	botLogin = strings.TrimSpace(botLogin)
-	if botLogin == "" {
-		botLogin = DefaultBotLogin
-	}
-
-	// Fail-safe: without a head SHA we cannot confirm we are reading the current
-	// commit's review state, so report no findings rather than risk surfacing a
-	// stale thread. Mirrors GetReviewVerdict's empty-head short-circuit and keeps
-	// the two consistent (and short-circuits before any gh round-trip). Trim once
-	// here so the originalCommit.oid comparison below is symmetric with the
-	// (also-trimmed) oid (a callers-can't-be-trusted defensive normalization).
-	headSHA = strings.TrimSpace(headSHA)
-	if headSHA == "" {
-		return nil, nil
-	}
-
-	// Walk every page of review threads before filtering. reviewThreads returns
-	// threads oldest-first and counts resolved/outdated threads toward the
-	// first:100 window, so on a busy PR a newest live severe finding can land past
-	// page 1; reading only the first page could truncate it and wrongly read the
-	// verdict as APPROVED. The empty-endCursor guard prevents an infinite loop if
-	// the API ever reports hasNextPage:true without advancing the cursor.
-	var threads []ghReviewThread
-	cursor := ""
-	for {
-		args, err := h.reviewThreadsArgs(prNumber, cursor)
-		if err != nil {
-			return nil, fmt.Errorf("build review threads request: %w", err)
-		}
-		out, err := h.cmd(ctx, "gh", args...).Output()
-		if err != nil {
-			return nil, fmt.Errorf("gh api graphql reviewThreads: %w", err)
-		}
-		var resp ghReviewThreadsResponse
-		if err := json.Unmarshal(out, &resp); err != nil {
-			return nil, fmt.Errorf("parse review threads: %w", err)
-		}
-		if resp.Data.Repository == nil {
-			return nil, fmt.Errorf("parse review threads: repository is null")
-		}
-		rt := resp.Data.Repository.PullRequest.ReviewThreads
-		threads = append(threads, rt.Nodes...)
-		if !rt.PageInfo.HasNextPage || strings.TrimSpace(rt.PageInfo.EndCursor) == "" {
-			break
-		}
-		cursor = rt.PageInfo.EndCursor
-	}
-
-	findings := make([]scm.ReviewComment, 0, len(threads))
-	for _, t := range threads {
-		// A resolved thread (someone marked it done) or an outdated thread (the
-		// anchored code changed = effectively addressed) is no longer live and must
-		// not count toward the verdict — this is the convergence mechanism.
-		if t.IsResolved || t.IsOutdated {
-			continue
-		}
-		if len(t.Comments.Nodes) == 0 {
-			continue
-		}
-		first := t.Comments.Nodes[0]
-		// Only the configured review bot's threads are findings. Match the
-		// author by normalized login (handles the REST "[bot]" vs GraphQL
-		// bare-slug inconsistency) AND positively assert the actor is a Bot —
-		// defense in depth so a human who happens to share a slug (impossible
-		// in practice since GitHub reserves app slugs, but asserted anyway)
-		// can never inject findings. GraphQL carries the actor type as
-		// __typename (Typename here); REST carries it as user.type.
-		if actorKind(first.Author.Typename, "") != "bot" {
-			continue
-		}
-		if !botLoginMatch(first.Author.Login, botLogin) {
-			continue
-		}
-		// Filter stale findings from older heads: a (bot) thread whose
-		// originalCommit.oid does not match the current headSHA was posted on a
-		// previous commit the loop already fixed. This runs after the bot-identity
-		// checks above because findings are exclusively bot threads — "stale
-		// finding" only has meaning among the bot's own threads, so the head-SHA
-		// scope belongs here, not before the author filter. GitHub only marks a
-		// thread isOutdated when the anchored lines changed, so a fix that touched
-		// different lines leaves the thread live — but it is stale (Devin chose not
-		// to re-post it on the new head). Without this filter, stale threads drive
-		// redundant fix rounds and get redundant "Addressed in <sha>" replies on
-		// every push (observed on a real PR: 4 replies across 4 commits on one
-		// thread). A thread with an empty originalCommit.oid (a host or API version
-		// that doesn't expose the field) is treated as current-head (fail-safe:
-		// don't suppress findings when the metadata is absent).
-		//
-		// Tradeoff: this assumes Devin re-posts still-applicable findings as NEW
-		// threads on each head it reviews. If Devin instead reviews only the
-		// inter-head diff and does NOT re-surface a still-valid finding whose
-		// anchored lines were untouched, this filter silently drops a genuinely-
-		// unaddressed finding and the loop could converge to APPROVED with a real
-		// bug unfixed. The CI idle timeout / human escalation provide a backstop.
-		// Empirically (observed across multiple repos), Devin posts fresh review
-		// threads on each head it reviews, so this assumption holds in practice.
-		if oid := strings.TrimSpace(first.OriginalCommit.OID); oid != "" && !strings.EqualFold(oid, headSHA) {
-			continue
-		}
-		if strings.TrimSpace(first.Path) == "" {
-			continue // not a file-scoped finding
-		}
-		findings = append(findings, scm.ReviewComment{
-			ID:       first.DatabaseID,
-			Path:     first.Path,
-			Line:     pickLine(first.Line, first.OriginalLine),
-			Body:     first.Body,
-			Severity: severityFromBody(first.Body),
-			URL:      first.URL,
-		})
-	}
-	return findings, nil
-}
-
-// GetReviewVerdict derives botLogin's verdict for headSHA from the PR's review
-// objects + its LIVE findings, never from a commit status check. It also returns
-// the findings it read so callers do not need a second GetBotFindings round-trip
-// (the verdict already required them).
-//
-// Why derive: Devin posts PR reviews with state=COMMENTED (never
-// CHANGES_REQUESTED) and publishes no commit status check, so a status rollup is
-// empty even when it has flagged blocking issues. It also re-reviews per commit,
-// so there can be several review objects per head SHA.
-//
-// Derivation:
-//   - NONE: the bot has never reviewed the PR.
-//   - PENDING: the bot has reviewed before but not yet headSHA.
-//   - CHANGES_REQUESTED: the bot reviewed headSHA and EITHER its MOST RECENT
-//     review on the matching head is a native CHANGES_REQUESTED state, OR it left
-//     at least one severe (high/medium) LIVE file-scoped finding.
-//   - MANUAL_REVIEW: the bot reviewed headSHA and its top-level body reports
-//     findings ("found N potential issues"), but no severe LIVE file-scoped
-//     finding could be loaded to drive an automated fix (threads missing,
-//     filtered to another commit, or unreadable). Not green, never auto-fixed:
-//     a human must verify rather than have the fixer fabricate changes.
-//   - APPROVED: the bot reviewed headSHA, its most recent head review is native
-//     APPROVED or its top-level body says "No Issues Found", and no severe LIVE
-//     file-scoped findings remain.
-//   - PENDING_AMBIGUOUS: the bot reviewed headSHA with a COMMENTED state whose
-//     body carries no recognized clean/finding verdict and no severe findings
-//     loaded. Handled like PENDING (grace/fail-open) but distinguishable so the
-//     caller can log an explicit "ambiguous body" reason.
-//
-// Only the MOST RECENT bot review targeting the head (by submitted_at) decides
-// the native state: a bot that requested changes and then re-reviewed the same
-// SHA as APPROVED must clear, so the states are not OR-ed across the head's
-// review history. A native CHANGES_REQUESTED state is honored directly: a
-// reviewer that uses GitHub's request-changes flow must not be treated as
-// approved just because no inline body parsed as severe. Otherwise only live
-// file-scoped findings drive CHANGES_REQUESTED: GetBotFindings already excludes
-// resolved/outdated review threads, so a finding the bot left but whose code has
-// since changed (or whose thread was resolved) no longer keeps the verdict
-// not-green — which is what finally lets the loop converge to APPROVED.
-func (h *Host) GetReviewVerdict(ctx context.Context, prNumber int, headSHA, botLogin string) (scm.ReviewVerdict, []scm.ReviewComment, error) {
-	botLogin = strings.TrimSpace(botLogin)
-	if botLogin == "" {
-		botLogin = DefaultBotLogin
-	}
-
-	// Fail-safe: without a head SHA we cannot scope reviews to the current commit.
-	// Rather than letting an empty SHA act as a wildcard that matches every review
-	// in the PR's history, report not-yet-reviewed so the caller's grace window /
-	// fail policy decides. This also keeps GetReviewVerdict and GetBotFindings
-	// consistent (GetBotFindings likewise returns nothing on an empty head). Trim
-	// once here so every downstream comparison — and the GetBotFindings call below —
-	// uses the normalized value (a callers-can't-be-trusted defensive normalization).
-	headSHA = strings.TrimSpace(headSHA)
-	if headSHA == "" {
-		return scm.VerdictNone, nil, nil
-	}
-
-	reviewsOut, err := h.cmd(ctx, "gh", h.paginatedAPIArgs(fmt.Sprintf("pulls/%d/reviews", prNumber))...).Output()
-	if err != nil {
-		return "", nil, fmt.Errorf("gh api pulls reviews: %w", err)
-	}
-	reviews, err := decodePaginatedArray[ghReview](reviewsOut)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse PR reviews: %w", err)
-	}
-
-	reviewedAny, reviewedHead, headChangesRequested := false, false, false
-	headNativeApproved := false
-	var latestHeadBody string
-	// Track the most recent bot review targeting the head (by submitted_at) so its
-	// state — not the OR of every state in the head's history — decides the native
-	// verdict. Ties (or unparseable timestamps) fall back to API order, which is
-	// already chronological, so the last matching review wins.
-	var latestHeadAt time.Time
-	var haveLatestHead bool
-	for _, r := range reviews {
-		// Same identity check as GetBotFindings: normalized login match plus a
-		// positive Bot-type assertion. REST carries the type as user.type
-		// (e.g. "Bot"); the login carries the "[bot]" suffix. Both signals are
-		// checked so a non-bot review (a human's) is never counted as the
-		// configured review bot's verdict even if logins collided.
-		if actorKind("", r.User.Type) != "bot" {
-			continue
-		}
-		if !botLoginMatch(r.User.Login, botLogin) {
-			continue
-		}
-		reviewedAny = true
-		if !sameCommitSHA(r.CommitID, headSHA) {
-			continue
-		}
-		reviewedHead = true
-		submittedAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(r.SubmittedAt))
-		if haveLatestHead && submittedAt.Before(latestHeadAt) {
-			continue
-		}
-		latestHeadAt = submittedAt
-		haveLatestHead = true
-		state := strings.TrimSpace(r.State)
-		headChangesRequested = strings.EqualFold(state, "CHANGES_REQUESTED")
-		headNativeApproved = strings.EqualFold(state, "APPROVED")
-		latestHeadBody = r.Body
-	}
-	if !reviewedAny {
-		return scm.VerdictNone, nil, nil
-	}
-
-	bodyVerdict := devinReviewBodyVerdict(latestHeadBody)
-	findings, err := h.GetBotFindings(ctx, prNumber, headSHA, botLogin)
-	if err != nil {
-		// A native CHANGES_REQUESTED on the head is authoritative from the review
-		// state alone, so surface not-green even when the findings read fails.
-		if headChangesRequested {
-			return scm.VerdictChangesRequested, nil, nil
-		}
-		// The body reports findings but we could not even load them: this is not
-		// green and must not be treated as a silent read error (which the caller
-		// would fail open on). Escalate to a human instead of dropping the signal.
-		if bodyVerdict == reviewBodyFindings {
-			return scm.VerdictManualReview, nil, nil
-		}
-		return "", nil, err
-	}
-	if !reviewedHead {
-		return scm.VerdictPending, findings, nil
-	}
-	if headChangesRequested {
-		return scm.VerdictChangesRequested, findings, nil
-	}
-	for _, f := range findings {
-		if f.Path == "" {
-			continue // top-level summary, not a file-scoped finding
-		}
-		if f.Severity == severityHigh || f.Severity == severityMedium {
-			return scm.VerdictChangesRequested, findings, nil
-		}
-	}
-	// The body reports findings but none loaded as a severe file-scoped finding
-	// (threads missing/filtered/unresolved). This is not green, but there is
-	// nothing concrete to auto-fix — a human must verify.
-	if bodyVerdict == reviewBodyFindings {
-		return scm.VerdictManualReview, findings, nil
-	}
-	if headNativeApproved || bodyVerdict == reviewBodyClean {
-		return scm.VerdictApproved, findings, nil
-	}
-	// Reviewed the current head with a COMMENTED state but no recognizable
-	// verdict: distinct from "has not reviewed this head yet" so the caller can
-	// log an explicit ambiguous-body reason. Behaves like PENDING downstream.
-	return scm.VerdictPendingAmbiguous, findings, nil
-}
-
-// sameCommitSHA reports whether a review's commit_id and the run's head SHA name
-// the same commit. GitHub's REST API sometimes reports an abbreviated commit_id
-// on review objects, so an exact string match alone would miss a current-head
-// review and leave the verdict stuck at PENDING. A non-exact match is therefore
-// accepted, but ONLY as a genuine git abbreviation: both sides must be hex, the
-// shorter must be at least a 7-char (git's default) abbreviation, and the LONGER
-// must be a full-length object id (40 hex for SHA-1, 64 for SHA-256). Anchoring
-// the long side to a full-length SHA keeps this from ever collapsing two
-// arbitrary partial strings — or non-SHA text — into a false "same commit"; a
-// false positive would scope the review verdict to the wrong commit. Two
-// distinct full-length SHAs are equal-length and non-equal, so they never
-// prefix-match. Fails safe: when either operand is not a recognizable SHA, no
-// fuzzy match is attempted.
-func sameCommitSHA(reviewSHA, headSHA string) bool {
-	reviewSHA = strings.ToLower(strings.TrimSpace(reviewSHA))
-	headSHA = strings.ToLower(strings.TrimSpace(headSHA))
-	if reviewSHA == "" || headSHA == "" {
-		return false
-	}
-	if reviewSHA == headSHA {
-		return true
-	}
-	short, long := reviewSHA, headSHA
-	if len(short) > len(long) {
-		short, long = long, short
-	}
-	if len(short) < 7 || !isFullLengthSHA(long) || !isHexString(short) {
-		return false
-	}
-	return strings.HasPrefix(long, short)
-}
-
-// isHexString reports whether s is non-empty and composed solely of lowercase
-// hex digits. Callers lowercase before calling.
-func isHexString(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return false
-		}
-	}
-	return true
-}
-
-// isFullLengthSHA reports whether s is a full-length git object id: 40 hex chars
-// for SHA-1 or 64 for SHA-256.
-func isFullLengthSHA(s string) bool {
-	return (len(s) == 40 || len(s) == 64) && isHexString(s)
-}
-
-type reviewBodyVerdict int
-
-const (
-	reviewBodyUnknown reviewBodyVerdict = iota
-	reviewBodyClean
-	reviewBodyFindings
-)
-
-var (
-	reviewBodyNoIssuesRE = regexp.MustCompile(`(?i)\bno\s+issues?\s+found\b`)
-	// reviewBodyZeroFoundRE is the explicit zero-count complement of the "found N
-	// potential issues" findings template: reviewBodyFindingsRE requires N>=1, so
-	// without this a clean "Found 0 potential issues" body would fall through to
-	// an ambiguous/pending verdict instead of green. A "0" count is unambiguously
-	// clean, so it can never false-green a real "found N" finding.
-	reviewBodyZeroFoundRE = regexp.MustCompile(`(?i)\bfound\s+0+\s+potential\s+issues?\b`)
-	reviewBodyFindingsRE  = regexp.MustCompile(`(?i)\bfound\s+[1-9][0-9]*\s+potential\s+issues?\b`)
-)
-
-func devinReviewBodyVerdict(body string) reviewBodyVerdict {
-	body = strings.Join(strings.Fields(body), " ")
-	if body == "" {
-		return reviewBodyUnknown
-	}
-	if reviewBodyFindingsRE.MatchString(body) {
-		return reviewBodyFindings
-	}
-	if reviewBodyNoIssuesRE.MatchString(body) || reviewBodyZeroFoundRE.MatchString(body) {
-		return reviewBodyClean
-	}
-	return reviewBodyUnknown
-}
-
-// ReplyToReviewComment posts a threaded reply under an existing PR review comment
-// (identified by its REST/database id) via
-// `gh api repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies` (a POST: gh
-// switches to POST automatically once a -f field is supplied). It reuses
-// apiArgs() for the repo-scoped path, mirroring every other gh-api call. The
-// review loop calls it best-effort to acknowledge addressed findings; callers
-// should gate on Capabilities().Reviews.
-func (h *Host) ReplyToReviewComment(ctx context.Context, prNumber int, commentID int64, body string) error {
-	args := append(h.apiArgs(fmt.Sprintf("pulls/%d/comments/%d/replies", prNumber, commentID)), "-f", "body="+body)
-	if out, err := h.cmd(ctx, "gh", args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("gh api reply to review comment: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-const (
-	severityHigh   = "high"
-	severityMedium = "medium"
-	severityLow    = "low"
-)
-
-// severityFromBody parses a coarse severity bucket from a bot finding body.
-// "high" requires an EXPLICIT marker — only the 🔴 emoji (Devin uses it for
-// bug/high); 🚩 marks medium. The keyword fallback deliberately never escalates
-// to high: a bare-word heuristic false-positives on negated or contextual
-// mentions ("this is not a bug", "no critical issues" would otherwise both
-// register as high), so an unmarked body is treated conservatively as medium
-// (still severe enough to gate) unless it is explicitly low/nit.
-//
-// Keyword matching for low/nit is word-boundary based rather than substring
-// based: a plain strings.Contains for "low" also fires on "allow", "follow",
-// "below", "flow", and "slow", which would silently downgrade a severe unmarked
-// finding to low and drop it from the verdict.
-func severityFromBody(body string) string {
-	switch {
-	case strings.Contains(body, "🔴"):
-		return severityHigh
-	case strings.Contains(body, "🚩"):
-		return severityMedium
-	}
-	words := bodyWordSet(strings.ToLower(body))
-	switch {
-	case words["low"] || words["nit"]:
-		return severityLow
-	default:
-		return severityMedium
-	}
-}
-
-// bodyWordSet splits text into whole words (maximal runs of letters and digits),
-// so keyword lookups are boundary-aware instead of matching arbitrary
-// substrings of longer words.
-func bodyWordSet(text string) map[string]bool {
-	set := map[string]bool{}
-	for _, w := range strings.FieldsFunc(text, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	}) {
-		set[w] = true
-	}
-	return set
-}
-
-func pickLine(line, originalLine int) int {
-	if line > 0 {
-		return line
-	}
-	return originalLine
-}
-
 type githubRun struct {
 	DatabaseID   int    `json:"databaseId"`
 	HeadSHA      string `json:"headSha"`
@@ -1054,9 +1061,18 @@ type githubRunView struct {
 }
 
 type githubRunJob struct {
+	DatabaseID int             `json:"databaseId"`
+	Name       string          `json:"name"`
+	Conclusion string          `json:"conclusion"`
+	Status     string          `json:"status"`
+	Steps      []githubJobStep `json:"steps"`
+}
+
+type githubJobStep struct {
 	Name       string `json:"name"`
-	Conclusion string `json:"conclusion"`
+	Number     int    `json:"number"`
 	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
 }
 
 func runMatchesTargets(ctx context.Context, h *Host, run githubRun, targets map[string]struct{}) bool {

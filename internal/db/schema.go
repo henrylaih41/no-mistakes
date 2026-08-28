@@ -7,35 +7,39 @@ CREATE TABLE IF NOT EXISTS repos (
     upstream_url   TEXT NOT NULL,
     fork_url       TEXT,
     default_branch TEXT NOT NULL DEFAULT 'main',
-    default_route  TEXT,
     created_at     INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS routes (
-    repo_id    TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
-    name       TEXT NOT NULL,
-    base_url   TEXT NOT NULL,
-    fork_url   TEXT,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY (repo_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
     id                   TEXT PRIMARY KEY,
     repo_id              TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     branch               TEXT NOT NULL,
-    head_sha             TEXT NOT NULL,
-    base_sha             TEXT NOT NULL,
-    status               TEXT NOT NULL DEFAULT 'pending',
-    pr_url               TEXT,
-    error                TEXT,
+    head_sha                TEXT NOT NULL,
+    base_sha                TEXT NOT NULL,
+    worktree_dir            TEXT,
+    submitted_head_sha      TEXT,
+    no_mistakes_version     TEXT,
+    no_mistakes_build_sha   TEXT,
+    review_approved_head_sha TEXT,
+    status                  TEXT NOT NULL DEFAULT 'pending',
+    pr_url                  TEXT,
+    pr_state                TEXT,
+    pr_state_observed_at    INTEGER,
+    ci_ready_at             INTEGER,
+    ci_ready_no_ci          INTEGER NOT NULL DEFAULT 0,
+    last_pushed_sha         TEXT,
+    push_target_kind        TEXT,
+    push_target_fingerprint TEXT,
+    push_ref                TEXT,
+    last_pushed_at          INTEGER,
+    push_generation         INTEGER,
+    push_active             INTEGER NOT NULL DEFAULT 0,
+    terminal_head_verified_at INTEGER,
+    error                   TEXT,
     awaiting_agent_since INTEGER,
-    parked_ms            INTEGER,
-    design_context_json  TEXT,
-    review_loop_disabled INTEGER NOT NULL DEFAULT 0,
-    route                TEXT,
-    review_ready_since   INTEGER,
-    created_at           INTEGER NOT NULL,
+	parked_ms            INTEGER,
+	design_context_json  TEXT,
+	created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
 
@@ -55,7 +59,8 @@ CREATE TABLE IF NOT EXISTS step_results (
     last_activity_at INTEGER,
     last_activity    TEXT,
     agent_pid        INTEGER,
-    auto_fix_limit   INTEGER
+    auto_fix_limit   INTEGER,
+    ci_fix_attempts  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS step_rounds (
@@ -64,6 +69,11 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     round                INTEGER NOT NULL,
     trigger_type         TEXT NOT NULL,
     findings_json        TEXT,
+    reviewed_head_sha    TEXT,
+    starting_head_sha    TEXT,
+    trusted_config_sha   TEXT,
+    global_config_yaml   BLOB,
+    repo_config_yaml     BLOB,
     user_findings_json   TEXT,
     selected_finding_ids TEXT,
     selection_source     TEXT,
@@ -133,6 +143,20 @@ CREATE TABLE IF NOT EXISTS intent_cache (
     session_id  TEXT NOT NULL,
     created_at  INTEGER NOT NULL
 );
+
+-- Per-branch range of pipeline-authored commits whose re-review did not
+-- complete. The next run's initial review reads this so it is not cold on
+-- uncertified fixer commits. PRIMARY KEY per branch: the latest uncertified
+-- HEAD replaces an older range.
+CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
+    repo_id       TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    branch        TEXT NOT NULL,
+    from_sha      TEXT NOT NULL,
+    to_sha        TEXT NOT NULL,
+    source_run_id TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, branch)
+);
 `
 
 // migrationStatements hold additive schema changes applied to databases that
@@ -140,12 +164,18 @@ CREATE TABLE IF NOT EXISTS intent_cache (
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
-	`ALTER TABLE repos ADD COLUMN default_route TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_override_reason TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN user_findings_json TEXT`,
+	// A parked round may retain the reviewed commit as a non-authoritative
+	// candidate. Only atomic review completion promotes it onto the run.
+	`ALTER TABLE step_rounds ADD COLUMN reviewed_head_sha TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN starting_head_sha TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN trusted_config_sha TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN global_config_yaml BLOB`,
+	`ALTER TABLE step_rounds ADD COLUMN repo_config_yaml BLOB`,
 	`ALTER TABLE runs ADD COLUMN intent TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_source TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_session_id TEXT`,
@@ -153,13 +183,53 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN awaiting_agent_since INTEGER`,
 	`ALTER TABLE runs ADD COLUMN parked_ms INTEGER`,
 	`ALTER TABLE runs ADD COLUMN design_context_json TEXT`,
-	`ALTER TABLE runs ADD COLUMN route TEXT`,
-	`ALTER TABLE runs ADD COLUMN review_loop_disabled INTEGER NOT NULL DEFAULT 0`,
-	`ALTER TABLE runs ADD COLUMN review_ready_since INTEGER`,
+	// The CI step's per-check rerun budget. It is durable because a run
+	// recovered after a daemon restart would otherwise get a fresh budget and
+	// could issue reruns beyond the documented limit; the reservation is
+	// written before the provider call, so a crash mid-request spends the
+	// budget rather than silently granting a free retry.
+	`ALTER TABLE runs ADD COLUMN ci_rerun_state TEXT`,
+	// Branch synchronization provenance is intentionally nullable. Historical
+	// rows stay unbound because mutable head_sha cannot prove a successful push.
+	`ALTER TABLE runs ADD COLUMN submitted_head_sha TEXT`,
+	// The directory this run's worktree was created in. It is durable because
+	// placement comes from operator configuration (worktree_roots) that may be
+	// edited while a run exists: recording it makes such an edit inert for
+	// runs already in flight instead of retargeting their resume, diff, and
+	// cleanup at a directory they were never created in. Nullable for rows
+	// written before the column existed, which resolve to the default
+	// <NM_HOME>/worktrees placement at read time - the only one they can have,
+	// since this column shipped with the setting that moves it
+	// (worktrees.RecordedDir).
+	`ALTER TABLE runs ADD COLUMN worktree_dir TEXT`,
+	// Build identity is nullable for historical records. New runs record the
+	// version and embedded build SHA used by the running binary.
+	`ALTER TABLE runs ADD COLUMN no_mistakes_version TEXT`,
+	`ALTER TABLE runs ADD COLUMN no_mistakes_build_sha TEXT`,
+	// Review authority is nullable and never backfilled. A historical mutable
+	// head_sha cannot prove which exact commit a completed review approved.
+	`ALTER TABLE runs ADD COLUMN review_approved_head_sha TEXT`,
+	`ALTER TABLE runs ADD COLUMN last_pushed_sha TEXT`,
+	`ALTER TABLE runs ADD COLUMN push_target_kind TEXT`,
+	`ALTER TABLE runs ADD COLUMN push_target_fingerprint TEXT`,
+	`ALTER TABLE runs ADD COLUMN push_ref TEXT`,
+	`ALTER TABLE runs ADD COLUMN last_pushed_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN push_generation INTEGER`,
+	`ALTER TABLE runs ADD COLUMN push_active INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE runs ADD COLUMN terminal_head_verified_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN pr_state TEXT`,
+	`ALTER TABLE runs ADD COLUMN pr_state_observed_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN ci_ready_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN ci_ready_no_ci INTEGER NOT NULL DEFAULT 0`,
+	// Custody return is nullable: NULL means the pipeline still owns any
+	// unpublished head this run produced; a timestamp means an explicit
+	// guarded recovery ended that ownership (internal/branchsync).
+	`ALTER TABLE runs ADD COLUMN custody_returned_at INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN last_activity_at INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0`,
 	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
 	// back as unknown, never a fabricated zero).
 	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,

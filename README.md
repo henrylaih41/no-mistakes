@@ -38,7 +38,7 @@
 Push to `no-mistakes` instead of `origin`, and it spins up a disposable worktree, runs an AI-driven validation pipeline, forwards the branch to the configured push target only after every check passes, and opens a clean PR automatically.
 
 - **Non-blocking** - the pipeline runs in an isolated worktree without disrupting your work.
-- **Agent-agnostic** - `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `grok`, or `acp:<target>` via `acpx`, with ordered fallbacks; every gate requires a runnable configured pipeline agent.
+- **Agent-agnostic** - `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, or `cursor` / `acp:<target>` via `acpx`, with ordered fallbacks; every gate requires a runnable configured pipeline agent.
 - **Agent-native** - `/no-mistakes` lets your coding agent do a task and gate it, or gate existing committed work: it runs the pipeline, has the pipeline apply safe fixes, and escalates the rest to you.
 - **Human stays in charge** - auto-fix or review findings, your call.
 - **Clean PRs by default** - push, open PR, watch CI, and auto-fix failures in one shot.
@@ -101,27 +101,7 @@ $ no-mistakes
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and initialize with `no-mistakes init --fork-url <your-fork-url>`.
 
-### Per-push routes: one clone, multiple PR targets
-
-Local **routes** generalize `--fork-url` so a single clone can raise PRs to different targets, chosen per push, without re-init or a second clone. A route is a PR base (upstream) URL plus an optional fork push URL:
-
-```sh
-# define named routes (stored locally in the gate, never committed)
-no-mistakes route add parent --base https://github.com/parent/app.git --fork-url https://github.com/you/app.git
-no-mistakes route add self   --base https://github.com/you/app.git
-no-mistakes route list
-no-mistakes route set-default parent   # optional: applied when no route is selected
-
-# pick a route for a single push
-git push no-mistakes my-branch -o no-mistakes.route=parent   # PR base = parent, branch pushed to your fork
-git push no-mistakes my-branch -o no-mistakes.route=self     # PR within your own fork
-```
-
-Resolution precedence is: an explicit `-o no-mistakes.route=<name>` &rarr; the configured default route &rarr; the gate's own recorded upstream/fork (today's behavior). An explicit but unknown route name fails the push fast with a clear error rather than silently falling back.
-
-**Trust:** routes are local-only. They live in the gate database and are never read from a pushed branch or any in-repo file, so a contributor's feature branch can neither define nor redirect a route. The push-option only *selects* a pre-defined local route by name — it can never supply a base or fork URL.
-
-From the TUI you act on each **finding**: **auto-fix** restores established behavior, **ask-master** needs implementation judgment, and **ask-user** needs a genuine product or guarantee decision.
+The TUI makes each finding's authority explicit: **auto-fix** for a bounded correction whose outcome is already known, **ask-master** for gate-owner implementation judgment, and **ask-user** for a product or guarantee choice only you can make.
 Once every check is green, the gate forwards your branch to the configured push target and opens the PR for you, so there is no manual `git push origin` and no hand-written PR body.
 Prefer to let your coding agent drive the same flow headlessly?
 Use `/no-mistakes` (see below).
@@ -132,7 +112,7 @@ Every change runs through the same pipeline. Pick the entry point that fits how 
 
 - **`git push no-mistakes`** - the explicit Git path. Push a committed branch to the gate remote instead of `origin`.
 - **`no-mistakes`** - the TUI. Run it after making changes (no commit needed) and a wizard walks you through creating a branch, committing, and pushing through the gate, then attaches to the run. `no-mistakes -y` does all of that automatically.
-- **`/no-mistakes`** - the agent skill. Tell the coding agent to do a task and gate it with `/no-mistakes <task>`, or use bare `/no-mistakes` to gate existing committed work. It runs the pipeline, has the pipeline apply safe fixes, and routes manual findings to the authority that owns the decision.
+- **`/no-mistakes`** - the agent skill. Tell the coding agent to do a task and gate it with `/no-mistakes <task>`, or use bare `/no-mistakes` to gate existing committed work. It runs the pipeline, has the pipeline apply safe fixes, and stops only for a user-owned product or guarantee choice.
 
 `no-mistakes init` installs the `/no-mistakes` skill for Claude Code and other agents. Under the hood the skill drives `no-mistakes axi`, a non-interactive TOON interface to the same approval flow.
 
@@ -154,7 +134,7 @@ make docs    # Build the Astro docs site in docs/dist
 
 See `Makefile` for the full target list.
 
-`make e2e-record` overwrites `internal/e2e/fixtures/` from the real `claude`, `codex`, and `opencode` CLIs, spends real API quota, and should be reviewed before committing.
+`make e2e-record` overwrites `internal/e2e/fixtures/` from the real `claude`, `codex`, `opencode`, and `antigravity` CLIs, spends real API quota, and should be reviewed before committing.
 
 ## Star History
 

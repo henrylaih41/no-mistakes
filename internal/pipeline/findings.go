@@ -220,11 +220,8 @@ func retainMatchingFindingsJSON(existingRaw, keepRaw string) string {
 }
 
 // autoFixableFindingsJSON returns the auto-fix subset of a findings payload,
-// or "" when nothing is safely auto-fixable. A payload that cannot be parsed
-// or re-marshaled yields "" (fail closed): an unreadable payload must never be
-// handed to a fix agent as auto-fixable, and the executor's manual-findings
-// boundary (hasManualFindingsJSON, which treats malformed JSON as manual)
-// parks it instead.
+// or "" when nothing is safely auto-fixable. Unreadable payloads fail closed:
+// they must park at the manual-findings boundary, never reach a fix agent.
 func autoFixableFindingsJSON(raw string) string {
 	if raw == "" {
 		return ""

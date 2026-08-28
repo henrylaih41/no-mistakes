@@ -215,51 +215,98 @@ func TestCompleteStepWithStatus(t *testing.T) {
 	}
 }
 
-func TestCompleteStepWithStatusClearsRecoveredError(t *testing.T) {
-	tests := []struct {
-		name   string
-		status types.StepStatus
-	}{
-		{name: "completed", status: types.StepStatusCompleted},
-		{name: "skipped", status: types.StepStatusSkipped},
+func TestResetStepsFromPreservesSkippedSteps(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/tmp/gate", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "main", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := d.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	push, err := d.InsertStepResult(run.ID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepWithStatus(review.ID, types.StepStatusCompleted, 0, 10, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepWithStatus(push.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
+		t.Fatal(err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			d := openTestDB(t)
-			repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-			run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
-			step, _ := d.InsertStepResult(run.ID, types.StepTest)
+	if err := d.ResetStepsFrom(run.ID, types.StepReview.Order()); err != nil {
+		t.Fatal(err)
+	}
 
-			if err := d.StartStep(step.ID); err != nil {
-				t.Fatalf("start step: %v", err)
-			}
-			if _, err := d.RecoverStaleRuns("daemon crashed during execution"); err != nil {
-				t.Fatalf("recover stale runs: %v", err)
-			}
+	gotReview, err := d.GetStepResult(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotReview.Status != types.StepStatusPending {
+		t.Fatalf("review status = %s, want %s", gotReview.Status, types.StepStatusPending)
+	}
+	gotPush, err := d.GetStepResult(push.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPush.Status != types.StepStatusSkipped {
+		t.Fatalf("push status = %s, want %s", gotPush.Status, types.StepStatusSkipped)
+	}
+}
 
-			recovered, err := d.GetStepResult(step.ID)
-			if err != nil {
-				t.Fatalf("get recovered step: %v", err)
-			}
-			if recovered.Error == nil || *recovered.Error != "daemon crashed during execution" {
-				t.Fatalf("recovered error = %v, want daemon crash marker", recovered.Error)
-			}
+func TestUpdateStepStatusWithDuration(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepTest)
 
-			if err := d.CompleteStepWithStatus(step.ID, tt.status, 0, 42, "/logs/run-1/test.log"); err != nil {
-				t.Fatalf("complete step: %v", err)
-			}
-			got, err := d.GetStepResult(step.ID)
-			if err != nil {
-				t.Fatalf("get completed step: %v", err)
-			}
-			if got.Status != tt.status {
-				t.Fatalf("status = %q, want %q", got.Status, tt.status)
-			}
-			if got.Error != nil {
-				t.Fatalf("completed step retained stale error %q", *got.Error)
-			}
-		})
+	if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1200); err != nil {
+		t.Fatalf("update step status with duration: %v", err)
+	}
+
+	got, _ := d.GetStepResult(step.ID)
+	if got.Status != types.StepStatusAwaitingApproval {
+		t.Errorf("status = %q, want %q", got.Status, types.StepStatusAwaitingApproval)
+	}
+	if got.DurationMS == nil || *got.DurationMS != 1200 {
+		t.Fatalf("duration_ms = %v, want 1200", got.DurationMS)
+	}
+}
+
+func TestCompleteReviewStepIsAtomic(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/review-atomic", "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStep(step.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.CompleteReviewStep(step.ID, "missing-run", "approved", 0, 10, "review.log"); err == nil {
+		t.Fatal("expected missing run to roll back review completion")
+	}
+	gotStep, _ := d.GetStepResult(step.ID)
+	if gotStep.Status != types.StepStatusRunning || gotStep.CompletedAt != nil {
+		t.Fatalf("failed transaction partially completed review: %#v", gotStep)
+	}
+	gotRun, _ := d.GetRun(run.ID)
+	if gotRun.ReviewApprovedHeadSHA != nil {
+		t.Fatalf("failed transaction created review authority: %#v", gotRun.ReviewApprovedHeadSHA)
+	}
+
+	if err := d.CompleteReviewStep(step.ID, run.ID, "approved", 0, 10, "review.log"); err != nil {
+		t.Fatal(err)
+	}
+	gotStep, _ = d.GetStepResult(step.ID)
+	gotRun, _ = d.GetRun(run.ID)
+	if gotStep.Status != types.StepStatusCompleted || gotRun.ReviewApprovedHeadSHA == nil || *gotRun.ReviewApprovedHeadSHA != "approved" {
+		t.Fatalf("atomic review completion = step %#v run %#v", gotStep, gotRun)
 	}
 }
 

@@ -38,6 +38,23 @@ func TestExtractHost(t *testing.T) {
 	}
 }
 
+func TestRepoPathPreservesNonAzureGitNamespace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		remote string
+		want   string
+	}{
+		{"https://gitlab.example.com/group/_git/project.git", "group/_git/project"},
+		{"https://dev.azure.com/org/project/_git/repo", "project/repo"},
+		{"https://org.visualstudio.com/project/_git/repo", "project/repo"},
+	}
+	for _, tt := range tests {
+		if got := RepoPath(tt.remote); got != tt.want {
+			t.Errorf("RepoPath(%q) = %q, want %q", tt.remote, got, tt.want)
+		}
+	}
+}
+
 func TestCheckBucketHelpers(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -129,13 +146,4 @@ func (fakeHost) GetMergeableState(context.Context, *PR) (MergeableState, error) 
 }
 func (fakeHost) FetchFailedCheckLogs(context.Context, *PR, string, string, []string) (string, error) {
 	return "", ErrUnsupported
-}
-func (fakeHost) GetReviewVerdict(context.Context, int, string, string) (ReviewVerdict, []ReviewComment, error) {
-	return VerdictNone, nil, ErrUnsupported
-}
-func (fakeHost) GetBotFindings(context.Context, int, string, string) ([]ReviewComment, error) {
-	return nil, ErrUnsupported
-}
-func (fakeHost) ReplyToReviewComment(context.Context, int, int64, string) error {
-	return ErrUnsupported
 }

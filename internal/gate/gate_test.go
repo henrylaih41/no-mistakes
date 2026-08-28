@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -20,6 +21,33 @@ func TestMain(m *testing.M) {
 	// t.Setenv (issue #362).
 	os.Unsetenv("GIT_CONFIG_COUNT")
 	os.Exit(m.Run())
+}
+
+func TestProvisionGateDoesNotStampUnsupportedHookIsolation(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	if out, err := exec.Command("git", "init", workDir).CombinedOutput(); err != nil {
+		t.Fatalf("init worktree: %v: %s", err, out)
+	}
+	reposDir := filepath.Join(root, "repos")
+	if err := os.MkdirAll(reposDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bareDir := filepath.Join(reposDir, "repo.git")
+
+	oldEnsure := ensureGateHooksPathIsolation
+	ensureGateHooksPathIsolation = func(context.Context, string) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() { ensureGateHooksPathIsolation = oldEnsure })
+
+	if err := provisionGate(ctx, bareDir, workDir, "https://example.com/repo.git", reposDir, false); err != nil {
+		t.Fatal(err)
+	}
+	if gitpkg.GateConfigCurrent(bareDir) {
+		t.Fatal("gate with unsupported hook isolation must not be stamped current")
+	}
 }
 
 // resolveSymlinks resolves symlinks in a path (needed on macOS where
@@ -236,6 +264,57 @@ func TestInitRepoID(t *testing.T) {
 // repo succeeds, reports that it was not newly created, and leaves a single
 // repo record and an intact gate. This is what lets existing users re-run init
 // to adopt new capabilities (e.g. the agent skill) without hitting an error.
+func TestInitRefusesManagedValidationWorktreeBeforePartialMutation(t *testing.T) {
+	workDir := setupTestRepo(t)
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	database := openTestDB(t, p)
+	ctx := context.Background()
+	repo, _, err := Init(ctx, database, p, workDir)
+	if err != nil {
+		t.Fatalf("init outer gate: %v", err)
+	}
+	gateDir := p.RepoDir(repo.ID)
+	if out, err := gitpkg.Run(ctx, gateDir, "fetch", workDir, "HEAD:refs/heads/feature"); err != nil {
+		t.Fatalf("seed gate: %v\n%s", err, out)
+	}
+	managed := p.WorktreeDir(repo.ID, "outer-run")
+	if err := gitpkg.WorktreeAdd(ctx, gateDir, managed, "refs/heads/feature"); err != nil {
+		t.Fatalf("add managed worktree: %v", err)
+	}
+	beforeRemotes, err := gitpkg.Run(ctx, managed, "remote")
+	if err != nil {
+		t.Fatalf("list remotes before refusal: %v", err)
+	}
+	_, _, err = Init(ctx, database, p, managed)
+	if err == nil || !strings.Contains(err.Error(), "nested_gate_context") {
+		t.Fatalf("managed init error = %v, want nested_gate_context", err)
+	}
+	afterRemotes, err := gitpkg.Run(ctx, managed, "remote")
+	if err != nil {
+		t.Fatalf("list remotes after refusal: %v", err)
+	}
+	if afterRemotes != beforeRemotes {
+		t.Fatalf("refusal changed remotes: before=%q after=%q", beforeRemotes, afterRemotes)
+	}
+	repos, err := database.GetRepos()
+	if err != nil {
+		t.Fatalf("list repos: %v", err)
+	}
+	if len(repos) != 1 || repos[0].ID != repo.ID {
+		t.Fatalf("refusal changed repo registry: %+v", repos)
+	}
+	entries, err := os.ReadDir(p.ReposDir())
+	if err != nil {
+		t.Fatalf("list gates: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != repo.ID+".git" {
+		t.Fatalf("refusal created a gate: %+v", entries)
+	}
+}
+
 func TestInitIsIdempotent(t *testing.T) {
 	workDir := setupTestRepo(t)
 	nmRoot := t.TempDir()
@@ -770,6 +849,16 @@ func TestInitNoOrigin(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when no origin remote")
 	}
+	// The error must be actionable, not a raw git-plumbing leak: a fresh
+	// `git init` repo with no remote yet is a normal state, so tell the user
+	// how to fix it instead of surfacing `git remote get-url` exit codes.
+	msg := err.Error()
+	if !strings.Contains(msg, "git remote add origin") {
+		t.Errorf("error should tell the user how to add an origin remote; got: %q", msg)
+	}
+	if strings.Contains(msg, "get origin url") || strings.Contains(msg, "exit status") {
+		t.Errorf("error leaked raw git plumbing; got: %q", msg)
+	}
 }
 
 func TestInitNotGitRepo(t *testing.T) {
@@ -913,6 +1002,75 @@ func TestEjectCleansUpWorktrees(t *testing.T) {
 	}
 }
 
+// TestEjectCleansUpWorktreesInConfiguredRoot covers a repository whose run
+// worktrees the operator placed in a directory of their own (worktree_roots).
+// Eject removes the directories named by this repository's own run rows, and
+// nothing else: not the root, not the operator's files, and not a directory
+// that merely looks like a run worktree but belongs to no run of this
+// repository.
+func TestEjectCleansUpWorktreesInConfiguredRoot(t *testing.T) {
+	workDir := setupTestRepo(t)
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	d := openTestDB(t, p)
+	ctx := context.Background()
+
+	repo, _, err := Init(ctx, d, p, workDir)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	ownRun, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	root := filepath.Join(t.TempDir(), "repo-runs")
+	ownRunDir := filepath.Join(root, ownRun.ID)
+	// The run records where it was placed, the way startRun does; that record is
+	// what makes this directory ours to remove.
+	if err := d.SetRunWorktreeDir(ownRun.ID, ownRunDir); err != nil {
+		t.Fatalf("record placement: %v", err)
+	}
+	// A run-shaped directory this repository never created: a leftover from
+	// another tool, or from a repository that used to point here.
+	foreignRunDir := filepath.Join(root, "01JZ8XQ7V6K9M3B0T5N2R4C8YD")
+	operatorDir := filepath.Join(root, "scratch-checkout")
+	for _, dir := range []string{ownRunDir, foreignRunDir, operatorDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create dir: %v", err)
+		}
+	}
+	operatorFile := filepath.Join(root, "mise.local.toml")
+	if err := os.WriteFile(operatorFile, []byte("[tools]\n"), 0o644); err != nil {
+		t.Fatalf("write operator file: %v", err)
+	}
+	configYAML := "worktree_roots:\n  " + yamlPath(repo.WorkingPath) + ": " + yamlPath(root) + "\n"
+	if err := os.WriteFile(p.ConfigFile(), []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := Eject(ctx, d, p, workDir); err != nil {
+		t.Fatalf("eject: %v", err)
+	}
+
+	if fileExists(ownRunDir) {
+		t.Error("expected the repository's own run worktree to be removed from the configured root")
+	}
+	for _, keep := range []string{root, foreignRunDir, operatorDir, operatorFile} {
+		if !fileExists(keep) {
+			t.Errorf("eject removed %q, which no run of this repository owned", keep)
+		}
+	}
+}
+
+// yamlPath quotes a path for YAML so a Windows drive letter is not read as a
+// mapping and its separators survive as literal backslashes.
+func yamlPath(path string) string {
+	return `"` + strings.ReplaceAll(path, `\`, `\\`) + `"`
+}
+
 func TestEjectNotInitialized(t *testing.T) {
 	work := filepath.Join(resolveSymlinks(t, t.TempDir()), "work")
 	if out, err := exec.Command("git", "init", work).CombinedOutput(); err != nil {
@@ -970,6 +1128,13 @@ func TestInit_PostReceiveSurvivesHooksPathPoisoning(t *testing.T) {
 	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
 		t.Fatalf("write marker hook: %v", err)
 	}
+	// This unit test has no isolated daemon. Stub only pre-receive admission;
+	// the behavior under test is hookspath isolation for post-receive. Full
+	// fail-closed admission is covered by the isolated-daemon e2e regression.
+	preHookPath := filepath.Join(bareDir, "hooks", "pre-receive")
+	if err := os.WriteFile(preHookPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write admission stub: %v", err)
+	}
 
 	// Simulate husky: pnpm install in a pipeline worktree runs
 	// `git config core.hookspath .husky/_`. Because worktrees share local
@@ -986,5 +1151,63 @@ func TestInit_PostReceiveSurvivesHooksPathPoisoning(t *testing.T) {
 
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("post-receive did not fire after husky poisoned core.hookspath: %v", err)
+	}
+}
+
+// TestInitRedactsCredentialURL asserts that an origin URL carrying embedded
+// credentials (e.g. a fine-grained PAT) is stored redacted in the DB and in the
+// returned repo record, while the bare gate's "origin" remote keeps the full
+// credentialled URL so worktrees carved from it can still authenticate pushes.
+//
+// The upstream host is an unreachable loopback address so DefaultBranch's
+// ls-remote fails fast and falls back to "main" without real network I/O.
+func TestInitRedactsCredentialURL(t *testing.T) {
+	workDir := setupTestRepo(t)
+	const token = "ghp_secret_DO_NOT_LEAK"
+	credURL := "https://x-access-token:" + token + "@127.0.0.1:1/o/r.git"
+	if out, err := exec.Command("git", "-C", workDir, "remote", "set-url", "origin", credURL).CombinedOutput(); err != nil {
+		t.Fatalf("set credentialled origin: %v: %s", err, out)
+	}
+
+	nmRoot := t.TempDir()
+	p := paths.WithRoot(nmRoot)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	d := openTestDB(t, p)
+	ctx := context.Background()
+
+	repo, _, err := Init(ctx, d, p, workDir)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// The returned repo record (and thus anything logged from it) must not
+	// carry the credential.
+	if strings.Contains(repo.UpstreamURL, token) {
+		t.Errorf("returned repo.UpstreamURL leaked credential: %q", repo.UpstreamURL)
+	}
+	if !strings.Contains(repo.UpstreamURL, "redacted@127.0.0.1:1/o/r.git") {
+		t.Errorf("expected redacted URL, got %q", repo.UpstreamURL)
+	}
+
+	// The persisted DB row must match the redacted form.
+	dbRepo, err := d.GetRepo(repo.ID)
+	if err != nil {
+		t.Fatalf("get repo: %v", err)
+	}
+	if strings.Contains(dbRepo.UpstreamURL, token) {
+		t.Errorf("DB repo.UpstreamURL leaked credential: %q", dbRepo.UpstreamURL)
+	}
+
+	// The bare gate's origin must still carry the full credential so pushes
+	// from carved worktrees can authenticate.
+	bareDir := p.RepoDir(repo.ID)
+	gateOrigin, err := gitpkg.GetRemoteURL(ctx, bareDir, "origin")
+	if err != nil {
+		t.Fatalf("get gate origin: %v", err)
+	}
+	if gateOrigin != credURL {
+		t.Errorf("gate origin = %q, want full credentialled URL %q (credential must be preserved for pushes)", gateOrigin, credURL)
 	}
 }

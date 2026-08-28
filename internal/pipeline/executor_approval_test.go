@@ -21,9 +21,7 @@ func TestExecutor_CancelledApprovalGateFailsAtomically(t *testing.T) {
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() {
-		done <- exec.Execute(ctx, run, repo, t.TempDir())
-	}()
+	go func() { done <- exec.Execute(ctx, run, repo, t.TempDir()) }()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	cancel()
@@ -83,10 +81,7 @@ func TestExecutor_GatePublishFailureDoesNotWaitInvisible(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() {
-		done <- exec.Execute(ctx, run, repo, t.TempDir())
-	}()
-
+	go func() { done <- exec.Execute(ctx, run, repo, t.TempDir()) }()
 	select {
 	case err := <-done:
 		cancel()
@@ -107,24 +102,15 @@ func TestExecutor_GatePublishFailureDoesNotWaitInvisible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storedRun.AwaitingAgentSince != nil {
-		t.Fatalf("awaiting_agent_since = %d after publication failure, want nil", *storedRun.AwaitingAgentSince)
-	}
-	if storedRun.Status != types.RunFailed {
-		t.Fatalf("run status = %s, want failed", storedRun.Status)
+	if storedRun.AwaitingAgentSince != nil || storedRun.Status != types.RunFailed {
+		t.Fatalf("run = status %s awaiting %v, want failed and unparked", storedRun.Status, storedRun.AwaitingAgentSince)
 	}
 	storedSteps, err := database.GetStepsByRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(storedSteps) != 1 {
-		t.Fatalf("steps = %d, want 1", len(storedSteps))
-	}
-	if storedSteps[0].Status != types.StepStatusFailed {
-		t.Fatalf("step status = %s, want failed", storedSteps[0].Status)
-	}
-	if storedSteps[0].Error == nil || !strings.Contains(*storedSteps[0].Error, "forced executor gate failure") {
-		t.Fatalf("step error = %v, want forced executor gate failure", storedSteps[0].Error)
+	if len(storedSteps) != 1 || storedSteps[0].Status != types.StepStatusFailed || storedSteps[0].Error == nil || !strings.Contains(*storedSteps[0].Error, "forced executor gate failure") {
+		t.Fatalf("steps = %+v, want one failed step carrying publication error", storedSteps)
 	}
 	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
 		t.Fatal("Respond succeeded after gate publication failed")
@@ -168,24 +154,15 @@ func TestExecutor_TransientGatePublishFailureFailsStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storedRun.AwaitingAgentSince != nil {
-		t.Fatalf("awaiting_agent_since = %d after publication failure, want nil", *storedRun.AwaitingAgentSince)
-	}
-	if storedRun.Status != types.RunFailed {
-		t.Fatalf("run status = %s, want failed", storedRun.Status)
+	if storedRun.AwaitingAgentSince != nil || storedRun.Status != types.RunFailed {
+		t.Fatalf("run = status %s awaiting %v, want failed and unparked", storedRun.Status, storedRun.AwaitingAgentSince)
 	}
 	storedSteps, err := database.GetStepsByRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(storedSteps) != 1 {
-		t.Fatalf("steps = %d, want 1", len(storedSteps))
-	}
-	if storedSteps[0].Status != types.StepStatusFailed {
-		t.Fatalf("step status = %s, want failed", storedSteps[0].Status)
-	}
-	if storedSteps[0].Error == nil || !strings.Contains(*storedSteps[0].Error, "forced executor retry gate failure") {
-		t.Fatalf("step error = %v, want forced executor retry gate failure", storedSteps[0].Error)
+	if len(storedSteps) != 1 || storedSteps[0].Status != types.StepStatusFailed || storedSteps[0].Error == nil || !strings.Contains(*storedSteps[0].Error, "forced executor retry gate failure") {
+		t.Fatalf("steps = %+v, want one failed step carrying publication error", storedSteps)
 	}
 	if err := exec.Respond(types.StepReview, types.ActionRetry, nil); err == nil {
 		t.Fatal("Respond succeeded after retry gate publication failed")
@@ -198,9 +175,7 @@ func TestExecutor_GateExitFailureDoesNotLeaveParkedFailedRun(t *testing.T) {
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 
 	done := make(chan error, 1)
-	go func() {
-		done <- exec.Execute(context.Background(), run, repo, t.TempDir())
-	}()
+	go func() { done <- exec.Execute(context.Background(), run, repo, t.TempDir()) }()
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 
 	raw, err := sql.Open("sqlite", p.DB())
@@ -241,24 +216,15 @@ func TestExecutor_GateExitFailureDoesNotLeaveParkedFailedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storedRun.Status != types.RunFailed {
-		t.Fatalf("run status = %s, want failed", storedRun.Status)
-	}
-	if storedRun.AwaitingAgentSince != nil {
-		t.Fatalf("awaiting_agent_since = %d on failed run, want nil", *storedRun.AwaitingAgentSince)
-	}
-	if storedRun.ParkedMS <= 0 {
-		t.Fatalf("parked_ms = %d, want positive parked duration", storedRun.ParkedMS)
+	if storedRun.Status != types.RunFailed || storedRun.AwaitingAgentSince != nil || storedRun.ParkedMS <= 0 {
+		t.Fatalf("run = status %s awaiting %v parked %d, want failed, unparked, and positive parked time", storedRun.Status, storedRun.AwaitingAgentSince, storedRun.ParkedMS)
 	}
 	steps, err := database.GetStepsByRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
-		t.Fatalf("steps = %+v, want one failed step", steps)
-	}
-	if steps[0].Error == nil || !strings.Contains(*steps[0].Error, "forced gate exit failure") {
-		t.Fatalf("step error = %v, want forced gate exit failure", steps[0].Error)
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed || steps[0].Error == nil || !strings.Contains(*steps[0].Error, "forced gate exit failure") {
+		t.Fatalf("steps = %+v, want one failed step carrying exit error", steps)
 	}
 }
 
@@ -373,130 +339,6 @@ func TestExecutor_AwaitingAgentMarkerSetOnGateClearedOnRespond(t *testing.T) {
 	}
 }
 
-func TestExecutor_AgentTransientParksAndRetryResumesSameStep(t *testing.T) {
-	database, p, run, repo := setupTest(t)
-	workDir := t.TempDir()
-
-	calls := 0
-	step := &adaptiveCallStep{
-		name: types.StepTest,
-		fn: func(sctx *StepContext) (*StepOutcome, error) {
-			calls++
-			if calls == 1 {
-				return nil, &agent.TransientError{
-					Agent: "claude",
-					Label: "empty-stderr exit-1",
-					Err:   errors.New("claude exited: exit status 1:"),
-				}
-			}
-			return &StepOutcome{ExitCode: 0}, nil
-		},
-	}
-	lint := newPassStep(types.StepLint)
-	exec := NewExecutor(database, p, nil, nil, []Step{step, lint}, nil)
-
-	done := make(chan error, 1)
-	go func() {
-		done <- exec.Execute(context.Background(), run, repo, workDir)
-	}()
-
-	waitForStepStatus(t, database, run.ID, types.StepTest, types.StepStatusAwaitingRetry)
-	parkedRun, err := database.GetRun(run.ID)
-	if err != nil {
-		t.Fatalf("get parked run: %v", err)
-	}
-	if parkedRun.Status != types.RunRunning {
-		t.Fatalf("run status = %s, want %s", parkedRun.Status, types.RunRunning)
-	}
-	if parkedRun.AwaitingAgentSince == nil {
-		t.Fatal("AwaitingAgentSince = nil while agent retry is parked")
-	}
-	steps, err := database.GetStepsByRun(run.ID)
-	if err != nil {
-		t.Fatalf("get steps: %v", err)
-	}
-	if steps[0].Error == nil || !strings.Contains(*steps[0].Error, "agent provider/transient failure: claude empty-stderr exit-1") {
-		t.Fatalf("parked step error = %v, want transient reason", steps[0].Error)
-	}
-	if steps[1].Status != types.StepStatusPending {
-		t.Fatalf("later step status = %s, want pending before retry", steps[1].Status)
-	}
-
-	if err := exec.Respond(types.StepTest, types.ActionRetry, nil); err != nil {
-		t.Fatalf("retry response: %v", err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("executor error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("executor timed out")
-	}
-	if calls != 2 {
-		t.Fatalf("step calls = %d, want 2", calls)
-	}
-	if lint.callCount() != 1 {
-		t.Fatalf("later step calls = %d, want 1", lint.callCount())
-	}
-}
-
-func TestExecutor_AgentRetryDoesNotCollideWithReviewFixRoundCap(t *testing.T) {
-	database, p, run, repo := setupTest(t)
-	workDir := t.TempDir()
-
-	calls := 0
-	step := &adaptiveCallStep{
-		name: types.StepReview,
-		fn: func(sctx *StepContext) (*StepOutcome, error) {
-			calls++
-			if calls == 1 {
-				if _, err := sctx.DB.InsertStepRound(sctx.StepResultID, 1, "auto_fix", nil, nil, 1); err != nil {
-					t.Fatalf("seed consumed review fix round: %v", err)
-				}
-				return nil, &agent.TransientError{
-					Agent: "claude",
-					Label: "empty-stderr exit-1",
-					Err:   errors.New("claude exited: exit status 1:"),
-				}
-			}
-			return &StepOutcome{ExitCode: 0}, nil
-		},
-	}
-	cfg := &config.Config{Review: config.Review{MaxFixRounds: 1}}
-	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
-
-	done := make(chan error, 1)
-	go func() {
-		done <- exec.Execute(context.Background(), run, repo, workDir)
-	}()
-
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingRetry)
-	if err := exec.Respond(types.StepReview, types.ActionRetry, nil); err != nil {
-		t.Fatalf("retry response should not require fix override at cap: %v", err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("executor error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("executor timed out")
-	}
-
-	steps, err := database.GetStepsByRun(run.ID)
-	if err != nil {
-		t.Fatalf("get steps: %v", err)
-	}
-	count, err := database.CountStepFixRounds(steps[0].ID)
-	if err != nil {
-		t.Fatalf("count fix rounds: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("fix round count = %d, want original seeded count 1", count)
-	}
-}
-
 func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
@@ -513,7 +355,7 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 25); err != nil {
+	if _, err := database.InsertReviewStepRound(stepResult.ID, 1, "initial", &findings, nil, "1111111111111111111111111111111111111111", 25); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.EnterApprovalGate(context.Background(), run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 25, nil); err != nil {
@@ -540,10 +382,12 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 			if _, err := sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{Prompt: "fix"}); err != nil {
 				return nil, err
 			}
-			if _, err := sctx.RunAgentSession(SessionRoleReviewer, agent.RunOpts{Prompt: "rereview"}); err != nil {
+			// The rereview is deliberately session-free (see ReviewStep): it
+			// must never resume the session that prescribed the fixes.
+			if _, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{Prompt: "rereview"}); err != nil {
 				return nil, err
 			}
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewApprovedHeadSHA: "2222222222222222222222222222222222222222"}, nil
 		},
 	}
 	exec := NewExecutor(database, p, &config.Config{SessionReuse: true}, fake, []Step{step}, nil)
@@ -578,8 +422,10 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	if fake.calls[0].session == nil || fake.calls[0].session.ID != "fixer-session" {
 		t.Fatalf("fixer session = %+v, want fixer-session", fake.calls[0].session)
 	}
-	if fake.calls[1].session == nil || fake.calls[1].session.ID != "reviewer-session" {
-		t.Fatalf("reviewer session = %+v, want reviewer-session", fake.calls[1].session)
+	// The legacy persisted reviewer row must not break recovery, and the
+	// rereview must not resume it.
+	if fake.calls[1].session != nil {
+		t.Fatalf("rereview session = %+v, want session-free", fake.calls[1].session)
 	}
 	resumed, err := database.GetRun(run.ID)
 	if err != nil {
@@ -588,28 +434,32 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	if resumed.Status != types.RunCompleted || resumed.AwaitingAgentSince != nil {
 		t.Fatalf("recovered run = status %s awaiting %v, want completed and unparked", resumed.Status, resumed.AwaitingAgentSince)
 	}
+	if resumed.ReviewApprovedHeadSHA == nil || *resumed.ReviewApprovedHeadSHA != "2222222222222222222222222222222222222222" {
+		t.Fatalf("recovered rereview approval = %#v", resumed.ReviewApprovedHeadSHA)
+	}
 }
 
-func TestExecutor_ResumeReconciledGateExitFailureClearsParkedMarker(t *testing.T) {
+func TestExecutor_ResumePromotesDurableReviewedCandidateOnApproval(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
-	stepResult, err := database.InsertStepResult(run.ID, types.StepCI)
+	stepResult, err := database.InsertStepResult(run.ID, types.StepReview)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := database.StartStep(stepResult.ID); err != nil {
 		t.Fatal(err)
 	}
-	findings := `{"findings":[{"id":"ci-1","severity":"warning","description":"waiting","action":"ask-user"}],"summary":"waiting"}`
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"decision","action":"ask-user"}]}`
+	const reviewedHead = "3333333333333333333333333333333333333333"
 	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 25); err != nil {
+	if _, err := database.InsertReviewStepRound(stepResult.ID, 1, "initial", &findings, nil, reviewedHead, 10); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.EnterApprovalGate(context.Background(), run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 25, nil); err != nil {
+	if _, err := database.EnterApprovalGate(context.Background(), run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 10, nil); err != nil {
 		t.Fatal(err)
 	}
 	run, err = database.GetRun(run.ID)
@@ -617,51 +467,29 @@ func TestExecutor_ResumeReconciledGateExitFailureClearsParkedMarker(t *testing.T
 		t.Fatal(err)
 	}
 
-	raw, err := sql.Open("sqlite", p.DB())
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{newApprovalStep(types.StepReview, findings)}, nil)
+	workDir := t.TempDir()
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(context.Background(), run, repo, workDir) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered review never accepted approval")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got, err := database.GetRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	trigger := fmt.Sprintf(`
-		CREATE TRIGGER abort_reconciled_gate_exit
-		BEFORE UPDATE OF awaiting_agent_since ON runs
-		WHEN OLD.id = '%s'
-		 AND NEW.awaiting_agent_since IS NULL
-		 AND NEW.status = OLD.status
-		BEGIN
-			SELECT RAISE(ABORT, 'forced reconciled gate exit failure');
-		END`, run.ID)
-	if _, err := raw.Exec(trigger); err != nil {
-		_ = raw.Close()
-		t.Fatal(err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	step := &reconcilingApprovalStep{name: types.StepCI}
-	step.resolved.Store(true)
-	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
-	err = exec.Resume(context.Background(), run, repo, t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "forced reconciled gate exit failure") {
-		t.Fatalf("Resume() error = %v, want forced reconciled gate exit failure", err)
-	}
-
-	storedRun, err := database.GetRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if storedRun.Status != types.RunFailed {
-		t.Fatalf("run status = %s, want failed", storedRun.Status)
-	}
-	if storedRun.AwaitingAgentSince != nil {
-		t.Fatalf("awaiting_agent_since = %d on failed reconciled run, want nil", *storedRun.AwaitingAgentSince)
-	}
-	steps, err := database.GetStepsByRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
-		t.Fatalf("steps = %+v, want one failed step", steps)
+	if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != reviewedHead {
+		t.Fatalf("recovered approval = %#v, want %s", got.ReviewApprovedHeadSHA, reviewedHead)
 	}
 }
 
