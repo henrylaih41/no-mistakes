@@ -341,31 +341,42 @@ func TestReplayPinsCandidateModelAndEffortOnTheHarness(t *testing.T) {
 // inheriting the capturing machine's own model or effort: the candidate is the
 // only thing that may decide what the harness runs as.
 func TestCaptureStripsEveryHarnessPinFromThePinnedConfig(t *testing.T) {
-	pinned := []byte("agent: codex\nagent_args_override:\n  codex:\n    - -m\n    - gpt-5.4\nagent_config:\n  codex:\n    model: gpt-5.4\n    effort: high\nreview:\n  agent: claude\n  max_fix_rounds: 2\nlog_level: warn\n")
-	neutral, err := agentNeutralGlobalConfig(pinned)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name      string
+		reviewPin string
+	}{
+		{name: "direct", reviewPin: "  agent: claude\n"},
+		{name: "legacy", reviewPin: "  reviewers:\n    - agent: claude\n  max_parallel: 1\n  fail_open: false\n"},
 	}
-	for _, key := range []string{"agent:", "agent_args_override", "agent_config"} {
-		if strings.Contains(string(neutral), key) {
-			t.Errorf("pinned config still carries %q: %s", key, neutral)
-		}
-	}
-	if !strings.Contains(string(neutral), "log_level") {
-		t.Errorf("pinned config lost unrelated settings: %s", neutral)
-	}
-	cfg, err := config.LoadGlobalFromBytes(neutral)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.AgentConfig != nil {
-		t.Fatalf("neutral config resolves an agent profile: %#v", cfg.AgentConfig)
-	}
-	if cfg.Review.Agent != "" {
-		t.Fatalf("neutral config resolves review agent %q", cfg.Review.Agent)
-	}
-	if cfg.Review.MaxFixRounds == nil || *cfg.Review.MaxFixRounds != 2 {
-		t.Fatalf("neutral config lost review max_fix_rounds: %#v", cfg.Review.MaxFixRounds)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pinned := []byte("agent: codex\nagent_args_override:\n  codex:\n    - -m\n    - gpt-5.4\nagent_config:\n  codex:\n    model: gpt-5.4\n    effort: high\nreview:\n" + tt.reviewPin + "  max_fix_rounds: 2\nlog_level: warn\n")
+			neutral, err := agentNeutralGlobalConfig(pinned)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"agent:", "agent_args_override", "agent_config", "reviewers:"} {
+				if strings.Contains(string(neutral), key) {
+					t.Errorf("pinned config still carries %q: %s", key, neutral)
+				}
+			}
+			if !strings.Contains(string(neutral), "log_level") {
+				t.Errorf("pinned config lost unrelated settings: %s", neutral)
+			}
+			cfg, err := config.LoadGlobalFromBytes(neutral)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AgentConfig != nil {
+				t.Fatalf("neutral config resolves an agent profile: %#v", cfg.AgentConfig)
+			}
+			if cfg.Review.Agent != "" {
+				t.Fatalf("neutral config resolves review agent %q", cfg.Review.Agent)
+			}
+			if cfg.Review.MaxFixRounds == nil || *cfg.Review.MaxFixRounds != 2 {
+				t.Fatalf("neutral config lost review max_fix_rounds: %#v", cfg.Review.MaxFixRounds)
+			}
+		})
 	}
 }
 

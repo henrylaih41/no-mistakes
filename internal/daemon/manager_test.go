@@ -162,6 +162,52 @@ func TestPushReceivedSkipStepsConfiguresExecutor(t *testing.T) {
 	}
 }
 
+func TestPushReceivedSkipReviewStillRequiresConfiguredReviewer(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+
+	configYAML, err := os.ReadFile(p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingReviewer := filepath.Join(t.TempDir(), "missing-codex")
+	configYAML = append(configYAML, []byte("  codex: "+missingReviewer+"\nreview:\n  agent: codex\n")...)
+	if err := os.WriteFile(p.ConfigFile(), configYAML, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo, headSHA := setupTestGitRepo(t, p, d, "skip-review-missing-agent-repo")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var result ipc.PushReceivedResult
+	err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:      p.RepoDir(repo.ID),
+		Ref:       "refs/heads/main",
+		Old:       "0000000000000000000000000000000000000000",
+		New:       headSHA,
+		SkipSteps: []types.StepName{types.StepReview},
+	}, &result)
+	if err == nil || !strings.Contains(err.Error(), "resolve review agent") {
+		t.Fatalf("PushReceived error = %v, want review agent resolution failure", err)
+	}
+
+	runs, err := d.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+	if runs[0].Error == nil || !strings.Contains(*runs[0].Error, "resolve review agent") {
+		t.Fatalf("stored run error = %v, want review agent resolution failure", runs[0].Error)
+	}
+}
+
 func TestPushReceivedMaterializesDesignContext(t *testing.T) {
 	step := &mockPassStep{name: types.StepReview}
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {

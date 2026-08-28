@@ -1172,22 +1172,12 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		}
 	}
 
-	var reviewAg agent.Agent
-	reviewSkipped := false
-	for _, skipped := range skipSteps {
-		if skipped == types.StepReview {
-			reviewSkipped = true
-			break
-		}
-	}
-	if !reviewSkipped {
-		reviewAg, err = newReviewAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
-		if err != nil {
-			closeRunAgents(ag)
-			m.db.UpdateRunError(run.ID, err.Error())
-			trackStartFailure("create_review_agent")
-			return "", err
-		}
+	reviewAg, err := newReviewAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
+	if err != nil {
+		closeRunAgents(ag)
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("create_review_agent")
+		return "", err
 	}
 
 	execSteps := m.steps()
