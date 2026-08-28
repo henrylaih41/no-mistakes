@@ -97,14 +97,15 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 }
 
 type recoveredRunPlan struct {
-	run     *db.Run
-	repo    *db.Repo
-	workDir string
-	gateDir string
-	cfg     *config.Config
-	agent   agent.Agent
-	steps   []pipeline.Step
-	forge   *forgecontext.Context
+	run         *db.Run
+	repo        *db.Repo
+	workDir     string
+	gateDir     string
+	cfg         *config.Config
+	agent       agent.Agent
+	reviewAgent agent.Agent
+	steps       []pipeline.Step
+	forge       *forgecontext.Context
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -183,15 +184,21 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 			return nil, err
 		}
 	}
+	reviewAg, err := newReviewAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
+	if err != nil {
+		_ = ag.Close()
+		return nil, err
+	}
 	return &recoveredRunPlan{
-		run:     run,
-		repo:    repo,
-		workDir: workDir,
-		gateDir: gateDir,
-		cfg:     cfg,
-		agent:   ag,
-		steps:   execSteps,
-		forge:   forgeCtx,
+		run:         run,
+		repo:        repo,
+		workDir:     workDir,
+		gateDir:     gateDir,
+		cfg:         cfg,
+		agent:       ag,
+		reviewAgent: reviewAg,
+		steps:       execSteps,
+		forge:       forgeCtx,
 	}, nil
 }
 
@@ -296,6 +303,45 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 	return ag, nil
 }
 
+// newReviewAgent constructs the optional review/rereview-only agent through
+// the same machine-owned factory settings and safety decorators as the
+// pipeline agent. Timeout, lifecycle, gate-boundary, and performance wrappers
+// are applied later by the executor because they are per-step/per-run.
+func newReviewAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
+	if steps.IsDemoMode() || cfg == nil || cfg.Review.Agent == "" {
+		return nil, nil
+	}
+	if err := cfg.ResolveReviewAgent(ctx, lookPath); err != nil {
+		return nil, err
+	}
+	name := cfg.Review.Agent
+	ag, err := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
+		ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
+		DisableProjectSettings: cfg.DisableProjectSettings,
+		Profile:                cfg.AgentProfileFor(name),
+		Environment:            environment,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create review agent %s: %w", name, err)
+	}
+	ag = agent.WithSteering(ag, evidenceRoot)
+	if cfg.DisableProjectSettings {
+		if err := agent.EnsureGateNeutralized(ag); err != nil {
+			_ = ag.Close()
+			return nil, err
+		}
+	}
+	return ag, nil
+}
+
+func closeRunAgents(agents ...agent.Agent) {
+	for _, ag := range agents {
+		if ag != nil {
+			_ = ag.Close()
+		}
+	}
+}
+
 func forgeEnvironment(ctx *forgecontext.Context) runenv.Overlay {
 	if ctx == nil {
 		return runenv.Overlay{}
@@ -331,11 +377,12 @@ func (m *RunManager) resumeRecoveredRuns(plans []recoveredRunPlan) {
 
 func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	if m.shuttingDown.Load() {
-		_ = plan.agent.Close()
+		closeRunAgents(plan.agent, plan.reviewAgent)
 		return
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	executor.SetReviewAgent(plan.reviewAgent)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -366,7 +413,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				}
 			}
 			cancel(nil)
-			_ = plan.agent.Close()
+			closeRunAgents(plan.agent, plan.reviewAgent)
 			m.closeSubscribers(plan.run.ID)
 			m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
 			// A recovered run is a finished run too. This is the second of the
@@ -1125,6 +1172,24 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		}
 	}
 
+	var reviewAg agent.Agent
+	reviewSkipped := false
+	for _, skipped := range skipSteps {
+		if skipped == types.StepReview {
+			reviewSkipped = true
+			break
+		}
+	}
+	if !reviewSkipped {
+		reviewAg, err = newReviewAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
+		if err != nil {
+			closeRunAgents(ag)
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("create_review_agent")
+			return "", err
+		}
+	}
+
 	execSteps := m.steps()
 	telemetry.Track("run", telemetry.Fields{
 		"action":      "started",
@@ -1138,6 +1203,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetReviewAgent(reviewAg)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
@@ -1198,7 +1264,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 				}
 			}
 			cancel(nil)
-			ag.Close()
+			closeRunAgents(ag, reviewAg)
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
 			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")

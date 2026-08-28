@@ -93,3 +93,20 @@ func TestNewPipelineAgent_OptOut_FallbackRefusesAnyUnverifiedMember(t *testing.T
 		_ = ag.Close()
 	}
 }
+
+func TestNewReviewAgent_UsesTheSameGateNeutralizationBoundary(t *testing.T) {
+	cfg := &config.Config{Review: config.Review{Agent: types.AgentClaude}, DisableProjectSettings: true}
+	ag, err := newReviewAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{})
+	if err != nil {
+		t.Fatalf("verified dedicated reviewer was refused: %v", err)
+	}
+	if !agent.NeutralizesGateInstructions(ag) {
+		t.Fatal("dedicated reviewer must preserve the verified neutralization capability")
+	}
+	_ = ag.Close()
+
+	cfg.Review.Agent = types.AgentGrok
+	if _, err := newReviewAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{}); err == nil || !strings.Contains(err.Error(), "does not neutralize") {
+		t.Fatalf("unverified dedicated reviewer was not refused: %v", err)
+	}
+}

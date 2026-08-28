@@ -34,22 +34,22 @@ func (s *ReviewStep) minimumVerdictDuration(workload *agent.InvocationWorkload) 
 
 func (s *ReviewStep) runVerifiedReview(ctx context.Context, sctx *pipeline.StepContext, opts agent.RunOpts) (*agent.Result, *reviewVerdictFailure, error) {
 	started := time.Now()
-	result, err := sctx.RunAgentContext(ctx, opts)
+	result, err := sctx.RunReviewerContext(ctx, opts)
 	if err != nil {
 		return nil, nil, err
 	}
-	initialEvidenceErr := validateReportedReviewVerdictEvidence(sctx.Agent, result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	initialEvidenceErr := validateReportedReviewVerdictEvidence(sctx.ReviewerAgent(), result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
 	if initialEvidenceErr == nil {
 		return result, nil, nil
 	}
 
 	reviewer := "reviewer"
-	if sctx.Agent != nil && sctx.Agent.Name() != "" {
-		reviewer = sctx.Agent.Name()
+	if ag := sctx.ReviewerAgent(); ag != nil && ag.Name() != "" {
+		reviewer = ag.Name()
 	}
 	sctx.Log(fmt.Sprintf("WARNING: reviewer %q returned an invalid verdict (%v); retrying once cold", reviewer, initialEvidenceErr))
 	started = time.Now()
-	result, err = sctx.RunAgentContext(ctx, opts)
+	result, err = sctx.RunReviewerContext(ctx, opts)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, nil, err
@@ -59,7 +59,7 @@ func (s *ReviewStep) runVerifiedReview(ctx context.Context, sctx *pipeline.StepC
 			reason:   fmt.Errorf("initial verdict: %v; cold retry failed: %w", initialEvidenceErr, err),
 		}, nil
 	}
-	retryEvidenceErr := validateReportedReviewVerdictEvidence(sctx.Agent, result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
+	retryEvidenceErr := validateReportedReviewVerdictEvidence(sctx.ReviewerAgent(), result, time.Since(started), s.minimumVerdictDuration(opts.Workload))
 	if retryEvidenceErr != nil {
 		return nil, &reviewVerdictFailure{
 			reviewer: reviewer,

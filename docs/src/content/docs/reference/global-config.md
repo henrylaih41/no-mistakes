@@ -66,6 +66,7 @@ forge_profiles:
     glab_config_dir: ~/.config/glab-work
 
 review:
+  agent: claude
   max_fix_rounds: 0
 
 auto_fix:
@@ -521,6 +522,30 @@ Each run records the directory it was created in, so editing, adding, or removin
 The key is matched against the checkout path recorded at `init`. After moving a checkout, re-run `no-mistakes init` from the new path and update the key; a key that matches no registered repository is reported in the daemon log at startup and otherwise does nothing.
 
 `no-mistakes init --worktree-root <dir>` prints the exact entry to add for the checkout you are initializing. The global config is hand-maintained, so init never rewrites it for you.
+
+### review.agent
+
+Optional dedicated agent for the initial Review pass and every full rereview.
+
+|         |                                                                                                         |
+| ------- | ------------------------------------------------------------------------------------------------------- |
+| Type    | `string`                                                                                                |
+| Values  | The same concrete agent names accepted by [`agent`](#agent), plus `auto`                                 |
+| Default | Empty (use the effective pipeline agent)                                                                |
+
+```yaml
+agent: codex
+review:
+  agent: claude
+```
+
+Only review and rereview turns use this agent. Review-fix turns keep using the effective pipeline [`agent`](#agent), including its durable fixer session, and every other pipeline step is unchanged. Review turns remain cold and session-free.
+
+The dedicated reviewer inherits the machine's existing `agent_path_override`, [`agent_args_override`](#agent_args_override), and [`agent_config`](#agent_config) entries for its agent name. It also receives the same worktree steering, forge-profile environment, project-settings neutralization, timeout, lifecycle, and local `agent_invocations` recording as the pipeline agent. Review telemetry is recorded with `purpose = review` under the actual reviewer; review fixes are recorded with `purpose = review-fix` under the pipeline agent.
+
+`review.agent` is global-only because it selects a process that runs with the operator's credentials. A repository `.no-mistakes.yaml` cannot set it.
+
+For rollback compatibility, the parser also accepts the removed `review.reviewers` shape only when it contains one member, maps that member's `agent` to `review.agent`, and accepts `review.max_parallel` as inert. Legacy per-reviewer `args` and `path` are inert; use the shared machine settings above. A multi-member list is rejected because this lineage does not implement panel fan-out. A legacy `review_loop` block is accepted only with `enabled: false`; enabling removed post-PR loop behavior fails config loading rather than being ignored.
 
 ### review.max_fix_rounds
 

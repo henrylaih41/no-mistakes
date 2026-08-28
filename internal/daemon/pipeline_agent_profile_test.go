@@ -55,3 +55,41 @@ func TestNewPipelineAgent_NoProfileIsUnchanged(t *testing.T) {
 	}
 	_ = ag.Close()
 }
+
+func TestNewReviewAgent_UsesDedicatedIdentityAndSharedProfileSettings(t *testing.T) {
+	cfg := &config.Config{
+		Agent:  types.AgentCodex,
+		Review: config.Review{Agent: types.AgentClaude},
+		AgentConfig: map[string]agentcfg.Profile{
+			"claude": {Model: "sonnet", Effort: agentcfg.EffortHigh},
+		},
+		AgentArgsOverride: map[string][]string{"claude": {"--model", "sonnet"}},
+	}
+	ag, err := newReviewAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{})
+	if err != nil {
+		t.Fatalf("newReviewAgent: %v", err)
+	}
+	if ag == nil || ag.Name() != "claude" {
+		t.Fatalf("review agent = %v, want claude", ag)
+	}
+	_ = ag.Close()
+	if cfg.Agent != types.AgentCodex {
+		t.Fatalf("pipeline agent mutated to %q", cfg.Agent)
+	}
+
+	cfg.Review.Agent = types.AgentAntigravity
+	cfg.AgentConfig["antigravity"] = agentcfg.Profile{Model: "unsupported"}
+	if _, err := newReviewAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{}); err == nil || !strings.Contains(err.Error(), "cannot express model") {
+		t.Fatalf("review profile was not passed through: %v", err)
+	}
+}
+
+func TestNewReviewAgent_UnsetIsNil(t *testing.T) {
+	ag, err := newReviewAgent(context.Background(), &config.Config{Agent: types.AgentCodex}, t.TempDir(), func(string) (string, error) {
+		t.Fatal("unset review agent must not probe")
+		return "", nil
+	}, runenv.Overlay{})
+	if err != nil || ag != nil {
+		t.Fatalf("newReviewAgent = %v, %v; want nil, nil", ag, err)
+	}
+}

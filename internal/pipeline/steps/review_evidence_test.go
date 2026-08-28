@@ -160,6 +160,33 @@ func TestReviewStepAcceptsValidColdRetry(t *testing.T) {
 	}
 }
 
+func TestReviewStepUsesDedicatedReviewerEvidenceCapability(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	pipelineAgent := &mockAgent{name: "codex", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("pipeline agent must not perform review")
+		return nil, nil
+	}}
+	reviewer := &mockAgent{
+		name:                         "claude",
+		reportsReviewVerdictEvidence: true,
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{
+				Output:  json.RawMessage(`{"findings":[],"summary":"clean","risk_level":"low"}`),
+				Metrics: &agent.InvocationMetrics{ToolCalls: 1},
+			}, nil
+		},
+	}
+	sctx := newTestContext(t, pipelineAgent, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Reviewer = reviewer
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewer.calls) != 1 || len(pipelineAgent.calls) != 0 || outcome.NeedsTriage {
+		t.Fatalf("reviewer calls=%d pipeline calls=%d outcome=%+v", len(reviewer.calls), len(pipelineAgent.calls), outcome)
+	}
+}
+
 func TestReviewStepParksAtTriageWhenColdRetryErrors(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	calls := 0

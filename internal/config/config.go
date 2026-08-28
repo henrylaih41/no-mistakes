@@ -184,6 +184,7 @@ type globalConfigRaw struct {
 	Intent                  IntentRaw                  `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
 	Review                  ReviewRaw                  `yaml:"review"`
+	ReviewLoop              legacyReviewLoopRaw        `yaml:"review_loop"`
 	Eval                    EvalRaw                    `yaml:"eval"`
 	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
 }
@@ -276,8 +277,26 @@ type DesignContextRaw struct {
 	Files []string `yaml:"files"`
 }
 
+// LegacyReviewerSpec is accepted only to keep old one-member panel
+// configurations loadable while operators roll back between lineages. Args and
+// Path are deliberately inert: the minimal dedicated reviewer inherits the
+// machine's existing per-agent path, args, and profile settings.
+type LegacyReviewerSpec struct {
+	Agent types.AgentName `yaml:"agent"`
+	Args  []string        `yaml:"args"`
+	Path  string          `yaml:"path"`
+}
+
 // ReviewRaw is the YAML representation of review-step settings.
 type ReviewRaw struct {
+	// Agent selects a dedicated review/rereview agent. Empty keeps the pipeline
+	// agent. This process-selection field is global-only.
+	Agent types.AgentName `yaml:"agent"`
+	// Reviewers and MaxParallel are parse-only compatibility fields for the old
+	// panel configuration. Exactly one legacy reviewer maps to Agent; fan-out is
+	// intentionally not implemented in this lineage.
+	Reviewers   []LegacyReviewerSpec `yaml:"reviewers"`
+	MaxParallel *int                 `yaml:"max_parallel"`
 	// MaxFixRounds caps persisted review fix attempts. Zero or nil is unlimited.
 	MaxFixRounds *int `yaml:"max_fix_rounds"`
 	// PathInstructions scope extra review guidance to the paths a change
@@ -557,8 +576,25 @@ type DesignContext struct {
 // trusted default-branch repo config and scope extra review guidance to the
 // changed paths each glob matches.
 type Review struct {
+	Agent            types.AgentName
 	MaxFixRounds     int
 	PathInstructions []PathInstruction
+}
+
+// legacyReviewLoopRaw accepts the removed post-PR review-loop block only when
+// disabled. Its fields are inert and exist solely so the old machine config can
+// be parsed during rollback; enabling behavior this lineage cannot provide is
+// rejected rather than silently ignored.
+type legacyReviewLoopRaw struct {
+	Enabled               *bool   `yaml:"enabled"`
+	BotLogin              *string `yaml:"bot_login"`
+	MaxRounds             *int    `yaml:"max_rounds"`
+	FailOpen              *bool   `yaml:"fail_open"`
+	ReplyOnFix            *bool   `yaml:"reply_on_fix"`
+	Retrigger             *bool   `yaml:"retrigger"`
+	DevinAPIKeyFile       *string `yaml:"devin_api_key_file"`
+	DevinReviewAPIKeyFile *string `yaml:"devin_review_api_key_file"`
+	DevinOrgID            *string `yaml:"devin_org_id"`
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -862,6 +898,14 @@ log_level: info
 # worktree_roots:
 #   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
 
+# Optional dedicated agent for the initial review and every rereview. Review
+# fixes and all other pipeline steps continue to use the main agent above.
+# Per-agent path, arguments, model, and effort come from the existing
+# agent_path_override, agent_args_override, and agent_config entries.
+# review:
+#   agent: claude
+#   max_fix_rounds: 0
+
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.
 auto_fix:
@@ -1040,6 +1084,33 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 	}
 	c.Agent = resolved[0]
 	c.Agents = resolved
+	return nil
+}
+
+// ResolveReviewAgent resolves the optional dedicated review agent without
+// changing the pipeline agent or its fallback list. An empty value means the
+// review step continues to use the pipeline agent.
+func (c *Config) ResolveReviewAgent(ctx context.Context, lookPath func(string) (string, error)) error {
+	if c == nil || c.Review.Agent == "" {
+		return nil
+	}
+	name := c.Review.Agent
+	if name == types.AgentAuto {
+		resolved, err := c.resolveAutoAgent(ctx, lookPath)
+		if err != nil {
+			return fmt.Errorf("resolve review agent: %w", err)
+		}
+		c.Review.Agent = resolved
+		return nil
+	}
+	resolved, ok, probe, err := c.resolveConfiguredAgent(ctx, name, lookPath)
+	if err != nil {
+		return fmt.Errorf("resolve review agent: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("resolve review agent: %w", noRunnableAgentError([]types.AgentName{name}, []string{probe}))
+	}
+	c.Review.Agent = resolved
 	return nil
 }
 
@@ -1756,6 +1827,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateReviewRaw(raw.Review); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateLegacyReviewLoop(raw.ReviewLoop); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 	if err := validateTestRaw(raw.Test); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
@@ -1874,6 +1948,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	if raw.Review.Agent == "" && len(raw.Review.Reviewers) == 1 {
+		raw.Review.Agent = raw.Review.Reviewers[0].Agent
+	}
 	cfg.Review = raw.Review
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
 
@@ -1999,6 +2076,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := validateReviewRaw(cfg.Review); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	if cfg.Review.Agent != "" || len(cfg.Review.Reviewers) > 0 || cfg.Review.MaxParallel != nil {
+		return nil, fmt.Errorf("parse repo config: review.agent, review.reviewers, and review.max_parallel are global-only")
+	}
 	if err := validateTestRaw(cfg.Test); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
@@ -2042,6 +2122,18 @@ func validatePRRaw(pr PRRaw) error {
 // invalid block has to fail here, before it merges, rather than brick the
 // repository's pipeline afterwards. Do not scope this to the trusted copy.
 func validateReviewRaw(review ReviewRaw) error {
+	if review.Agent != "" && len(review.Reviewers) > 0 {
+		return fmt.Errorf("review.agent cannot be combined with legacy review.reviewers")
+	}
+	if len(review.Reviewers) > 1 {
+		return fmt.Errorf("review.reviewers accepts at most one legacy reviewer; multi-reviewer fan-out is not supported")
+	}
+	if len(review.Reviewers) == 1 && strings.TrimSpace(string(review.Reviewers[0].Agent)) == "" {
+		return fmt.Errorf("review.reviewers[0].agent must not be empty")
+	}
+	if review.MaxParallel != nil && *review.MaxParallel < 0 {
+		return fmt.Errorf("review.max_parallel must be >= 0, got %d", *review.MaxParallel)
+	}
 	if review.MaxFixRounds != nil && *review.MaxFixRounds < 0 {
 		return fmt.Errorf("review.max_fix_rounds must be >= 0, got %d", *review.MaxFixRounds)
 	}
@@ -2065,6 +2157,13 @@ func validateReviewRaw(review ReviewRaw) error {
 	}
 	if total := ReviewPathInstructionsBytes(review.PathInstructions); total > MaxReviewPathInstructionsBytes {
 		return fmt.Errorf("review.path_instructions would add up to %d bytes to the review prompt, at most %d are allowed so the prompt stays within budget", total, MaxReviewPathInstructionsBytes)
+	}
+	return nil
+}
+
+func validateLegacyReviewLoop(loop legacyReviewLoopRaw) error {
+	if loop.Enabled != nil && *loop.Enabled {
+		return fmt.Errorf("review_loop.enabled must be false; post-PR review_loop is not supported on this lineage")
 	}
 	return nil
 }
@@ -2544,7 +2643,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Test:           test,
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		DesignContext:  resolveDesignContext(repo.DesignContext),
-		Review:         Review{MaxFixRounds: reviewMaxFixRounds, PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
+		Review:         Review{Agent: global.Review.Agent, MaxFixRounds: reviewMaxFixRounds, PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
 		PR:             PR{BaseBranch: strings.TrimSpace(repo.PR.BaseBranch)},
 		ForgeProfiles:  global.ForgeProfiles,
 		// repo is the EffectiveRepoConfig result, so this value is already

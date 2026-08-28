@@ -46,13 +46,14 @@ type approvalResponse struct {
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
-	db     *db.DB
-	paths  *paths.Paths
-	config *config.Config
-	forge  *forgecontext.Context
-	agent  agent.Agent
-	steps  []Step
-	skips  map[types.StepName]bool
+	db          *db.DB
+	paths       *paths.Paths
+	config      *config.Config
+	forge       *forgecontext.Context
+	agent       agent.Agent
+	reviewAgent agent.Agent
+	steps       []Step
+	skips       map[types.StepName]bool
 
 	onEvent EventFunc
 
@@ -90,6 +91,12 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 // subprocess in this run. A nil context preserves ambient behavior.
 func (e *Executor) SetForgeContext(ctx *forgecontext.Context) {
 	e.forge = ctx
+}
+
+// SetReviewAgent installs an optional review/rereview-only agent. The
+// executor's pipeline agent remains the fixer and session owner.
+func (e *Executor) SetReviewAgent(ag agent.Agent) {
+	e.reviewAgent = ag
 }
 
 // SetSkippedSteps configures steps that should be marked skipped without running.
@@ -977,6 +984,19 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			round:    func() int { return roundNum + 1 },
 		}
 	}
+	var reviewerAgent agent.Agent
+	if stepName == types.StepReview && e.reviewAgent != nil {
+		reviewerAgent = &timeoutAgent{inner: e.reviewAgent, timeout: AgentTimeout(e.config)}
+		reviewerAgent = &gateStepBoundaryAgent{inner: reviewerAgent, phase: stepName}
+		reviewerAgent = &lifecycleAgent{inner: reviewerAgent, onLifecycle: onAgentLifecycle}
+		reviewerAgent = &perfRecordingAgent{
+			inner:    reviewerAgent,
+			db:       e.db,
+			runID:    run.ID,
+			stepName: stepName,
+			round:    func() int { return roundNum + 1 },
+		}
+	}
 	ciReady := run.CIReadyAt != nil
 	ciReadyNoCI := run.CIReadyNoCI
 	ciReadinessChanged := func(ready, declaredNoCI bool) {
@@ -1002,6 +1022,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Repo:             repo,
 		WorkDir:          workDir,
 		Agent:            stepAgent,
+		Reviewer:         reviewerAgent,
 		Config:           e.config,
 		ForgeContext:     e.forge,
 		DB:               e.db,

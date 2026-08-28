@@ -22,13 +22,19 @@ import (
 // sessions and echoes resumed ids, recording every invocation.
 type sessionMockAgent struct {
 	mu     sync.Mutex
+	name   string
 	calls  []agent.RunOpts
 	nextID int
 	// respond picks the reply for one invocation (called under the lock).
 	respond func(opts agent.RunOpts) *agent.Result
 }
 
-func (m *sessionMockAgent) Name() string { return "session-mock" }
+func (m *sessionMockAgent) Name() string {
+	if m.name != "" {
+		return m.name
+	}
+	return "session-mock"
+}
 
 func (m *sessionMockAgent) SupportsSessionResume() bool { return true }
 
@@ -106,6 +112,46 @@ func fixCalls(calls []agent.RunOpts) []agent.RunOpts {
 		}
 	}
 	return out
+}
+
+func TestReviewLoop_DedicatedReviewerOwnsReviewAndRereviewOnly(t *testing.T) {
+	reviewRound := 0
+	pipelineAgent := &sessionMockAgent{name: "codex"}
+	pipelineAgent.respond = func(opts agent.RunOpts) *agent.Result {
+		if opts.Purpose != "review-fix" {
+			t.Errorf("pipeline agent received purpose %q, want review-fix only", opts.Purpose)
+		}
+		return &agent.Result{Output: []byte(`{"summary":"fix the issue"}`)}
+	}
+	reviewer := &sessionMockAgent{name: "claude"}
+	reviewer.respond = func(opts agent.RunOpts) *agent.Result {
+		if opts.Purpose != "review" {
+			t.Errorf("reviewer received purpose %q, want review", opts.Purpose)
+		}
+		reviewRound++
+		if reviewRound == 1 {
+			return &agent.Result{Output: []byte(`{"findings":[{"id":"f-1","severity":"warning","description":"fix this","action":"auto-fix"}],"summary":"issue","risk_level":"medium","risk_rationale":"issue"}`)}
+		}
+		return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean"}`)}
+	}
+
+	exec, _, run, repo, workDir := reviewSessionHarness(t, pipelineAgent, []pipeline.Step{newTestReviewStep()})
+	exec.SetReviewAgent(reviewer)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got := len(reviewCalls(reviewer.snapshot())); got != 2 {
+		t.Fatalf("dedicated reviewer calls = %d, want initial review + rereview", got)
+	}
+	if got := len(reviewCalls(pipelineAgent.snapshot())); got != 0 {
+		t.Fatalf("pipeline review calls = %d, want 0", got)
+	}
+	if got := len(fixCalls(pipelineAgent.snapshot())); got != 1 {
+		t.Fatalf("pipeline fixer calls = %d, want 1", got)
+	}
+	if got := len(fixCalls(reviewer.snapshot())); got != 0 {
+		t.Fatalf("dedicated reviewer fixer calls = %d, want 0", got)
+	}
 }
 
 // TestReviewLoop_IndependentReviewTurnsOneFixerSession drives the real review

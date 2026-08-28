@@ -15,11 +15,15 @@ var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
-	Ctx                   context.Context
-	Run                   *db.Run
-	Repo                  *db.Repo
-	WorkDir               string
-	Agent                 agent.Agent
+	Ctx     context.Context
+	Run     *db.Run
+	Repo    *db.Repo
+	WorkDir string
+	Agent   agent.Agent
+	// Reviewer is the optional dedicated review/rereview agent. Agent remains
+	// the pipeline agent for every other step and for review-fix turns. Nil
+	// means review uses Agent, preserving the single-agent default.
+	Reviewer              agent.Agent
 	Config                *config.Config
 	ForgeContext          *forgecontext.Context
 	DB                    *db.DB
