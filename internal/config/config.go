@@ -2109,19 +2109,8 @@ func validatePRRaw(pr PRRaw) error {
 	return nil
 }
 
-// validateReviewRaw fails the config closed on a review.path_instructions list
-// the review step could not honor deterministically: a missing path or
-// instructions value, a glob the matcher cannot compile, or a list that would
-// overrun the review prompt budget. Rejecting the config aborts the run before
-// an agent starts, which is preferable to silently dropping guidance the
-// maintainer expects the reviewer to apply.
-//
-// This deliberately also runs on the PUSHED copy, even though EffectiveRepoConfig
-// discards a pushed review block: the trusted-copy read
-// (assertGateTrustedConfigReadable in internal/daemon) aborts EVERY run whose
-// default-branch .no-mistakes.yaml fails these checks, so a branch carrying an
-// invalid block has to fail here, before it merges, rather than brick the
-// repository's pipeline afterwards. Do not scope this to the trusted copy.
+// validateGlobalReviewRaw validates the machine-owned reviewer selection and
+// the legacy global compatibility fields before resolving the shared policy.
 func validateGlobalReviewRaw(review ReviewRaw) error {
 	if review.Agent != "" && len(review.Reviewers) > 0 {
 		return fmt.Errorf("review.agent cannot be combined with legacy review.reviewers")
@@ -2141,6 +2130,19 @@ func validateGlobalReviewRaw(review ReviewRaw) error {
 	return validateReviewRaw(review)
 }
 
+// validateReviewRaw fails the config closed on a review.path_instructions list
+// the review step could not honor deterministically: a missing path or
+// instructions value, a glob the matcher cannot compile, or a list that would
+// overrun the review prompt budget. Rejecting the config aborts the run before
+// an agent starts, which is preferable to silently dropping guidance the
+// maintainer expects the reviewer to apply.
+//
+// This deliberately also runs on the PUSHED copy, even though EffectiveRepoConfig
+// discards a pushed review block: the trusted-copy read
+// (assertGateTrustedConfigReadable in internal/daemon) aborts EVERY run whose
+// default-branch .no-mistakes.yaml fails these checks, so a branch carrying an
+// invalid block has to fail here, before it merges, rather than brick the
+// repository's pipeline afterwards. Do not scope this to the trusted copy.
 func validateReviewRaw(review ReviewRaw) error {
 	if review.MaxFixRounds != nil && *review.MaxFixRounds < 0 {
 		return fmt.Errorf("review.max_fix_rounds must be >= 0, got %d", *review.MaxFixRounds)

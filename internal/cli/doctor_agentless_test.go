@@ -58,6 +58,31 @@ func TestDoctorAcceptsConfiguredACPBridge(t *testing.T) {
 	}
 }
 
+func TestDoctorRejectsUnresolvableReviewAgent(t *testing.T) {
+	restore := telemetry.SetDefaultForTesting(&telemetryRecorder{})
+	defer restore()
+
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	if err := os.WriteFile(filepath.Join(nmHome, "config.yaml"), []byte("agent: claude\nreview:\n  agent: codex\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	binDir := t.TempDir()
+	writeDoctorGitBinary(t, binDir)
+	writeDoctorStubBinary(t, binDir, "claude")
+	t.Setenv("PATH", binDir)
+
+	out, err := executeCmd("doctor")
+	if err != nil {
+		t.Fatalf("doctor failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"gate validation", "resolve review agent", "codex", "some checks failed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor output should contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
 func writeDoctorGitBinary(t *testing.T, dir string) {
 	t.Helper()
 	name := "git"
