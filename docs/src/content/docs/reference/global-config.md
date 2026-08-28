@@ -545,7 +545,7 @@ The dedicated reviewer inherits the machine's existing `agent_path_override`, [`
 
 `review.agent` is global-only because it selects a process that runs with the operator's credentials. A repository `.no-mistakes.yaml` cannot set it.
 
-For rollback compatibility, the parser also accepts the removed `review.reviewers` shape only when it contains one member, maps that member's `agent` to `review.agent`, and accepts `review.max_parallel` as inert. Legacy per-reviewer `args` and `path` are inert; use the shared machine settings above. A multi-member list is rejected because this lineage does not implement panel fan-out. A legacy `review_loop` block is accepted only with `enabled: false`; enabling removed post-PR loop behavior fails config loading rather than being ignored.
+For rollback compatibility, the parser also accepts the removed `review.reviewers` shape only when it contains one member, maps that member's `agent` to `review.agent`, and accepts `review.max_parallel` as inert. Legacy per-reviewer `args` and `path` are inert; use the shared machine settings above. A multi-member list is rejected because this lineage does not implement panel fan-out, and legacy `review.fail_open` is accepted only when false. A legacy `review_loop` block is accepted only with `enabled: false`; enabling removed post-PR loop behavior fails config loading rather than being ignored.
 
 ### review.max_fix_rounds
 

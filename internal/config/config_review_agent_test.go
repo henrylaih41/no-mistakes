@@ -105,8 +105,9 @@ func TestLoadRepoIgnoresLegacyReviewPanelCompatibilityFields(t *testing.T) {
 	repo, err := LoadRepoFromBytes([]byte(`review:
   reviewers:
     - agent: claude
-  max_parallel: 2
-  fail_open: false
+    - agent: ""
+  max_parallel: -1
+  fail_open: true
   max_fix_rounds: 3
 `))
 	if err != nil {

@@ -1825,7 +1825,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
-	if err := validateReviewRaw(raw.Review); err != nil {
+	if err := validateGlobalReviewRaw(raw.Review); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateLegacyReviewLoop(raw.ReviewLoop); err != nil {
@@ -2122,7 +2122,7 @@ func validatePRRaw(pr PRRaw) error {
 // default-branch .no-mistakes.yaml fails these checks, so a branch carrying an
 // invalid block has to fail here, before it merges, rather than brick the
 // repository's pipeline afterwards. Do not scope this to the trusted copy.
-func validateReviewRaw(review ReviewRaw) error {
+func validateGlobalReviewRaw(review ReviewRaw) error {
 	if review.Agent != "" && len(review.Reviewers) > 0 {
 		return fmt.Errorf("review.agent cannot be combined with legacy review.reviewers")
 	}
@@ -2138,6 +2138,10 @@ func validateReviewRaw(review ReviewRaw) error {
 	if review.FailOpen != nil && *review.FailOpen {
 		return fmt.Errorf("review.fail_open must be false; dropping failed reviewers is not supported on this lineage")
 	}
+	return validateReviewRaw(review)
+}
+
+func validateReviewRaw(review ReviewRaw) error {
 	if review.MaxFixRounds != nil && *review.MaxFixRounds < 0 {
 		return fmt.Errorf("review.max_fix_rounds must be >= 0, got %d", *review.MaxFixRounds)
 	}

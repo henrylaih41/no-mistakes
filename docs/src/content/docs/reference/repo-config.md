@@ -263,7 +263,7 @@ Like `commands.*` and `agent`, this field steers gate behavior, so it is honored
 
 ### review.path_instructions
 
-Agent selection is not a repository setting. Configure a dedicated reviewer with global [`review.agent`](/no-mistakes/reference/global-config/#reviewagent); `review.agent`, legacy `review.reviewers`, and legacy `review.max_parallel` are rejected in `.no-mistakes.yaml` because they select or control machine processes.
+Agent selection is not a repository setting. Configure a dedicated reviewer with global [`review.agent`](/no-mistakes/reference/global-config/#reviewagent); repository `.no-mistakes.yaml` files that set `review.agent` are rejected because that field selects a machine process. Removed panel fields such as `review.reviewers`, `review.max_parallel`, and `review.fail_open` are accepted and ignored at repository scope for rollback compatibility; they never select reviewers or restore panel fan-out.
 
 Extra review guidance, scoped to the paths a change actually touches.
 

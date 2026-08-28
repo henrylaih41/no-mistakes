@@ -166,6 +166,10 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
 		return nil, err
 	}
+	reviewAgentRequired, err := reviewAgentRequiredForRecovery(m.db, run.ID)
+	if err != nil {
+		return nil, err
+	}
 	cfg, err := m.loadRecoveredConfig(ctx, run, repo, workDir)
 	if err != nil {
 		return nil, err
@@ -184,7 +188,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 			return nil, err
 		}
 	}
-	reviewAg, err := newReviewAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
+	reviewAg, err := newRecoveredReviewAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx), reviewAgentRequired)
 	if err != nil {
 		_ = ag.Close()
 		return nil, err
@@ -200,6 +204,19 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		steps:       execSteps,
 		forge:       forgeCtx,
 	}, nil
+}
+
+func reviewAgentRequiredForRecovery(database *db.DB, runID string) (bool, error) {
+	results, err := database.GetStepsByRun(runID)
+	if err != nil {
+		return false, fmt.Errorf("get recovered steps for review agent: %w", err)
+	}
+	for _, result := range results {
+		if result.StepName == types.StepReview {
+			return result.Status != types.StepStatusCompleted && result.Status != types.StepStatusSkipped, nil
+		}
+	}
+	return false, nil
 }
 
 func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.Agent) error {
@@ -332,6 +349,31 @@ func newReviewAgent(ctx context.Context, cfg *config.Config, evidenceRoot string
 		}
 	}
 	return ag, nil
+}
+
+type failedRecoveryReviewAgent struct {
+	name string
+	err  error
+}
+
+func (a *failedRecoveryReviewAgent) Name() string { return a.name }
+
+func (a *failedRecoveryReviewAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
+	return nil, a.err
+}
+
+func (a *failedRecoveryReviewAgent) Close() error { return nil }
+
+func newRecoveredReviewAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay, required bool) (agent.Agent, error) {
+	name := ""
+	if cfg != nil {
+		name = string(cfg.Review.Agent)
+	}
+	ag, err := newReviewAgent(ctx, cfg, evidenceRoot, lookPath, environment)
+	if err == nil || required {
+		return ag, err
+	}
+	return &failedRecoveryReviewAgent{name: name, err: err}, nil
 }
 
 func closeRunAgents(agents ...agent.Agent) {
