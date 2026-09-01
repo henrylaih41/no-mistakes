@@ -394,6 +394,7 @@ func parseReviewFindings(result *agent.Result, log func(string)) Findings {
 			findings = Findings{Summary: result.Text}
 		}
 	}
+	findings = clearAgentFindingDispositions(findings)
 	// The evidence ID/source pair is gate authority. A reviewer may report the
 	// same words as an ordinary finding, but cannot mint a gate diagnostic.
 	for i := range findings.Items {

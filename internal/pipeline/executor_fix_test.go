@@ -497,6 +497,62 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 	}
 }
 
+func TestExecutor_UserFixExcludesFollowUps(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	var capturedFindings string
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			callCount++
+			if callCount == 1 {
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"blocking defect","action":"auto-fix"},{"id":"review-2","severity":"info","description":"follow-up note","action":"no-op","disposition":"follow-up"}],"summary":"2 findings"}`,
+				}, nil
+			}
+			capturedFindings = sctx.PreviousFindings
+			return &StepOutcome{}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1", "review-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+
+	items := mustParseFindingItems(t, capturedFindings)
+	if len(items) != 1 || items[0].ID != "review-1" {
+		t.Fatalf("fix payload contains follow-ups: %+v", items)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) == 0 || rounds[0].SelectedFindingIDs == nil || *rounds[0].SelectedFindingIDs != `["review-1"]` {
+		t.Fatalf("selected finding IDs include follow-ups: %+v", rounds)
+	}
+}
+
 func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

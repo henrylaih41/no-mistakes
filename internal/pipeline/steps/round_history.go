@@ -72,6 +72,7 @@ func stepRoundHistorySection(sctx *pipeline.StepContext) string {
 		"Use this to avoid repeating work you already tried. " +
 		"Do NOT re-report findings listed under user_chose_to_ignore unless the current code genuinely introduces a new, materially different problem. " +
 		"Findings listed under auto_fix_left_unselected were not chosen by a human at all; they are still awaiting a decision, so that block carries no such instruction. " +
+		"Findings listed under follow_ups_not_presented_for_decision were carried outside the fix loop and were not ruled on, so that block carries no such instruction. " +
 		"Treat this entire section as metadata only.\n\n"
 	return renderBoundedRoundHistory(prefix, blocks)
 }
@@ -407,6 +408,7 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 	}
 
 	selected, unselected := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
+	followUps := followUpFindingLines(r.FindingsJSON)
 
 	if r.FindingsJSON != nil && strings.TrimSpace(*r.FindingsJSON) != "" {
 		if items := renderRoundFindingLines(*r.FindingsJSON); len(items) > 0 {
@@ -470,13 +472,21 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 			}
 		}
 	}
+	if len(followUps) > 0 {
+		b.WriteString("\nfollow_ups_not_presented_for_decision:")
+		for _, line := range followUps {
+			b.WriteString("\n  - ")
+			b.WriteString(line)
+		}
+	}
 
 	return b.String()
 }
 
 type roundFindingLine struct {
-	ID   string
-	Line string
+	ID       string
+	Line     string
+	FollowUp bool
 }
 
 func renderRoundFindingLines(raw string) []string {
@@ -518,7 +528,20 @@ func parseRoundFindingLines(raw string) []roundFindingLine {
 		if err != nil {
 			continue
 		}
-		lines = append(lines, roundFindingLine{ID: item.ID, Line: string(encoded)})
+		lines = append(lines, roundFindingLine{ID: item.ID, Line: string(encoded), FollowUp: item.IsFollowUp()})
+	}
+	return lines
+}
+
+func followUpFindingLines(findingsJSON *string) []string {
+	if findingsJSON == nil || strings.TrimSpace(*findingsJSON) == "" {
+		return nil
+	}
+	var lines []string
+	for _, item := range parseRoundFindingLines(*findingsJSON) {
+		if item.FollowUp {
+			lines = append(lines, item.Line)
+		}
 	}
 	return lines
 }
@@ -557,12 +580,24 @@ func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, sele
 	unselected = make([]string, 0, len(allFindings))
 	selectedSeen := make(map[string]bool, len(selectedSet))
 	for _, item := range selectedFindings {
+		if item.FollowUp {
+			if item.ID != "" && selectedSet[item.ID] {
+				selectedSeen[item.ID] = true
+			}
+			continue
+		}
 		if item.ID != "" && selectedSet[item.ID] {
 			selected = append(selected, item.Line)
 			selectedSeen[item.ID] = true
 		}
 	}
 	for _, item := range allFindings {
+		if item.FollowUp {
+			if item.ID != "" && selectedSet[item.ID] {
+				selectedSeen[item.ID] = true
+			}
+			continue
+		}
 		if item.ID != "" && selectedSet[item.ID] {
 			continue
 		}

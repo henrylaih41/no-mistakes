@@ -65,6 +65,13 @@ func hasBlockingFindings(items []Finding) bool {
 	return false
 }
 
+func clearAgentFindingDispositions(findings Findings) Findings {
+	for i := range findings.Items {
+		findings.Items[i].Disposition = ""
+	}
+	return findings
+}
+
 // assertPipelineHeadContinuity fails closed when the worktree HEAD is no longer
 // equal to or a descendant of the head the pipeline itself last recorded
 // (sctx.Run.HeadSHA). Every post-review step calls this guard at entry, and

@@ -224,6 +224,7 @@ Rules:
 				findings = Findings{Summary: result.Text}
 			}
 		}
+		findings = clearAgentFindingDispositions(findings)
 		if len(tested) > 0 {
 			findings.Tested = append(append([]string{}, tested...), findings.Tested...)
 		}

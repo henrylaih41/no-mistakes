@@ -264,13 +264,8 @@ func combineSelectedFindingIDs(selected []string, mergedFindings string) []strin
 	if err != nil {
 		return selected
 	}
-	seen := make(map[string]bool, len(selected))
-	for _, id := range selected {
-		if id != "" {
-			seen[id] = true
-		}
-	}
-	result := append([]string(nil), selected...)
+	seen := make(map[string]bool, len(merged.Items))
+	result := make([]string, 0, len(merged.Items))
 	for _, item := range merged.Items {
 		if item.ID == "" || seen[item.ID] {
 			continue
@@ -308,7 +303,17 @@ func filterFindingsJSON(raw string, ids []string) string {
 	if err != nil {
 		return raw
 	}
-	filtered := types.FilterFindings(findings, ids)
+	eligibleIDs := make([]string, 0, len(ids))
+	selected := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		selected[id] = true
+	}
+	for _, item := range findings.Items {
+		if selected[item.ID] && !item.IsFollowUp() {
+			eligibleIDs = append(eligibleIDs, item.ID)
+		}
+	}
+	filtered := types.FilterFindings(findings, eligibleIDs)
 	if len(ids) == 0 {
 		filtered = types.Findings{
 			Summary:        "0 selected findings",

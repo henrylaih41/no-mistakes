@@ -153,6 +153,42 @@ func TestRoundHistoryPromptSection_DoesNotTreatAutoFixFilteringAsUserIgnore(t *t
 	}
 }
 
+func TestRoundHistoryPromptSection_SeparatesFollowUpsFromHumanDeclines(t *testing.T) {
+	sctx, stepID := newRoundHistoryContext(t)
+
+	findings := `{"findings":[{"id":"review-1","severity":"error","description":"blocking defect","action":"ask-master"},{"id":"review-2","severity":"info","description":"low-priority note","action":"no-op","disposition":"follow-up"}],"summary":"2"}`
+	round, err := sctx.DB.InsertStepRound(stepID, 1, "initial", &findings, nil, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetStepRoundDeclined(round.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rounds, err := sctx.DB.GetRoundsByStep(stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceUserDeclined {
+		t.Fatalf("decline was not recorded: %+v", rounds)
+	}
+
+	got := stepRoundHistorySection(sctx)
+	ignoredAt := strings.Index(got, "\nuser_chose_to_ignore:")
+	followUpsAt := strings.Index(got, "\nfollow_ups_not_presented_for_decision:")
+	if ignoredAt < 0 || followUpsAt < 0 || followUpsAt <= ignoredAt {
+		t.Fatalf("expected separate declined and follow-up blocks:\n%s", got)
+	}
+	ignored := got[ignoredAt:followUpsAt]
+	if !strings.Contains(ignored, `"id":"review-1"`) || strings.Contains(ignored, `"id":"review-2"`) {
+		t.Fatalf("human decline block contains the wrong findings:\n%s", ignored)
+	}
+	followUps := got[followUpsAt:]
+	if !strings.Contains(followUps, `"id":"review-2"`) || strings.Contains(followUps, `"id":"review-1"`) {
+		t.Fatalf("follow-up block contains the wrong findings:\n%s", followUps)
+	}
+}
+
 func TestRoundHistoryPromptSection_IncludesSourceAndUserInstructions(t *testing.T) {
 	sctx, stepID := newRoundHistoryContext(t)
 	round1 := `{"findings":[{"id":"review-1","severity":"error","description":"panic risk","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"secondary","action":"auto-fix"}],"summary":"2"}`
