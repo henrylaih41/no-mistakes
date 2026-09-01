@@ -68,6 +68,7 @@ forge_profiles:
 review:
   agent: claude
   max_fix_rounds: 0
+  fix_round_min_severity: warning
 
 auto_fix:
   rebase: 3
@@ -562,6 +563,16 @@ Caps the number of persisted Review fix rounds in one run. Both automatic and ex
 When a rereview is clean, Review completes even if the cap has been consumed. When findings remain after the cap, Review parks at `awaiting_triage` instead of starting another fix round. AXI `--yes` and TUI yolo stop there.
 
 After Master triage, `no-mistakes axi respond --action fix --fix-override --override-reason "<reason>" --findings <ids>` authorizes exactly one additional round and stores the reason on the round that triggered it. Residual findings park for triage again. The per-repo [`review.max_fix_rounds`](/no-mistakes/reference/repo-config/#reviewmax_fix_rounds) overrides this value from the trusted default-branch config.
+
+### review.fix_round_min_severity
+
+Sets the minimum finding severity that may enter a Review fix round or pause the run.
+
+| Type | Default | Range |
+|---|---|---|
+| `string` | `warning` | `info`, `warning`, or `error` |
+
+Findings below this value never start a Review fix round and never pause the run for approval or triage. They are recorded with `action: no-op` and `disposition: follow-up`, retain the reviewer's original action in their description, and appear under a "Follow-ups (not fixed in-round)" heading in the PR body. Error and warning findings are unchanged at the default; `info` disables the gate, while `error` also carries warnings as follow-ups. This key is global-only, and a repository `.no-mistakes.yaml` that sets it is rejected.
 
 ### auto_fix
 

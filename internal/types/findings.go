@@ -23,6 +23,11 @@ const (
 	FindingSeverityInfo    = "info"
 )
 
+// FindingDispositionFollowUp marks a finding the review severity gate carried
+// out of the fix loop (see DemoteBelowSeverity): it is reported, never fixed
+// in-round, and never pauses the run.
+const FindingDispositionFollowUp = "follow-up"
+
 // This package owns the finding severity and action vocabularies. Callers that
 // accept a severity or action from outside a pipeline agent - a hand-written
 // eval miss, an IPC payload - validate against these rather than keeping their
@@ -37,6 +42,20 @@ var (
 // IsKnownFindingSeverity.
 func NormalizeFindingSeverity(severity string) string {
 	return strings.ToLower(strings.TrimSpace(severity))
+}
+
+// severityRank orders the review severity vocabulary. A severity outside the
+// vocabulary is ranked as error: the gate never demotes what it cannot
+// classify.
+func severityRank(severity string) int {
+	switch NormalizeFindingSeverity(severity) {
+	case FindingSeverityInfo:
+		return 0
+	case FindingSeverityWarning:
+		return 1
+	default:
+		return 2
+	}
 }
 
 // NormalizeFindingAction trims and lower-cases one action. It does not check
@@ -108,6 +127,8 @@ type Finding struct {
 	Source           string `json:"source,omitempty"`
 	UserInstructions string `json:"user_instructions,omitempty"`
 	ReviewScope      string `json:"review_scope,omitempty"`
+	// Disposition is "" (normal) or FindingDispositionFollowUp.
+	Disposition string `json:"disposition,omitempty"`
 	// Category separates the combined document+lint housekeeping pass's
 	// findings into their owning gates. Empty everywhere else.
 	Category string `json:"category,omitempty"`
@@ -132,6 +153,7 @@ type findingWire struct {
 	Source              string `json:"source,omitempty"`
 	UserInstructions    string `json:"user_instructions,omitempty"`
 	ReviewScope         string `json:"review_scope,omitempty"`
+	Disposition         string `json:"disposition,omitempty"`
 	Category            string `json:"category,omitempty"`
 	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
 }
@@ -246,6 +268,29 @@ func AutoFixableFindings(findings Findings) Findings {
 		}
 	}
 	return result
+}
+
+// DemoteBelowSeverity marks every finding whose severity ranks below min as a
+// follow-up: its action becomes no-op so it neither auto-fixes nor pauses the
+// run, and the reviewer's original action is appended to the description for
+// the audit trail. Findings already no-op are left alone. An empty or unknown
+// min demotes nothing (fail closed). The input slice is modified in place and
+// returned.
+func DemoteBelowSeverity(findings Findings, min string) Findings {
+	if !IsKnownFindingSeverity(min) {
+		return findings
+	}
+	minRank := severityRank(min)
+	for i := range findings.Items {
+		item := &findings.Items[i]
+		action := item.ActionOrDefault()
+		if severityRank(item.Severity) < minRank && action != ActionNoOp {
+			item.Description += " (reviewer action: " + action + ")"
+			item.Action = ActionNoOp
+			item.Disposition = FindingDispositionFollowUp
+		}
+	}
+	return findings
 }
 
 // MergeUserOverrides applies per-finding user instructions to existing agent
@@ -427,6 +472,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Source = wire.Source
 	f.UserInstructions = wire.UserInstructions
 	f.ReviewScope = wire.ReviewScope
+	f.Disposition = wire.Disposition
 	f.Category = wire.Category
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {
@@ -446,6 +492,11 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 // a user who hand-adds a finding is asking for a fix.)
 func (f Finding) ActionOrDefault() string {
 	return actionOrDefault(f.Action)
+}
+
+// IsFollowUp reports whether a finding was carried outside the review fix loop.
+func (f Finding) IsFollowUp() bool {
+	return f.Disposition == FindingDispositionFollowUp
 }
 
 func actionOrDefault(action string) string {

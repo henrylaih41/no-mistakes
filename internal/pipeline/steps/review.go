@@ -353,6 +353,18 @@ Risk assessment (after listing all findings):
 		findings = stripped
 	}
 
+	// Severity gate: findings under review.fix_round_min_severity become
+	// follow-ups (action no-op) so they neither start a fix round nor park
+	// the run; the PR body still prints them. Runs once per review turn, so
+	// the initial review and every rereview are gated the same way.
+	if min := sctx.Config.Review.FixRoundMinSeverity; min != "" {
+		before := countFollowUps(findings.Items)
+		findings = types.DemoteBelowSeverity(findings, min)
+		if n := countFollowUps(findings.Items) - before; n > 0 {
+			sctx.Log(fmt.Sprintf("carried %d finding(s) below %s severity as follow-ups (review.fix_round_min_severity)", n, min))
+		}
+	}
+
 	needsApproval := hasBlockingFindings(findings.Items)
 	findingsJSON, _ := json.Marshal(findings)
 
@@ -362,6 +374,16 @@ Risk assessment (after listing all findings):
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
 	})
+}
+
+func countFollowUps(items []Finding) int {
+	count := 0
+	for _, item := range items {
+		if item.IsFollowUp() {
+			count++
+		}
+	}
+	return count
 }
 
 func parseReviewFindings(result *agent.Result, log func(string)) Findings {

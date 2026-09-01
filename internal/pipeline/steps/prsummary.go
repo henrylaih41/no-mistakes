@@ -1299,18 +1299,37 @@ func fixRoundLine(r *db.StepRound, flavor prBodyFlavor) string {
 // followed by any test command details for the test step.
 func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor) {
 	for _, f := range findings.Items {
-		emoji := severityEmoji(f.Severity)
-		loc := ""
-		if f.File != "" {
-			loc = fmt.Sprintf("`%s", escapePRText(f.File, flavor))
-			if f.Line > 0 {
-				loc += fmt.Sprintf(":%d", f.Line)
-			}
-			loc += "` - "
+		if !f.IsFollowUp() {
+			writeFindingBullet(b, f, flavor)
 		}
-		b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
+	}
+	if countFollowUps(findings.Items) > 0 {
+		b.WriteString("\n")
+		if flavor == prBodyMarkdown {
+			b.WriteString("#### Follow-ups (not fixed in-round)\n\n")
+		} else {
+			b.WriteString("### Follow-ups (not fixed in-round)\n\n")
+		}
+		for _, f := range findings.Items {
+			if f.IsFollowUp() {
+				writeFindingBullet(b, f, flavor)
+			}
+		}
 	}
 	writeTestedDetails(b, sr, findings, flavor)
+}
+
+func writeFindingBullet(b *strings.Builder, f types.Finding, flavor prBodyFlavor) {
+	emoji := severityEmoji(f.Severity)
+	loc := ""
+	if f.File != "" {
+		loc = fmt.Sprintf("`%s", escapePRText(f.File, flavor))
+		if f.Line > 0 {
+			loc += fmt.Sprintf(":%d", f.Line)
+		}
+		loc += "` - "
+	}
+	b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
 }
 
 // writeTestedDetails lists the commands the test step exercised. It is a no-op

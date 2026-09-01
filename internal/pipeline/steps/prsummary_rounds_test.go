@@ -177,6 +177,45 @@ func TestBuildPipelineSummary_LegacyUserFixRoundsRenderAsAutoFix(t *testing.T) {
 	}
 }
 
+func TestBuildPipelineSummary_GroupsFollowUpsUnderHeading(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[{"id":"review-1","severity":"warning","file":"pkg/foo.go","line":10,"description":"warning finding","action":"auto-fix"},{"id":"review-2","severity":"info","file":"pkg/foo.go","line":20,"description":"info follow-up","action":"no-op","disposition":"follow-up"}],"summary":"2 findings"}`
+	steps := []*db.StepResult{{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted}}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings}},
+	}
+
+	body, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+	heading := "### Follow-ups (not fixed in-round)"
+	warningIndex := strings.Index(body, "warning finding")
+	headingIndex := strings.Index(body, heading)
+	followUpIndex := strings.Index(body, "info follow-up")
+	if warningIndex < 0 || headingIndex < 0 || followUpIndex < 0 {
+		t.Fatalf("missing grouped finding content in body:\n%s", body)
+	}
+	if !(warningIndex < headingIndex && headingIndex < followUpIndex) {
+		t.Fatalf("finding order = warning:%d heading:%d follow-up:%d, want warning before heading before follow-up\n%s", warningIndex, headingIndex, followUpIndex, body)
+	}
+
+	bitbucket, _ := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, scm.ProviderBitbucket)
+	if !strings.Contains(bitbucket, "#### Follow-ups (not fixed in-round)") {
+		t.Fatalf("Bitbucket body missing level-four follow-up heading:\n%s", bitbucket)
+	}
+}
+
+func TestBuildPipelineSummary_NoFollowUpsNoHeading(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"warning finding","action":"auto-fix"}],"summary":"1 finding"}`
+	steps := []*db.StepResult{{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted}}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings}},
+	}
+	body, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+	if strings.Contains(body, "Follow-ups") {
+		t.Fatalf("body contains follow-up heading without follow-ups:\n%s", body)
+	}
+}
+
 func TestBuildPipelineSummary_MultiRoundStillFailing(t *testing.T) {
 	t.Parallel()
 	findings1 := `{"findings":[{"id":"lint-1","severity":"error","file":"pkg/foo.go","line":18,"description":"unused import"},{"id":"lint-2","severity":"warning","file":"pkg/bar.go","line":35,"description":"missing error check"}],"summary":"2 issues"}`
