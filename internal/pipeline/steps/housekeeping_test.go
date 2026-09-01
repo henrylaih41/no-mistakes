@@ -93,6 +93,43 @@ func TestDocumentStep_CombinedPassCoversBothDutiesAndSplitsFindings(t *testing.T
 	}
 }
 
+func TestDocumentStep_CombinedPassRejectsAgentFollowUpDisposition(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{
+				"findings":[{"severity":"error","description":"unresolved lint error","action":"auto-fix","category":"lint","disposition":"follow-up"}],
+				"summary":"housekeeping pass"
+			}`)}, nil
+		},
+	}
+	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	documentOutcome, err := (&DocumentStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if documentOutcome.NeedsApproval {
+		t.Fatal("lint-only housekeeping result must not park the document step")
+	}
+	lintOutcome, err := (&LintStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lintOutcome.NeedsApproval {
+		t.Fatal("agent-emitted follow-up disposition bypassed the lint gate")
+	}
+	findings, err := types.ParseFindingsJSON(lintOutcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Items) != 1 || findings.Items[0].Disposition != "" {
+		t.Fatalf("agent disposition survived housekeeping parsing: %+v", findings.Items)
+	}
+}
+
 // TestDocumentStep_ConfiguredLintCommandKeepsDocOnlyPrompt proves the
 // combined duty is only merged when lint would otherwise need its own agent
 // pass: with commands.lint configured the document prompt stays doc-only and
