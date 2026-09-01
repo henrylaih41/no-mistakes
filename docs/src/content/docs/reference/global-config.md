@@ -566,17 +566,17 @@ After Master triage, `no-mistakes axi respond --action fix --fix-override --over
 
 ### review.fix_round_min_severity
 
-Sets the minimum finding severity that may enter a Review fix round or pause the run.
+Sets the minimum finding severity that Review may auto-fix, select through unattended or select-all controls, or use to pause the run.
 
 | Type | Default | Range |
 |---|---|---|
 | `string` | `warning` | `info`, `warning`, or `error` |
 
-Findings below this value never start a Review fix round and never pause the run for approval or triage. They are recorded with `action: no-op` and `disposition: follow-up`, retain the reviewer's original action in their description, and appear under a "Follow-ups (not fixed in-round)" heading in the PR body. Error and warning findings are unchanged at the default; `info` disables the gate, while `error` also carries warnings as follow-ups. This key is global-only, and a repository `.no-mistakes.yaml` that sets it is rejected.
+Findings below this value never trigger a Review fix round and never pause the run for approval or triage. An actionable finding below the minimum is recorded with `action: no-op` and `disposition: follow-up`, retains the reviewer's original action in its description, and appears under a "Follow-ups (not fixed in-round)" heading in the PR body. AXI `--yes`, TUI yolo, and TUI `A` leave it unselected, but an authority can still explicitly select a particular follow-up for a manual fix. A finding that was already `no-op` remains an ordinary informational finding, and an unrecognized finding severity is never demoted. Error and warning findings are unchanged at the default; `info` disables severity-based demotion, while `error` also carries actionable warnings as follow-ups. This key is global-only, and a repository `.no-mistakes.yaml` that sets it is rejected.
 
 ### auto_fix
 
-Maximum follow-up auto-fix attempts per step. Set a step to `0` to disable the follow-up auto-fix loop, so findings require manual approval.
+Maximum follow-up auto-fix attempts per step. Set a step to `0` to disable the follow-up auto-fix loop, so blocking or manual-action findings require approval.
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
 For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings then pause for approval instead of starting another automatic fix loop.
 

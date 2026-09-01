@@ -66,8 +66,8 @@ func newAxiRunCmd() *cobra.Command {
 		Short: "Validate your code changes, blocking until a decision point or the outcome",
 		Long: "Triggers a pipeline run for the current branch and drives it. Without\n" +
 			"--yes it blocks until the first approval gate, CI-ready point, or final outcome and\n" +
-			"prints it. With --yes it auto-resolves every gate (fixing actionable\n" +
-			"auto-fix, ask-master, and ask-user findings with no escalation - then\n" +
+			"prints it. With --yes it auto-resolves every ordinary gate (fixing non-follow-up\n" +
+			"findings whose action is auto-fix, ask-master, or ask-user with no escalation - then\n" +
 			"accepting the result) until a decision point or outcome.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
@@ -430,7 +430,7 @@ func rerunParams(repoID, branch, expectedHead string, skipSteps []types.StepName
 // autoApprove is set it resolves each readable gate and continues; otherwise it
 // returns at the first gate so the caller can surface it to the owning authority.
 //
-// Auto-resolution means "agree to fix every finding": a gate with actionable
+// Auto-resolution means "agree to fix every eligible finding": a gate with actionable
 // findings is fixed (every non-follow-up finding selected), and the resulting
 // fix_review is accepted; gates with only non-actionable findings are approved.
 // Each step is fixed at most once so a finding the fix cannot clear converges to

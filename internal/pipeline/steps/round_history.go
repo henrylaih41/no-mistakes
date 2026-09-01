@@ -265,9 +265,9 @@ func appendHumanDecisionLines(lines []string, stepName string, r *db.StepRound) 
 	return lines
 }
 
-// declinedFindingLines returns the sanitized findings a human saw in this
-// round and did not select for fixing, or nil when the round records no human
-// decision.
+// declinedFindingLines returns the sanitized, decision-eligible findings a
+// human did not select for fixing, or nil when the round records no human
+// decision. Unselected follow-ups stay outside the decision complement.
 //
 // An auto-fix selection is deliberately NOT a human decision: its complement
 // is the findings the auto-fix filter left for a later gate, not findings a
@@ -443,8 +443,9 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 		}
 	case db.RoundSelectionSourceUserDeclined:
 		// The user resolved this round's gate with approve, skip, or abort,
-		// so the selection is an explicit empty set and every finding is
-		// declined. There is no user_chose_to_fix half to render.
+		// so the selection is an explicit empty set and every decision-eligible
+		// finding is declined. Follow-ups stay outside the decision, and there
+		// is no user_chose_to_fix half to render.
 		if unselected != nil {
 			b.WriteString("\nuser_chose_to_ignore:")
 			for _, line := range unselected {
@@ -557,9 +558,10 @@ func followUpFindingLines(findingsJSON *string, selectedJSON *string) []string {
 
 // partitionRoundFindings splits the round's findings into (selected,
 // unselected) lists using SelectedFindingIDs as the source of truth for what
-// was chosen. A nil return for either side indicates the information is
-// unavailable, so the caller can omit the line entirely rather than emit a
-// misleading empty set.
+// was chosen. An explicitly selected follow-up belongs to selected; an
+// unselected follow-up belongs to neither decision list. A nil return for
+// either side indicates the information is unavailable, so the caller can omit
+// the line entirely rather than emit a misleading empty set.
 func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, selectedJSON *string) (selected []string, unselected []string) {
 	if findingsJSON == nil || strings.TrimSpace(*findingsJSON) == "" {
 		return nil, nil

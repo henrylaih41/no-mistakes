@@ -49,8 +49,8 @@ const (
 	// review-fix and rereview turns, so a stalled agent cannot leave a run
 	// active forever.
 	DefaultReviewAgentTimeout = 30 * time.Minute
-	// DefaultReviewFixRoundMinSeverity is the minimum finding severity that may
-	// enter a review fix round or pause the run.
+	// DefaultReviewFixRoundMinSeverity is the minimum finding severity eligible
+	// for automatic or synthetic review selection and approval gating.
 	DefaultReviewFixRoundMinSeverity = types.FindingSeverityWarning
 	// DefaultTestAgentTimeout bounds one Test-step agent invocation, including
 	// the post-test evidence-gathering turn and a Test-repair turn, so a stalled
@@ -303,9 +303,9 @@ type ReviewRaw struct {
 	FailOpen    *bool                `yaml:"fail_open"`
 	// MaxFixRounds caps persisted review fix attempts. Zero or nil is unlimited.
 	MaxFixRounds *int `yaml:"max_fix_rounds"`
-	// FixRoundMinSeverity is the minimum finding severity that may enter a
-	// review fix round or pause the run; below it findings are carried as
-	// follow-ups. Global-only.
+	// FixRoundMinSeverity is the minimum finding severity eligible for automatic
+	// or synthetic review selection and approval gating; actionable findings
+	// below it are carried as follow-ups. Global-only.
 	FixRoundMinSeverity string `yaml:"fix_round_min_severity"`
 	// PathInstructions scope extra review guidance to the paths a change
 	// actually touches. The review step appends the blocks whose glob matches
@@ -914,7 +914,7 @@ log_level: info
 # review:
 #   agent: claude
 #   max_fix_rounds: 0
-#   # Findings below this severity are carried as follow-ups instead of fixed or paused.
+#   # Actionable findings below this severity are carried as follow-ups instead of fixed or paused.
 #   fix_round_min_severity: warning
 
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)

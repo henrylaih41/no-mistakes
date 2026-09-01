@@ -14,20 +14,20 @@ const (
 	// RoundSelectionSourceUserDeclined records that a human resolved the
 	// round's approval gate without selecting any finding to fix: approve,
 	// skip, or abort. Before this existed, those three resolutions wrote no
-	// finding-level state at all, so "the human declined every finding" and
-	// "there were no findings" were the same row and no later step or run
-	// could tell them apart. The decline itself is still stored the way a
-	// partial selection stores one, as the complement of
-	// SelectedFindingIDs, so this source is written with an explicit empty
-	// JSON array rather than a NULL.
+	// finding-level state at all, so "the human declined every decision-eligible
+	// finding" and "there were no findings" were the same row and no later step
+	// or run could tell them apart. The decline itself is still stored the way a
+	// partial selection stores one, as the decision-eligible complement of
+	// SelectedFindingIDs, so this source is written with an explicit empty JSON
+	// array rather than a NULL. Follow-ups stay outside that complement.
 	RoundSelectionSourceUserDeclined = "user_declined"
 )
 
 // DeclinedSelectionJSON is the SelectedFindingIDs value written alongside
 // RoundSelectionSourceUserDeclined. It must be an empty JSON *array* and not
-// an empty string: readers derive the declined set as
-// findings_json minus selected_finding_ids, and a NULL column means "no
-// decision was recorded" rather than "nothing was selected".
+// an empty string: readers derive the declined set as the decision-eligible
+// findings_json entries minus selected_finding_ids, and a NULL column means
+// "no decision was recorded" rather than "nothing was selected".
 const DeclinedSelectionJSON = "[]"
 
 // StepRound represents one execution round within a pipeline step.

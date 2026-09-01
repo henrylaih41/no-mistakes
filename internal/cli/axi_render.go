@@ -513,10 +513,10 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 		gfields = append(gfields, toon.Field{Key: "risk", Value: parsed.RiskLevel})
 	}
 	// Point-of-use reminder at the review gate: review auto-fix defaults to
-	// disabled, so agents should expect blocking and both manual actions to park
-	// unless config explicitly opts back in.
+	// disabled, so agents should expect non-follow-up blocking and manual-action
+	// findings to park unless config explicitly opts back in.
 	if gate.Name == string(types.StepReview) {
-		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking findings plus `ask-master` and `ask-user` review findings park for a decision rather than being silently self-fixed."})
+		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so at or above `review.fix_round_min_severity`, blocking findings plus `ask-master` and `ask-user` review findings park for a decision: blocking `auto-fix` findings because the default limit is zero, and manual-action findings regardless of that limit. Actionable findings below `review.fix_round_min_severity` are follow-ups and do not park."})
 	}
 	if gate.Status == string(types.StepStatusAwaitingTriage) {
 		triage := "Review max_fix_rounds has been reached. Residual findings require master triage; one more fix round requires an explicit, attributed override."

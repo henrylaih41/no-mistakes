@@ -24,8 +24,9 @@ const (
 )
 
 // FindingDispositionFollowUp marks a finding the review severity gate carried
-// out of the fix loop (see DemoteBelowSeverity): it is reported, never fixed
-// in-round, and never pauses the run.
+// out of the default fix loop (see DemoteBelowSeverity): it is reported,
+// excluded from automatic and select-all fixes, and never pauses the run. An
+// authority may still select that specific finding for a manual fix.
 const FindingDispositionFollowUp = "follow-up"
 
 // This package owns the finding severity and action vocabularies. Callers that
@@ -270,12 +271,12 @@ func AutoFixableFindings(findings Findings) Findings {
 	return result
 }
 
-// DemoteBelowSeverity marks every finding whose severity ranks below min as a
-// follow-up: its action becomes no-op so it neither auto-fixes nor pauses the
-// run, and the reviewer's original action is appended to the description for
-// the audit trail. Findings already no-op are left alone. An empty or unknown
-// min demotes nothing (fail closed). The input slice is modified in place and
-// returned.
+// DemoteBelowSeverity marks every actionable finding whose severity ranks
+// below min as a follow-up: its action becomes no-op so it neither auto-fixes
+// nor pauses the run, and the reviewer's original action is appended to the
+// description for the audit trail. Findings already no-op are left alone. An
+// empty or unknown min demotes nothing (fail closed). The input slice is
+// modified in place and returned.
 func DemoteBelowSeverity(findings Findings, min string) Findings {
 	if !IsKnownFindingSeverity(min) {
 		return findings
@@ -494,7 +495,8 @@ func (f Finding) ActionOrDefault() string {
 	return actionOrDefault(f.Action)
 }
 
-// IsFollowUp reports whether a finding was carried outside the review fix loop.
+// IsFollowUp reports whether a finding was carried outside the default review
+// fix loop.
 func (f Finding) IsFollowUp() bool {
 	return f.Disposition == FindingDispositionFollowUp
 }
