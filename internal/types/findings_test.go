@@ -334,6 +334,170 @@ func TestHasActionableFindings(t *testing.T) {
 	}
 }
 
+func TestDemoteBelowSeverity(t *testing.T) {
+	tests := []struct {
+		name            string
+		finding         Finding
+		min             string
+		wantAction      string
+		wantDisposition string
+		wantDescription string
+	}{
+		{
+			name:            "info auto-fix",
+			finding:         Finding{Severity: FindingSeverityInfo, Action: ActionAutoFix, Description: "finding"},
+			min:             FindingSeverityWarning,
+			wantAction:      ActionNoOp,
+			wantDisposition: FindingDispositionFollowUp,
+			wantDescription: "finding (reviewer action: auto-fix)",
+		},
+		{
+			name:            "info ask-master",
+			finding:         Finding{Severity: FindingSeverityInfo, Action: ActionAskMaster, Description: "finding"},
+			min:             FindingSeverityWarning,
+			wantAction:      ActionNoOp,
+			wantDisposition: FindingDispositionFollowUp,
+			wantDescription: "finding (reviewer action: ask-master)",
+		},
+		{
+			name:            "info empty action",
+			finding:         Finding{Severity: FindingSeverityInfo, Description: "finding"},
+			min:             FindingSeverityWarning,
+			wantAction:      ActionNoOp,
+			wantDisposition: FindingDispositionFollowUp,
+			wantDescription: "finding (reviewer action: ask-master)",
+		},
+		{
+			name:            "warning auto-fix under warning minimum",
+			finding:         Finding{Severity: FindingSeverityWarning, Action: ActionAutoFix, Description: "finding"},
+			min:             FindingSeverityWarning,
+			wantAction:      ActionAutoFix,
+			wantDescription: "finding",
+		},
+		{
+			name:            "error untouched",
+			finding:         Finding{Severity: FindingSeverityError, Action: ActionAutoFix, Description: "finding"},
+			min:             FindingSeverityWarning,
+			wantAction:      ActionAutoFix,
+			wantDescription: "finding",
+		},
+		{
+			name:            "info no-op untouched",
+			finding:         Finding{Severity: FindingSeverityInfo, Action: ActionNoOp, Description: "finding"},
+			min:             FindingSeverityWarning,
+			wantAction:      ActionNoOp,
+			wantDescription: "finding",
+		},
+		{
+			name:            "unknown severity ranks as error",
+			finding:         Finding{Severity: "critical", Action: ActionAutoFix, Description: "finding"},
+			min:             FindingSeverityError,
+			wantAction:      ActionAutoFix,
+			wantDescription: "finding",
+		},
+		{
+			name:            "error minimum demotes warning",
+			finding:         Finding{Severity: FindingSeverityWarning, Action: ActionAutoFix, Description: "finding"},
+			min:             FindingSeverityError,
+			wantAction:      ActionNoOp,
+			wantDisposition: FindingDispositionFollowUp,
+			wantDescription: "finding (reviewer action: auto-fix)",
+		},
+		{
+			name:            "info minimum demotes nothing",
+			finding:         Finding{Severity: FindingSeverityInfo, Action: ActionAutoFix, Description: "finding"},
+			min:             FindingSeverityInfo,
+			wantAction:      ActionAutoFix,
+			wantDescription: "finding",
+		},
+		{
+			name:            "empty minimum demotes nothing",
+			finding:         Finding{Severity: FindingSeverityInfo, Action: ActionAutoFix, Description: "finding"},
+			min:             "",
+			wantAction:      ActionAutoFix,
+			wantDescription: "finding",
+		},
+		{
+			name:            "unknown minimum demotes nothing",
+			finding:         Finding{Severity: FindingSeverityInfo, Action: ActionAutoFix, Description: "finding"},
+			min:             "bogus",
+			wantAction:      ActionAutoFix,
+			wantDescription: "finding",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			findings := Findings{Items: []Finding{tt.finding}}
+			got := DemoteBelowSeverity(findings, tt.min)
+			if len(got.Items) != 1 {
+				t.Fatalf("items = %d, want 1", len(got.Items))
+			}
+			item := got.Items[0]
+			if item.Action != tt.wantAction {
+				t.Errorf("action = %q, want %q", item.Action, tt.wantAction)
+			}
+			if item.Disposition != tt.wantDisposition {
+				t.Errorf("disposition = %q, want %q", item.Disposition, tt.wantDisposition)
+			}
+			if item.Description != tt.wantDescription {
+				t.Errorf("description = %q, want %q", item.Description, tt.wantDescription)
+			}
+			if item.IsFollowUp() != (tt.wantDisposition == FindingDispositionFollowUp) {
+				t.Errorf("IsFollowUp() = %v, disposition = %q", item.IsFollowUp(), item.Disposition)
+			}
+		})
+	}
+
+	allInfo := Findings{Items: []Finding{
+		{Severity: FindingSeverityInfo, Action: ActionAutoFix, Description: "fix"},
+		{Severity: FindingSeverityInfo, Action: ActionAskMaster, Description: "ask"},
+		{Severity: FindingSeverityInfo, Description: "unclassified"},
+	}}
+	allInfo = DemoteBelowSeverity(allInfo, FindingSeverityWarning)
+	if got := len(AutoFixableFindings(allInfo).Items); got != 0 {
+		t.Errorf("AutoFixableFindings items = %d, want 0", got)
+	}
+	if HasManualFindings(allInfo) {
+		t.Error("HasManualFindings = true, want false")
+	}
+	if HasActionableFindings(allInfo) {
+		t.Error("HasActionableFindings = true, want false")
+	}
+}
+
+func TestFindingDispositionRoundTripsThroughJSON(t *testing.T) {
+	original := Findings{Items: []Finding{{
+		Severity:    FindingSeverityInfo,
+		Action:      ActionNoOp,
+		Description: "follow later",
+		Disposition: FindingDispositionFollowUp,
+	}}}
+	raw, err := MarshalFindingsJSON(original)
+	if err != nil {
+		t.Fatalf("MarshalFindingsJSON: %v", err)
+	}
+	parsed, err := ParseFindingsJSON(raw)
+	if err != nil {
+		t.Fatalf("ParseFindingsJSON: %v", err)
+	}
+	if len(parsed.Items) != 1 || parsed.Items[0].Disposition != FindingDispositionFollowUp {
+		t.Fatalf("round-tripped findings = %+v, want disposition %q", parsed.Items, FindingDispositionFollowUp)
+	}
+
+	emptyRaw, err := MarshalFindingsJSON(Findings{Items: []Finding{{
+		Severity:    FindingSeverityWarning,
+		Action:      ActionAutoFix,
+		Description: "fix now",
+	}}})
+	if err != nil {
+		t.Fatalf("MarshalFindingsJSON empty disposition: %v", err)
+	}
+	if strings.Contains(emptyRaw, `"disposition"`) {
+		t.Fatalf("empty disposition was not omitted: %s", emptyRaw)
+	}
+}
+
 func TestMarshalFindingsJSON_AlwaysIncludesRiskFields(t *testing.T) {
 	f := Findings{
 		Items:   []Finding{{Severity: "info", Description: "note"}},

@@ -874,6 +874,195 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 	}
 }
 
+func TestReviewStep_InfoFindingsBelowMinSeverityBecomeFollowUps(t *testing.T) {
+	tests := []struct {
+		name                  string
+		min                   string
+		wantApproval          bool
+		wantAutoFixableIDs    []string
+		wantFollowUpItemCount int
+	}{
+		{
+			name:                  "warning minimum",
+			min:                   types.FindingSeverityWarning,
+			wantApproval:          true,
+			wantAutoFixableIDs:    []string{"warning-fix"},
+			wantFollowUpItemCount: 2,
+		},
+		{
+			name:                  "error minimum",
+			min:                   types.FindingSeverityError,
+			wantApproval:          false,
+			wantFollowUpItemCount: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			output, err := json.Marshal(Findings{Items: []Finding{
+				{ID: "info-fix", Severity: types.FindingSeverityInfo, Action: types.ActionAutoFix, Description: "fix info"},
+				{ID: "info-master", Severity: types.FindingSeverityInfo, Action: types.ActionAskMaster, Description: "ask about info"},
+				{ID: "warning-fix", Severity: types.FindingSeverityWarning, Action: types.ActionAutoFix, Description: "fix warning"},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: output}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Config.Review.FixRoundMinSeverity = tt.min
+
+			outcome, err := newTestReviewStep().Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome.NeedsApproval != tt.wantApproval {
+				t.Errorf("NeedsApproval = %v, want %v", outcome.NeedsApproval, tt.wantApproval)
+			}
+			parsed, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatalf("parse outcome findings: %v", err)
+			}
+			followUps := 0
+			for _, item := range parsed.Items {
+				if item.IsFollowUp() {
+					followUps++
+					if item.Action != types.ActionNoOp {
+						t.Errorf("follow-up %s action = %q, want no-op", item.ID, item.Action)
+					}
+					wantSuffix := " (reviewer action: " + map[string]string{
+						"info-fix":    types.ActionAutoFix,
+						"info-master": types.ActionAskMaster,
+						"warning-fix": types.ActionAutoFix,
+					}[item.ID] + ")"
+					if !strings.HasSuffix(item.Description, wantSuffix) {
+						t.Errorf("follow-up %s description = %q, want suffix %q", item.ID, item.Description, wantSuffix)
+					}
+				}
+			}
+			if followUps != tt.wantFollowUpItemCount {
+				t.Errorf("follow-up count = %d, want %d", followUps, tt.wantFollowUpItemCount)
+			}
+
+			fixable := types.AutoFixableFindings(parsed)
+			if len(fixable.Items) != len(tt.wantAutoFixableIDs) {
+				t.Fatalf("auto-fixable findings = %+v, want IDs %v", fixable.Items, tt.wantAutoFixableIDs)
+			}
+			for i, wantID := range tt.wantAutoFixableIDs {
+				if fixable.Items[i].ID != wantID {
+					t.Errorf("auto-fixable item %d ID = %q, want %q", i, fixable.Items[i].ID, wantID)
+				}
+			}
+			if tt.min == types.FindingSeverityWarning {
+				warning := parsed.Items[2]
+				if warning.Action != types.ActionAutoFix || warning.Disposition != "" || warning.Description != "fix warning" {
+					t.Errorf("warning finding changed: %+v", warning)
+				}
+			}
+		})
+	}
+}
+
+func TestReviewStep_AllInfoReviewCompletesWithoutPause(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	output, err := json.Marshal(Findings{Items: []Finding{
+		{ID: "info-fix", Severity: types.FindingSeverityInfo, Action: types.ActionAutoFix, Description: "fix info"},
+		{ID: "info-master", Severity: types.FindingSeverityInfo, Action: types.ActionAskMaster, Description: "ask about info"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: output}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review.FixRoundMinSeverity = types.FindingSeverityWarning
+
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatal("NeedsApproval = true, want false")
+	}
+	parsed, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatalf("parse outcome findings: %v", err)
+	}
+	if types.HasManualFindings(parsed) {
+		t.Error("HasManualFindings = true, want false")
+	}
+	if types.HasActionableFindings(parsed) {
+		t.Error("HasActionableFindings = true, want false")
+	}
+	if outcome.ReviewApprovedHeadSHA != sctx.Run.HeadSHA {
+		t.Errorf("ReviewApprovedHeadSHA = %q, want run head %q", outcome.ReviewApprovedHeadSHA, sctx.Run.HeadSHA)
+	}
+}
+
+func TestReviewStep_AgentCannotMarkErrorAsFollowUp(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	output, err := json.Marshal(Findings{Items: []Finding{{
+		ID:          "error-fix",
+		Severity:    types.FindingSeverityError,
+		Action:      types.ActionAutoFix,
+		Description: "fix error",
+		Disposition: types.FindingDispositionFollowUp,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: output}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review.FixRoundMinSeverity = types.FindingSeverityWarning
+
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("NeedsApproval = false, want true")
+	}
+	parsed, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatalf("parse outcome findings: %v", err)
+	}
+	if len(parsed.Items) != 1 || parsed.Items[0].Disposition != "" || parsed.Items[0].Action != types.ActionAutoFix {
+		t.Fatalf("agent disposition survived gate parsing: %+v", parsed.Items)
+	}
+}
+
+func TestReviewStep_EmptyMinSeverityLeavesFindingsUntouched(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	output, err := json.Marshal(Findings{Items: []Finding{{
+		ID: "info-fix", Severity: types.FindingSeverityInfo, Action: types.ActionAutoFix, Description: "fix info",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: output}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review.FixRoundMinSeverity = ""
+
+	outcome, err := newTestReviewStep().Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatalf("parse outcome findings: %v", err)
+	}
+	if len(parsed.Items) != 1 || parsed.Items[0].Action != types.ActionAutoFix || parsed.Items[0].Disposition != "" {
+		t.Fatalf("finding changed with empty minimum: %+v", parsed.Items)
+	}
+}
+
 // reviewPromptFor runs one clean review turn against a fresh copy of the
 // template repo with the given path instructions and returns the review prompt
 // the agent received.

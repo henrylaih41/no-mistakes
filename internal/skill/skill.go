@@ -183,8 +183,8 @@ Run the pipeline and decide on its findings as they come up:
      [Resolve manual findings](#resolve-manual-findings).
 
    **Review auto-fix is disabled by default** (` + "`auto_fix.review: 0`" + `; a repo
-   or global ` + "`auto_fix.review > 0`" + ` override re-enables it), so blocking findings plus ` + "`ask-master`" + ` and ` + "`ask-user`" + ` review findings park for a decision
-   rather than being silently self-fixed. (Other steps such as test and lint may auto-fix within the
+   or global ` + "`auto_fix.review > 0`" + ` override re-enables it), so at or above ` + "`review.fix_round_min_severity`" + `, blocking findings plus ` + "`ask-master`" + ` and ` + "`ask-user`" + ` review findings park for a decision:
+   blocking ` + "`auto-fix`" + ` findings because the default limit is zero, and manual-action findings regardless of that limit. Actionable findings below ` + "`review.fix_round_min_severity`" + ` are follow-ups and do not park. (Other steps such as test and lint may auto-fix within the
    pipeline and re-run before they ever gate.)
    If review reaches ` + "`review.max_fix_rounds`" + `, it parks as ` + "`awaiting_triage`" + `:
    report the residual findings to master triage instead of sending another
@@ -328,9 +328,10 @@ drive every readable gate unattended, so under ` + "`--yes`" + ` you resolve
 If you have clear consent to drive the run automatically, pass ` + "`--yes`" + ` to ` + "`axi run`" + `
 or ` + "`axi respond`" + `. It treats every actionable finding - ` + "`auto-fix`" + `,
 ` + "`ask-master`" + `, and ` + "`ask-user`" + ` alike - as consent to fix it, selects every
-current finding for one fix round, accepts the resulting fix review, and approves
+current non-follow-up finding for one fix round, accepts the resulting fix review, and approves
 gates with only ` + "`no-op`" + ` findings. If the findings JSON is unreadable, AXI
 stops and surfaces that state; it never auto-approves it, including at fix review.
+An explicit ` + "`--findings`" + ` list remains authoritative and may deliberately name a follow-up.
 Only use ` + "`--yes`" + ` when the user has asked you to drive the whole run without
 checking back.
 
@@ -361,7 +362,7 @@ A ` + "`gate:`" + ` waiting on you looks roughly like this - a ` + "`gate:`" + `
 
 ` + "```" + `
 gate: review
-note: Review auto-fix is disabled by default (auto_fix.review: 0; a repo or global auto_fix.review > 0 override re-enables it), so blocking findings plus ask-master and ask-user review findings park for a decision rather than being silently self-fixed.
+note: Review auto-fix is disabled by default (auto_fix.review: 0; a repo or global auto_fix.review > 0 override re-enables it), so at or above review.fix_round_min_severity, blocking findings plus ask-master and ask-user review findings park for a decision: blocking auto-fix findings because the default limit is zero, and manual-action findings regardless of that limit. Actionable findings below review.fix_round_min_severity are follow-ups and do not park.
 findings[3]{id,severity,file,line,action,description}:
   r1,warning,internal/pipeline/executor.go,,auto-fix,Error from os.Remove is ignored
   r2,error,internal/pipeline/steps/review.go,,ask-master,Restoring the approved invariant requires choosing between two pipeline boundaries

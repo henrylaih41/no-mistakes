@@ -406,6 +406,16 @@ func TestGateResolution(t *testing.T) {
 			wantIDs:    []string{"review-1", "review-2"},
 		},
 		{
+			name: "synthetic selection excludes follow-ups",
+			gate: stepView{
+				Name:         "review",
+				Status:       string(types.StepStatusAwaitingApproval),
+				FindingsJSON: `{"findings":[{"id":"review-1","severity":"error","description":"blocking defect","action":"auto-fix"},{"id":"review-2","severity":"info","description":"first follow-up","action":"no-op","disposition":"follow-up"},{"id":"review-3","severity":"info","description":"second follow-up","action":"no-op","disposition":"follow-up"}],"summary":"3"}`,
+			},
+			wantAction: types.ActionFix,
+			wantIDs:    []string{"review-1"},
+		},
+		{
 			name: "only non-actionable findings are approved",
 			gate: stepView{
 				Name:         "test",
@@ -469,6 +479,71 @@ func TestGateResolution(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDriveRunAutoYesSelectsOnlyNonFollowUps(t *testing.T) {
+	root := makeSocketSafeTempDir(t)
+	socketPath := filepath.Join(root, "axi-drive-follow-ups.sock")
+	events := make(chan ipc.Event, 1)
+	responses := make(chan ipc.RespondParams, 1)
+	srv := ipc.NewServer()
+	srv.Handle(ipc.MethodRespond, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
+		var params ipc.RespondParams
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, err
+		}
+		responses <- params
+		events <- ipc.Event{Type: ipc.EventStepCompleted, RunID: "run-1"}
+		return &ipc.RespondResult{OK: true}, nil
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(socketPath) }()
+	t.Cleanup(func() {
+		srv.Close()
+		select {
+		case <-errCh:
+		case <-time.After(time.Second):
+			t.Error("IPC server did not stop")
+		}
+	})
+
+	var client *ipc.Client
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		client, err = ipc.Dial(socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if client == nil {
+		t.Fatal("IPC server did not become ready")
+	}
+	defer client.Close()
+
+	findings := `{"findings":[{"id":"review-1","severity":"error","description":"blocking defect","action":"auto-fix"},{"id":"review-2","severity":"info","description":"first follow-up","action":"no-op","disposition":"follow-up"},{"id":"review-3","severity":"info","description":"second follow-up","action":"no-op","disposition":"follow-up"}],"summary":"3"}`
+	source := &scriptedRunStateSource{
+		subscriptions: []scriptedSubscription{{events: events}},
+		runs: []*ipc.RunInfo{
+			{ID: "run-1", Status: types.RunRunning, Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: types.StepStatusAwaitingApproval, FindingsJSON: &findings}}},
+			{ID: "run-1", Status: types.RunCompleted},
+		},
+	}
+	reconciler := newRunReconciler(source, "run-1")
+	defer reconciler.Close()
+
+	run, _, err := driveRunWithReconciler(context.Background(), io.Discard, client, reconciler, "run-1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil || run.Status != types.RunCompleted {
+		t.Fatalf("run = %+v, want completed", run)
+	}
+	response := <-responses
+	if response.Action != types.ActionFix || len(response.FindingIDs) != 1 || response.FindingIDs[0] != "review-1" {
+		t.Fatalf("auto response = %+v, want only review-1 selected for fix", response)
 	}
 }
 

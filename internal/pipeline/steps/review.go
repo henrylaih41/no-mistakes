@@ -353,6 +353,18 @@ Risk assessment (after listing all findings):
 		findings = stripped
 	}
 
+	// Severity gate: actionable findings under review.fix_round_min_severity
+	// become follow-ups (action no-op) so they neither start a fix round nor
+	// park the run; the PR body still prints them. Runs once per review turn,
+	// so the initial review and every rereview are gated the same way.
+	if min := sctx.Config.Review.FixRoundMinSeverity; min != "" {
+		before := countFollowUps(findings.Items)
+		findings = types.DemoteBelowSeverity(findings, min)
+		if n := countFollowUps(findings.Items) - before; n > 0 {
+			sctx.Log(fmt.Sprintf("carried %d finding(s) below %s severity as follow-ups (review.fix_round_min_severity)", n, min))
+		}
+	}
+
 	needsApproval := hasBlockingFindings(findings.Items)
 	findingsJSON, _ := json.Marshal(findings)
 
@@ -364,6 +376,16 @@ Risk assessment (after listing all findings):
 	})
 }
 
+func countFollowUps(items []Finding) int {
+	count := 0
+	for _, item := range items {
+		if item.IsFollowUp() {
+			count++
+		}
+	}
+	return count
+}
+
 func parseReviewFindings(result *agent.Result, log func(string)) Findings {
 	var findings Findings
 	if result != nil && result.Output != nil {
@@ -372,6 +394,7 @@ func parseReviewFindings(result *agent.Result, log func(string)) Findings {
 			findings = Findings{Summary: result.Text}
 		}
 	}
+	findings = clearAgentFindingDispositions(findings)
 	// The evidence ID/source pair is gate authority. A reviewer may report the
 	// same words as an ordinary finding, but cannot mint a gate diagnostic.
 	for i := range findings.Items {

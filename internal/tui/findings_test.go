@@ -68,6 +68,18 @@ func TestParseFindings_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestResetFindingSelectionExcludesFollowUps(t *testing.T) {
+	m := NewModel("/tmp/sock", nil, testRun())
+	m.stepFindings[types.StepReview] = `{"findings":[{"id":"review-1","severity":"error","description":"blocking defect","action":"auto-fix"},{"id":"review-2","severity":"info","description":"follow-up note","action":"no-op","disposition":"follow-up"}],"summary":"2"}`
+
+	m.resetFindingSelection(types.StepReview)
+
+	selected := m.findingSelections[types.StepReview]
+	if len(selected) != 1 || !selected["review-1"] || selected["review-2"] {
+		t.Fatalf("default selection = %v, want only review-1", selected)
+	}
+}
+
 func TestSeverityIcon(t *testing.T) {
 	tests := []struct {
 		severity string

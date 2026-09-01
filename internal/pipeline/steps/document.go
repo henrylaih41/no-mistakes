@@ -166,6 +166,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		sctx.Log("could not parse structured output, requiring approval")
 		return documentApprovalOutcome(summary), nil
 	}
+	findings = clearAgentFindingDispositions(findings)
 
 	docFindings := findings
 	if combinedLint {

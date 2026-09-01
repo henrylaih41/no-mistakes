@@ -103,6 +103,7 @@ When a step pauses for approval, the findings panel shows structured results:
 
 - Severity icons: `E` (error, red), `W` (warning, yellow), `I` (info, blue)
 - Checkboxes: `[x]` (selected, green), `[ ]` (deselected, dim)
+- Follow-up findings remain visible but start unselected
 - Blue `>` marks the focused finding
 - User-added findings are marked with `[user]`
 - Per-finding notes render inline as `> ...` and are sent with the next fix request
@@ -177,7 +178,7 @@ When yolo mode is on, the footer changes from `y yolo` to `y end yolo`.
 | Key | Action |
 |---|---|
 | `space` | Toggle current finding |
-| `A` | Select all findings |
+| `A` | Select all non-follow-up findings |
 | `N` | Deselect all findings |
 | `e` | Edit fix note for the current finding |
 | `+` | Add a user-authored finding |
@@ -212,9 +213,10 @@ Review awaiting action:
 The `f fix (3/5)` label shows how many findings are selected out of the total.
 
 Press `e` to add or edit extra guidance for the current finding. Press `+` to add your own finding to the list. User-authored findings start selected by default and can be removed with `D`.
+Use `space` if you deliberately want to include an individual follow-up in a manual fix; `A` and yolo leave follow-ups unselected.
 
 Press `y` to toggle yolo mode when you want paused approval gates to resolve automatically.
-Yolo fixes gates with `auto-fix`, `ask-master`, and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
+Yolo fixes gates with `auto-fix`, `ask-master`, and `ask-user` findings by selecting every non-follow-up finding, then approves the resulting fix-review gate.
 It approves gates with no findings or only `action: no-op` findings as-is, fixes each step at most once, and retries one `awaiting_agent_retry` transient per step. A second consecutive transient remains parked for `t retry`, and yolo always stops at `awaiting_triage`.
 
 An `awaiting_triage` Review gate disables ordinary `f fix`. You can approve or skip after inspecting the evidence, or use the attributed [`axi respond --fix-override`](/no-mistakes/reference/cli/#no-mistakes-axi-respond) path after Master triage when the configured fix-round cap caused the park. A review-verdict-evidence diagnostic is not selectable source-fix work.

@@ -87,6 +87,7 @@ Previous lint findings to address:
 				findings = Findings{Summary: result.Text}
 			}
 		}
+		findings = clearAgentFindingDispositions(findings)
 		summary, err := extractCommitSummary(result)
 		if err != nil {
 			if errors.Is(err, errRejectedCommitSummary) {

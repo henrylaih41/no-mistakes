@@ -497,6 +497,92 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 	}
 }
 
+func TestExecutor_UserFixPreservesExplicitFindingSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		selectedID  string
+		wantItemID  string
+		wantSummary string
+	}{
+		{name: "follow-up selection", selectedID: "review-2", wantItemID: "review-2", wantSummary: "1 selected finding"},
+		{name: "unmatched selection", selectedID: "missing", wantSummary: "0 selected findings"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			workDir := t.TempDir()
+
+			var capturedFindings string
+			callCount := 0
+			step := &adaptiveCallStep{
+				name: types.StepReview,
+				fn: func(sctx *StepContext) (*StepOutcome, error) {
+					callCount++
+					if callCount == 1 {
+						return &StepOutcome{
+							NeedsApproval: true,
+							Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"blocking defect","action":"auto-fix"},{"id":"review-2","severity":"info","description":"follow-up note","action":"no-op","disposition":"follow-up"}],"summary":"2 findings"}`,
+						}, nil
+					}
+					capturedFindings = sctx.PreviousFindings
+					return &StepOutcome{}, nil
+				},
+			}
+
+			exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+			done := make(chan error, 1)
+			go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+			waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+			if err := exec.Respond(types.StepReview, types.ActionFix, []string{tc.selectedID}); err != nil {
+				t.Fatal(err)
+			}
+
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("execute: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("executor timed out")
+			}
+
+			payload, err := types.ParseFindingsJSON(capturedFindings)
+			if err != nil {
+				t.Fatalf("parse fix payload: %v", err)
+			}
+			if payload.Summary != tc.wantSummary {
+				t.Fatalf("summary = %q, want %q", payload.Summary, tc.wantSummary)
+			}
+			if tc.wantItemID == "" {
+				if len(payload.Items) != 0 {
+					t.Fatalf("fix payload = %+v, want no findings", payload.Items)
+				}
+			} else if len(payload.Items) != 1 || payload.Items[0].ID != tc.wantItemID {
+				t.Fatalf("fix payload = %+v, want only %q", payload.Items, tc.wantItemID)
+			}
+
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rounds, err := database.GetRoundsByStep(steps[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) == 0 || rounds[0].SelectedFindingIDs == nil {
+				t.Fatalf("selected finding IDs were not recorded: %+v", rounds)
+			}
+			var recorded []string
+			if err := json.Unmarshal([]byte(*rounds[0].SelectedFindingIDs), &recorded); err != nil {
+				t.Fatal(err)
+			}
+			if len(recorded) != 1 || recorded[0] != tc.selectedID {
+				t.Fatalf("recorded selection = %v, want [%s]", recorded, tc.selectedID)
+			}
+		})
+	}
+}
+
 func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

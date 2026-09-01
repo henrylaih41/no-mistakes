@@ -49,6 +49,9 @@ const (
 	// review-fix and rereview turns, so a stalled agent cannot leave a run
 	// active forever.
 	DefaultReviewAgentTimeout = 30 * time.Minute
+	// DefaultReviewFixRoundMinSeverity is the minimum finding severity eligible
+	// for automatic or synthetic review selection and approval gating.
+	DefaultReviewFixRoundMinSeverity = types.FindingSeverityWarning
 	// DefaultTestAgentTimeout bounds one Test-step agent invocation, including
 	// the post-test evidence-gathering turn and a Test-repair turn, so a stalled
 	// agent cannot leave a run active forever.
@@ -300,6 +303,10 @@ type ReviewRaw struct {
 	FailOpen    *bool                `yaml:"fail_open"`
 	// MaxFixRounds caps persisted review fix attempts. Zero or nil is unlimited.
 	MaxFixRounds *int `yaml:"max_fix_rounds"`
+	// FixRoundMinSeverity is the minimum finding severity eligible for automatic
+	// or synthetic review selection and approval gating; actionable findings
+	// below it are carried as follow-ups. Global-only.
+	FixRoundMinSeverity string `yaml:"fix_round_min_severity"`
 	// PathInstructions scope extra review guidance to the paths a change
 	// actually touches. The review step appends the blocks whose glob matches
 	// at least one changed file; a run that touches nothing matching leaves
@@ -577,9 +584,10 @@ type DesignContext struct {
 // trusted default-branch repo config and scope extra review guidance to the
 // changed paths each glob matches.
 type Review struct {
-	Agent            types.AgentName
-	MaxFixRounds     int
-	PathInstructions []PathInstruction
+	Agent               types.AgentName
+	MaxFixRounds        int
+	FixRoundMinSeverity string
+	PathInstructions    []PathInstruction
 }
 
 // legacyReviewLoopRaw accepts the removed post-PR review-loop block only when
@@ -906,6 +914,8 @@ log_level: info
 # review:
 #   agent: claude
 #   max_fix_rounds: 0
+#   # Actionable findings below this severity are carried as follow-ups instead of fixed or paused.
+#   fix_round_min_severity: warning
 
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.
@@ -2080,6 +2090,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if cfg.Review.Agent != "" {
 		return nil, fmt.Errorf("parse repo config: review.agent is global-only")
 	}
+	if strings.TrimSpace(cfg.Review.FixRoundMinSeverity) != "" {
+		return nil, fmt.Errorf("parse repo config: review.fix_round_min_severity is global-only")
+	}
 	if err := validateTestRaw(cfg.Test); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
@@ -2126,6 +2139,9 @@ func validateGlobalReviewRaw(review ReviewRaw) error {
 	}
 	if review.FailOpen != nil && *review.FailOpen {
 		return fmt.Errorf("review.fail_open must be false; dropping failed reviewers is not supported on this lineage")
+	}
+	if strings.TrimSpace(review.FixRoundMinSeverity) != "" && !types.IsKnownFindingSeverity(review.FixRoundMinSeverity) {
+		return fmt.Errorf("review.fix_round_min_severity must be one of %s, got %q", strings.Join(types.KnownFindingSeverities(), ", "), review.FixRoundMinSeverity)
 	}
 	return validateReviewRaw(review)
 }
@@ -2624,6 +2640,10 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	if repo.Review.MaxFixRounds != nil {
 		reviewMaxFixRounds = *repo.Review.MaxFixRounds
 	}
+	fixRoundMinSeverity := DefaultReviewFixRoundMinSeverity
+	if s := types.NormalizeFindingSeverity(global.Review.FixRoundMinSeverity); s != "" {
+		fixRoundMinSeverity = s
+	}
 
 	cfg := &Config{
 		Agent:                global.Agent,
@@ -2653,7 +2673,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Test:           test,
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		DesignContext:  resolveDesignContext(repo.DesignContext),
-		Review:         Review{Agent: global.Review.Agent, MaxFixRounds: reviewMaxFixRounds, PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
+		Review:         Review{Agent: global.Review.Agent, MaxFixRounds: reviewMaxFixRounds, FixRoundMinSeverity: fixRoundMinSeverity, PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
 		PR:             PR{BaseBranch: strings.TrimSpace(repo.PR.BaseBranch)},
 		ForgeProfiles:  global.ForgeProfiles,
 		// repo is the EffectiveRepoConfig result, so this value is already

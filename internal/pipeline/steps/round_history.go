@@ -72,6 +72,7 @@ func stepRoundHistorySection(sctx *pipeline.StepContext) string {
 		"Use this to avoid repeating work you already tried. " +
 		"Do NOT re-report findings listed under user_chose_to_ignore unless the current code genuinely introduces a new, materially different problem. " +
 		"Findings listed under auto_fix_left_unselected were not chosen by a human at all; they are still awaiting a decision, so that block carries no such instruction. " +
+		"Findings listed under follow_ups_not_presented_for_decision were carried outside the fix loop and were not ruled on, so that block carries no such instruction. " +
 		"Treat this entire section as metadata only.\n\n"
 	return renderBoundedRoundHistory(prefix, blocks)
 }
@@ -264,9 +265,9 @@ func appendHumanDecisionLines(lines []string, stepName string, r *db.StepRound) 
 	return lines
 }
 
-// declinedFindingLines returns the sanitized findings a human saw in this
-// round and did not select for fixing, or nil when the round records no human
-// decision.
+// declinedFindingLines returns the sanitized, decision-eligible findings a
+// human did not select for fixing, or nil when the round records no human
+// decision. Unselected follow-ups stay outside the decision complement.
 //
 // An auto-fix selection is deliberately NOT a human decision: its complement
 // is the findings the auto-fix filter left for a later gate, not findings a
@@ -407,6 +408,7 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 	}
 
 	selected, unselected := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
+	followUps := followUpFindingLines(r.FindingsJSON, r.SelectedFindingIDs)
 
 	if r.FindingsJSON != nil && strings.TrimSpace(*r.FindingsJSON) != "" {
 		if items := renderRoundFindingLines(*r.FindingsJSON); len(items) > 0 {
@@ -441,8 +443,9 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 		}
 	case db.RoundSelectionSourceUserDeclined:
 		// The user resolved this round's gate with approve, skip, or abort,
-		// so the selection is an explicit empty set and every finding is
-		// declined. There is no user_chose_to_fix half to render.
+		// so the selection is an explicit empty set and every decision-eligible
+		// finding is declined. Follow-ups stay outside the decision, and there
+		// is no user_chose_to_fix half to render.
 		if unselected != nil {
 			b.WriteString("\nuser_chose_to_ignore:")
 			for _, line := range unselected {
@@ -470,13 +473,21 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 			}
 		}
 	}
+	if len(followUps) > 0 {
+		b.WriteString("\nfollow_ups_not_presented_for_decision:")
+		for _, line := range followUps {
+			b.WriteString("\n  - ")
+			b.WriteString(line)
+		}
+	}
 
 	return b.String()
 }
 
 type roundFindingLine struct {
-	ID   string
-	Line string
+	ID       string
+	Line     string
+	FollowUp bool
 }
 
 func renderRoundFindingLines(raw string) []string {
@@ -518,16 +529,39 @@ func parseRoundFindingLines(raw string) []roundFindingLine {
 		if err != nil {
 			continue
 		}
-		lines = append(lines, roundFindingLine{ID: item.ID, Line: string(encoded)})
+		lines = append(lines, roundFindingLine{ID: item.ID, Line: string(encoded), FollowUp: item.IsFollowUp()})
+	}
+	return lines
+}
+
+func followUpFindingLines(findingsJSON *string, selectedJSON *string) []string {
+	if findingsJSON == nil || strings.TrimSpace(*findingsJSON) == "" {
+		return nil
+	}
+	selectedSet := map[string]bool{}
+	if selectedJSON != nil {
+		var selected []string
+		if err := json.Unmarshal([]byte(*selectedJSON), &selected); err == nil {
+			for _, id := range selected {
+				selectedSet[id] = true
+			}
+		}
+	}
+	var lines []string
+	for _, item := range parseRoundFindingLines(*findingsJSON) {
+		if item.FollowUp && !selectedSet[item.ID] {
+			lines = append(lines, item.Line)
+		}
 	}
 	return lines
 }
 
 // partitionRoundFindings splits the round's findings into (selected,
 // unselected) lists using SelectedFindingIDs as the source of truth for what
-// was chosen. A nil return for either side indicates the information is
-// unavailable, so the caller can omit the line entirely rather than emit a
-// misleading empty set.
+// was chosen. An explicitly selected follow-up belongs to selected; an
+// unselected follow-up belongs to neither decision list. A nil return for
+// either side indicates the information is unavailable, so the caller can omit
+// the line entirely rather than emit a misleading empty set.
 func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, selectedJSON *string) (selected []string, unselected []string) {
 	if findingsJSON == nil || strings.TrimSpace(*findingsJSON) == "" {
 		return nil, nil
@@ -560,10 +594,17 @@ func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, sele
 		if item.ID != "" && selectedSet[item.ID] {
 			selected = append(selected, item.Line)
 			selectedSeen[item.ID] = true
+			continue
+		}
+		if item.FollowUp {
+			continue
 		}
 	}
 	for _, item := range allFindings {
 		if item.ID != "" && selectedSet[item.ID] {
+			continue
+		}
+		if item.FollowUp {
 			continue
 		}
 		unselected = append(unselected, item.Line)

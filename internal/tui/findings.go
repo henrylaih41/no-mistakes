@@ -104,7 +104,7 @@ func (m *Model) resetFindingSelection(step types.StepName) {
 	}
 	selected := make(map[string]bool)
 	for _, item := range m.findingItems(step) {
-		if item.ID != "" {
+		if item.ID != "" && !item.IsFollowUp() {
 			selected[item.ID] = true
 		}
 	}
