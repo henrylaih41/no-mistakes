@@ -408,7 +408,7 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 	}
 
 	selected, unselected := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
-	followUps := followUpFindingLines(r.FindingsJSON)
+	followUps := followUpFindingLines(r.FindingsJSON, r.SelectedFindingIDs)
 
 	if r.FindingsJSON != nil && strings.TrimSpace(*r.FindingsJSON) != "" {
 		if items := renderRoundFindingLines(*r.FindingsJSON); len(items) > 0 {
@@ -533,13 +533,22 @@ func parseRoundFindingLines(raw string) []roundFindingLine {
 	return lines
 }
 
-func followUpFindingLines(findingsJSON *string) []string {
+func followUpFindingLines(findingsJSON *string, selectedJSON *string) []string {
 	if findingsJSON == nil || strings.TrimSpace(*findingsJSON) == "" {
 		return nil
 	}
+	selectedSet := map[string]bool{}
+	if selectedJSON != nil {
+		var selected []string
+		if err := json.Unmarshal([]byte(*selectedJSON), &selected); err == nil {
+			for _, id := range selected {
+				selectedSet[id] = true
+			}
+		}
+	}
 	var lines []string
 	for _, item := range parseRoundFindingLines(*findingsJSON) {
-		if item.FollowUp {
+		if item.FollowUp && !selectedSet[item.ID] {
 			lines = append(lines, item.Line)
 		}
 	}
@@ -580,25 +589,20 @@ func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, sele
 	unselected = make([]string, 0, len(allFindings))
 	selectedSeen := make(map[string]bool, len(selectedSet))
 	for _, item := range selectedFindings {
-		if item.FollowUp {
-			if item.ID != "" && selectedSet[item.ID] {
-				selectedSeen[item.ID] = true
-			}
-			continue
-		}
 		if item.ID != "" && selectedSet[item.ID] {
 			selected = append(selected, item.Line)
 			selectedSeen[item.ID] = true
+			continue
+		}
+		if item.FollowUp {
+			continue
 		}
 	}
 	for _, item := range allFindings {
-		if item.FollowUp {
-			if item.ID != "" && selectedSet[item.ID] {
-				selectedSeen[item.ID] = true
-			}
+		if item.ID != "" && selectedSet[item.ID] {
 			continue
 		}
-		if item.ID != "" && selectedSet[item.ID] {
+		if item.FollowUp {
 			continue
 		}
 		unselected = append(unselected, item.Line)
