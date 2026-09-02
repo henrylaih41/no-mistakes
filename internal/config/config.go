@@ -156,7 +156,8 @@ type GlobalConfig struct {
 	Test   TestRaw
 	Review ReviewRaw
 	// DesignContext is machine-owned input applied to every run. Paths are
-	// expanded and validated when the global config is loaded.
+	// expanded and syntax-validated when the global config is loaded; the
+	// referenced files are validated and materialized at run start.
 	DesignContext DesignContextRaw `yaml:"design_context"`
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
@@ -278,9 +279,9 @@ type DocumentRaw struct {
 	Instructions string `yaml:"instructions"`
 }
 
-// DesignContextRaw is the YAML representation of per-run design-context file
-// selectors. Repo selectors are prompt context, not process selection; the
-// daemon validates and jails them to the worktree before reading.
+// DesignContextRaw is the YAML representation of design-context file entries.
+// Global entries are machine-owned paths; repo entries are prompt-context
+// selectors that the daemon validates and jails to the worktree before reading.
 type DesignContextRaw struct {
 	Files []string `yaml:"files"`
 }

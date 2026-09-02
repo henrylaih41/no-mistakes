@@ -268,6 +268,9 @@ func assertPushReceivedMaterializesDesignContext(t *testing.T, global bool) {
 	if err != nil {
 		t.Fatalf("ParseDesignContextJSON: %v", err)
 	}
+	if global {
+		t.Logf("persisted runs.design_context_json after editing the live daemon config: %s", *run.DesignContextJSON)
+	}
 	if len(designCtx.Files) != 1 {
 		t.Fatalf("design context files = %d, want 1", len(designCtx.Files))
 	}
