@@ -36,7 +36,7 @@ This context is advisory and fails open. It tells agents not to implement or re-
 
 ## Design context
 
-A new run can materialize design notes, ADRs, or issue agreements from repeatable [`axi run --design-context`](/no-mistakes/reference/cli/#no-mistakes-axi-run) files and the pushed branch's [`design_context.files`](/no-mistakes/reference/repo-config/#design_contextfiles) selectors. The run stores one immutable copy at startup, so later file edits cannot change the contract midway through a fix loop.
+A new run can materialize design notes, ADRs, or issue agreements from repeatable [`axi run --design-context`](/no-mistakes/reference/cli/#no-mistakes-axi-run) files, machine-global [`design_context.files`](/no-mistakes/reference/global-config/#design_contextfiles), and the pushed branch's [`design_context.files`](/no-mistakes/reference/repo-config/#design_contextfiles) selectors. The run stores one immutable copy at startup, so later file edits cannot change the contract midway through a fix loop.
 
 The context is appended to Rebase conflict repair, Review and Review-fix, Test evidence and repair, Document, Lint assessment and repair, and CI repair prompts. Agents are told to check the implementation against it and flag deviations instead of reopening settled decisions. File bodies remain untrusted data: they cannot override the step prompt or no-mistakes rules, and any challenge to the contract must cite the source file and passage.
 

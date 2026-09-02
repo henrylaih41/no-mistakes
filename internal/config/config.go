@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/designcontext"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -154,6 +155,9 @@ type GlobalConfig struct {
 	Intent IntentRaw
 	Test   TestRaw
 	Review ReviewRaw
+	// DesignContext is machine-owned input applied to every run. Paths are
+	// expanded and validated when the global config is loaded.
+	DesignContext DesignContextRaw `yaml:"design_context"`
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -187,6 +191,7 @@ type globalConfigRaw struct {
 	Intent                  IntentRaw                  `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
 	Review                  ReviewRaw                  `yaml:"review"`
+	DesignContext           DesignContextRaw           `yaml:"design_context"`
 	ReviewLoop              legacyReviewLoopRaw        `yaml:"review_loop"`
 	Eval                    EvalRaw                    `yaml:"eval"`
 	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
@@ -577,7 +582,8 @@ type Document struct {
 
 // DesignContext is the resolved design-context config.
 type DesignContext struct {
-	Files []string
+	GlobalFiles []string
+	Files       []string
 }
 
 // Review is the resolved review-step config. PathInstructions come from the
@@ -906,6 +912,12 @@ log_level: info
 # root, and it must be outside NM_HOME and outside every checkout.
 # worktree_roots:
 #   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
+
+# Machine-owned design-context files materialized into every new run. Entries
+# must be absolute or start with ~/; globs are not supported.
+# design_context:
+#   files:
+#     - ~/.agents/QUALITY.md
 
 # Optional dedicated agent for the initial review and every rereview. Review
 # fixes and all other pipeline steps continue to use the main agent above.
@@ -1847,6 +1859,11 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateEvalRaw(raw.Eval); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	globalDesignContextFiles, err := designcontext.ResolveGlobalPaths(raw.DesignContext.Files)
+	if err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	raw.DesignContext.Files = globalDesignContextFiles
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -1959,6 +1976,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	cfg.DesignContext = raw.DesignContext
 	if raw.Review.Agent == "" && len(raw.Review.Reviewers) == 1 {
 		raw.Review.Agent = raw.Review.Reviewers[0].Agent
 	}
@@ -2644,6 +2662,8 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	if s := types.NormalizeFindingSeverity(global.Review.FixRoundMinSeverity); s != "" {
 		fixRoundMinSeverity = s
 	}
+	designContext := resolveDesignContext(repo.DesignContext)
+	designContext.GlobalFiles = append([]string(nil), global.DesignContext.Files...)
 
 	cfg := &Config{
 		Agent:                global.Agent,
@@ -2672,7 +2692,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:         intent,
 		Test:           test,
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
-		DesignContext:  resolveDesignContext(repo.DesignContext),
+		DesignContext:  designContext,
 		Review:         Review{Agent: global.Review.Agent, MaxFixRounds: reviewMaxFixRounds, FixRoundMinSeverity: fixRoundMinSeverity, PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
 		PR:             PR{BaseBranch: strings.TrimSpace(repo.PR.BaseBranch)},
 		ForgeProfiles:  global.ForgeProfiles,
