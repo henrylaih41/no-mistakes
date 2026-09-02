@@ -7,6 +7,9 @@
 # (commands.test) and docs/src/content/docs/reference/pipeline-steps.md (Test).
 # Lint and format stay explicit so those gates stay deterministic.
 
+# ci.yml runs only for PRs against main; fork gates target integration and see zero checks.
+no_ci: true
+
 commands:
   lint: "make lint"
   format: "gofmt -w ."
