@@ -345,7 +345,7 @@ Repository design notes, ADRs, or issue agreements to treat as a design contract
 
 Each entry is a repository-relative, forward-slash glob. It must be non-empty, match at least one regular UTF-8 file, and remain inside the run worktree after symlinks are resolved. Absolute or home-relative paths, Windows volume syntax, backslashes, colons, and `..` path components are rejected. Matches are sorted, and files that resolve to the same canonical path are included once.
 
-At run start, no-mistakes copies the selected text into the run record once. Later edits to the source files do not change that run; a rerun or another fresh run materializes its own copy. Explicit [`axi run --design-context`](/no-mistakes/reference/cli/#no-mistakes-axi-run) files are considered first, followed by these repo-config matches.
+At run start, no-mistakes copies the selected text into the run record once. Later edits to the source files do not change that run; a rerun or another fresh run materializes its own copy. Explicit [`axi run --design-context`](/no-mistakes/reference/cli/#no-mistakes-axi-run) files are considered first, followed by machine-global [`design_context.files`](/no-mistakes/reference/global-config/#design_contextfiles), then these repo-config matches.
 
 The materialized context is bounded to 64 files, 64 KiB of source text per file, and 256 KiB total. An oversized included file is truncated with a marker; files after either aggregate limit are omitted. Prompt assembly treats every file body as untrusted data, strips adversarial control text, redacts recognizable secrets, and neutralizes design-context fence markers while preserving the materialized run copy.
 

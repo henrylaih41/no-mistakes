@@ -1087,7 +1087,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		slog.Info("repo commands/agent loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
-	designCtx, err := designcontext.Materialize(wtDir, designContextPaths, cfg.DesignContext.Files)
+	designCtx, err := designcontext.Materialize(wtDir, designContextPaths, cfg.DesignContext.GlobalFiles, cfg.DesignContext.Files)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load design context: %s", err))
 		trackStartFailure("materialize_design_context")

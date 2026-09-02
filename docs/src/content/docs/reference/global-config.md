@@ -57,6 +57,10 @@ session_reuse: true
 worktree_roots:
   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
 
+design_context:
+  files:
+    - ~/.agents/QUALITY.md
+
 forge_profiles:
   github-personal:
     gh_config_dir: ~/.config/gh-personal
@@ -523,6 +527,22 @@ Each run records the directory it was created in, so editing, adding, or removin
 The key is matched against the checkout path recorded at `init`. After moving a checkout, re-run `no-mistakes init` from the new path and update the key; a key that matches no registered repository is reported in the daemon log at startup and otherwise does nothing.
 
 `no-mistakes init --worktree-root <dir>` prints the exact entry to add for the checkout you are initializing. The global config is hand-maintained, so init never rewrites it for you.
+
+### design_context.files
+
+Machine-owned design-context text files to apply to every new run on this machine.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string[]`             |
+| Default | Empty                  |
+| Trust   | Machine-operator input |
+
+Each entry must be an absolute path or start with `~/`; globs and relative paths are not supported. `~/` is expanded when the global config is loaded, symlinks are resolved when a run materializes the file, and the result must be a regular UTF-8 text file. These paths are trusted local input like explicit [`axi run --design-context`](/no-mistakes/reference/cli/#no-mistakes-axi-run) files and may point outside a repository.
+
+The daemon reloads the global config at each run start, then copies each configured file into that run once. A config entry that is empty or is not absolute after home expansion fails global config loading. A missing, unreadable, non-regular, or non-UTF-8 file fails the new run at startup with the configured path in the error; it is never silently omitted. Editing the config affects the next run without a daemon restart, while an already-started run keeps its immutable copy.
+
+Materialization order is explicit `--design-context` files, then these machine-global files, then pushed-branch [repository selectors](/no-mistakes/reference/repo-config/#design_contextfiles). Files that resolve to the same canonical path are included once at their first position, so repo selectors cannot displace a machine-global file under the shared 64-file, 64 KiB-per-file, and 256 KiB-total caps. The repository field owns the complete [cap and prompt-safety contract](/no-mistakes/reference/repo-config/#design_contextfiles).
 
 ### review.agent
 

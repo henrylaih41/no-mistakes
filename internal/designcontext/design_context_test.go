@@ -17,7 +17,7 @@ func TestMaterializeReadsCLIAndRepoFilesDeterministically(t *testing.T) {
 	cli := filepath.Join(t.TempDir(), "design.md")
 	writeFile(t, cli, "cli context")
 
-	ctx, err := Materialize(root, []string{cli}, []string{"docs/*.md"})
+	ctx, err := Materialize(root, []string{cli}, nil, []string{"docs/*.md"})
 	if err != nil {
 		t.Fatalf("Materialize() error = %v", err)
 	}
@@ -32,6 +32,78 @@ func TestMaterializeReadsCLIAndRepoFilesDeterministically(t *testing.T) {
 	}
 }
 
+func TestMaterializeOrdersCLIGlobalAndRepoFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cli := filepath.Join(t.TempDir(), "cli.md")
+	global := filepath.Join(t.TempDir(), "global.md")
+	writeFile(t, cli, "cli context")
+	writeFile(t, global, "global context")
+	writeFile(t, filepath.Join(root, "docs", "repo.md"), "repo context")
+
+	ctx, err := Materialize(root, []string{cli}, []string{global}, []string{"docs/repo.md"})
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+	wantSources := []string{cli, global, "docs/repo.md"}
+	if len(ctx.Files) != len(wantSources) {
+		t.Fatalf("files = %d, want %d", len(ctx.Files), len(wantSources))
+	}
+	for i, want := range wantSources {
+		if ctx.Files[i].Source != want {
+			t.Fatalf("source[%d] = %q, want %q", i, ctx.Files[i].Source, want)
+		}
+	}
+}
+
+func TestMaterializeDeduplicatesCLIAndGlobalAtCLIPosition(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	contextPath := filepath.Join(t.TempDir(), "contract.md")
+	writeFile(t, contextPath, "one contract")
+
+	ctx, err := Materialize(root, []string{contextPath}, []string{contextPath}, nil)
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+	if len(ctx.Files) != 1 || ctx.Files[0].Source != contextPath {
+		t.Fatalf("files = %+v, want one copy at CLI position", ctx.Files)
+	}
+}
+
+func TestMaterializeFailsLoudlyForMissingGlobalFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing.md")
+
+	_, err := Materialize(root, nil, []string{missing}, nil)
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("Materialize() error = %v, want path %q", err, missing)
+	}
+}
+
+func TestMaterializeGlobalSymlinkUsesCanonicalTargetAndConfiguredSource(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target.md")
+	symlink := filepath.Join(t.TempDir(), "configured.md")
+	writeFile(t, target, "canonical content")
+	if err := os.Symlink(target, symlink); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, err := Materialize(root, nil, []string{symlink, target}, nil)
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+	if len(ctx.Files) != 1 {
+		t.Fatalf("files = %d, want symlink and target deduplicated", len(ctx.Files))
+	}
+	if ctx.Files[0].Source != symlink || ctx.Files[0].Content != "canonical content" {
+		t.Fatalf("global file = %+v, want configured source and target content", ctx.Files[0])
+	}
+}
+
 func TestMaterializeRepoPathMustStayInsideWorktree(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -41,7 +113,7 @@ func TestMaterializeRepoPathMustStayInsideWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := Materialize(root, nil, []string{"secret.md"})
+	_, err := Materialize(root, nil, nil, []string{"secret.md"})
 	if err == nil {
 		t.Fatal("expected repo design context symlink outside worktree to fail")
 	}
@@ -54,7 +126,7 @@ func TestMaterializeRejectsAbsoluteRepoSelectorsOnAnyHost(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	for _, selector := range []string{"/tmp/design.md", `C:\tmp\design.md`, `docs\design.md`, "../design.md"} {
-		if _, err := Materialize(root, nil, []string{selector}); err == nil {
+		if _, err := Materialize(root, nil, nil, []string{selector}); err == nil {
 			t.Fatalf("Materialize(%q) error = nil, want rejection", selector)
 		}
 	}
@@ -63,7 +135,7 @@ func TestMaterializeRejectsAbsoluteRepoSelectorsOnAnyHost(t *testing.T) {
 func TestMaterializeFailsLoudlyForMissingAndInvalidContext(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	if _, err := Materialize(root, nil, []string{"docs/*.md"}); err == nil {
+	if _, err := Materialize(root, nil, nil, []string{"docs/*.md"}); err == nil {
 		t.Fatal("expected unmatched repo glob to fail")
 	}
 
@@ -71,7 +143,7 @@ func TestMaterializeFailsLoudlyForMissingAndInvalidContext(t *testing.T) {
 	if err := os.WriteFile(invalid, []byte{0xff, 0xfe}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Materialize(root, nil, []string{"invalid.md"}); err == nil {
+	if _, err := Materialize(root, nil, nil, []string{"invalid.md"}); err == nil {
 		t.Fatal("expected invalid UTF-8 to fail")
 	}
 }
@@ -81,7 +153,7 @@ func TestMaterializeTruncatesWithVisibleMarker(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "big.md"), strings.Repeat("x", MaxFileBytes+10))
 
-	ctx, err := Materialize(root, nil, []string{"big.md"})
+	ctx, err := Materialize(root, nil, nil, []string{"big.md"})
 	if err != nil {
 		t.Fatalf("Materialize() error = %v", err)
 	}
@@ -102,7 +174,7 @@ func TestMaterializeTotalCapUsesIncludedBytesNotOriginalSize(t *testing.T) {
 	writeFile(t, filepath.Join(root, "big.md"), strings.Repeat("x", MaxFileBytes+10))
 	writeFile(t, filepath.Join(root, "small.md"), "still included")
 
-	ctx, err := Materialize(root, nil, []string{"big.md", "small.md"})
+	ctx, err := Materialize(root, nil, nil, []string{"big.md", "small.md"})
 	if err != nil {
 		t.Fatalf("Materialize() error = %v", err)
 	}
@@ -120,7 +192,7 @@ func TestMaterializeBoundsReadForOversizeFile(t *testing.T) {
 	big := MaxFileBytes * 4
 	writeFile(t, filepath.Join(root, "big.md"), strings.Repeat("x", big))
 
-	ctx, err := Materialize(root, nil, []string{"big.md"})
+	ctx, err := Materialize(root, nil, nil, []string{"big.md"})
 	if err != nil {
 		t.Fatalf("Materialize() error = %v", err)
 	}
@@ -152,7 +224,7 @@ func TestMaterializeStopsAtByteCapWithoutPlaceholderBloat(t *testing.T) {
 		writeFile(t, filepath.Join(root, name), "later")
 	}
 
-	ctx, err := Materialize(root, nil, []string{"*.md"})
+	ctx, err := Materialize(root, nil, nil, []string{"*.md"})
 	if err != nil {
 		t.Fatalf("Materialize() error = %v", err)
 	}
@@ -175,7 +247,7 @@ func TestMaterializeBoundsEntryCountForEmptyFiles(t *testing.T) {
 		writeFile(t, filepath.Join(root, "junk", fmt.Sprintf("f%04d.md", i)), "")
 	}
 
-	ctx, err := Materialize(root, nil, []string{"junk/*.md"})
+	ctx, err := Materialize(root, nil, nil, []string{"junk/*.md"})
 	if err != nil {
 		t.Fatalf("Materialize() error = %v", err)
 	}
@@ -192,7 +264,7 @@ func TestMaterializeTruncatesOversizeUTF8FileCutMidRune(t *testing.T) {
 	// rejected as invalid.
 	writeFile(t, filepath.Join(root, "big.md"), strings.Repeat("好", MaxFileBytes))
 
-	ctx, err := Materialize(root, nil, []string{"big.md"})
+	ctx, err := Materialize(root, nil, nil, []string{"big.md"})
 	if err != nil {
 		t.Fatalf("Materialize() error = %v", err)
 	}

@@ -48,6 +48,28 @@ func ResolveCLIPaths(cwd string, paths []string) ([]string, error) {
 	return out, nil
 }
 
+// ResolveGlobalPaths expands machine-global design-context paths and requires
+// an absolute result. The daemon has no meaningful working directory against
+// which to resolve relative operator configuration.
+func ResolveGlobalPaths(paths []string) ([]string, error) {
+	out := make([]string, 0, len(paths))
+	for _, raw := range paths {
+		path := strings.TrimSpace(raw)
+		if path == "" {
+			return nil, fmt.Errorf("empty design_context.files entry")
+		}
+		expanded, err := expandHome(path)
+		if err != nil {
+			return nil, err
+		}
+		if !filepath.IsAbs(expanded) {
+			return nil, fmt.Errorf("design_context.files %q must be an absolute or ~/ path", path)
+		}
+		out = append(out, filepath.Clean(expanded))
+	}
+	return out, nil
+}
+
 // FormatPushOption encodes explicit CLI context file paths for the gate
 // post-receive hook. It carries paths, not file contents; the daemon
 // materializes the files once at run start.
@@ -81,11 +103,18 @@ func ParsePushOptions(options []string) ([]string, error) {
 	return paths, nil
 }
 
-// Materialize reads explicit CLI paths and repo-config selectors once,
-// returning the immutable design context for a run.
-func Materialize(workDir string, cliPaths, repoSelectors []string) (types.DesignContext, error) {
+// Materialize reads explicit CLI paths, machine-global paths, and repo-config
+// selectors once, returning the immutable design context for a run.
+func Materialize(workDir string, cliPaths, globalPaths, repoSelectors []string) (types.DesignContext, error) {
 	var refs []fileRef
 	for _, path := range cliPaths {
+		ref, err := explicitFileRef(path)
+		if err != nil {
+			return types.DesignContext{}, err
+		}
+		refs = append(refs, ref)
+	}
+	for _, path := range globalPaths {
 		ref, err := explicitFileRef(path)
 		if err != nil {
 			return types.DesignContext{}, err

@@ -209,17 +209,39 @@ func TestPushReceivedSkipReviewStillRequiresConfiguredReviewer(t *testing.T) {
 }
 
 func TestPushReceivedMaterializesDesignContext(t *testing.T) {
+	assertPushReceivedMaterializesDesignContext(t, false)
+}
+
+func TestPushReceivedMaterializesGlobalDesignContext(t *testing.T) {
+	assertPushReceivedMaterializesDesignContext(t, true)
+}
+
+func assertPushReceivedMaterializesDesignContext(t *testing.T, global bool) {
+	t.Helper()
 	step := &mockPassStep{name: types.StepReview}
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
 		return []pipeline.Step{step}
 	})
 
-	_, headSHA := setupTestGitRepo(t, p, d, "design-context-repo")
 	contextPath := filepath.Join(t.TempDir(), "contract.md")
 	if err := os.WriteFile(contextPath, []byte("ship the agreed contract"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	var designContextPaths []string
+	if global {
+		globalConfig, err := os.ReadFile(p.ConfigFile())
+		if err != nil {
+			t.Fatal(err)
+		}
+		globalConfig = append(globalConfig, []byte(fmt.Sprintf("\ndesign_context:\n  files:\n    - %q\n", contextPath))...)
+		if err := os.WriteFile(p.ConfigFile(), globalConfig, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		designContextPaths = []string{contextPath}
+	}
 
+	_, headSHA := setupTestGitRepo(t, p, d, "design-context-repo")
 	client, err := ipc.Dial(p.Socket())
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +254,7 @@ func TestPushReceivedMaterializesDesignContext(t *testing.T) {
 		Ref:                "refs/heads/main",
 		Old:                "0000000000000000000000000000000000000000",
 		New:                headSHA,
-		DesignContextPaths: []string{contextPath},
+		DesignContextPaths: designContextPaths,
 	}, &result)
 	if err != nil {
 		t.Fatal(err)
@@ -245,6 +267,9 @@ func TestPushReceivedMaterializesDesignContext(t *testing.T) {
 	designCtx, err := types.ParseDesignContextJSON(*run.DesignContextJSON)
 	if err != nil {
 		t.Fatalf("ParseDesignContextJSON: %v", err)
+	}
+	if global {
+		t.Logf("persisted runs.design_context_json after editing the live daemon config: %s", *run.DesignContextJSON)
 	}
 	if len(designCtx.Files) != 1 {
 		t.Fatalf("design context files = %d, want 1", len(designCtx.Files))
