@@ -144,6 +144,7 @@ func planDiversified(gold []Case, cap int, existing []diversifiedPin) []diversif
 		if !ok || !c.Labels.HasGold() {
 			continue
 		}
+		pin.Stratum = normalizePinStratum(pin.Stratum)
 		if pin.Stratum == "" {
 			pin.Stratum = diversifiedStratum(c)
 		}
@@ -238,6 +239,18 @@ func planDiversified(gold []Case, cap int, existing []diversifiedPin) []diversif
 		}
 	}
 	return kept
+}
+
+// normalizePinStratum reads a retained stratum key's finding-type action the
+// way findingType now spells it, so a pin recorded under the retired
+// ask-master action still occupies the ask-user stratum its case falls in.
+func normalizePinStratum(stratum string) string {
+	i := strings.LastIndex(stratum, "\x00") + 1
+	sev, action, ok := strings.Cut(stratum[i:], "/")
+	if !ok {
+		return stratum
+	}
+	return stratum[:i] + sev + "/" + types.NormalizeFindingAction(action)
 }
 
 func onePinPerStratum(pins []diversifiedPin) []diversifiedPin {
