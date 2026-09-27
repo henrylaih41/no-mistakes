@@ -71,7 +71,7 @@ These blocks steer a gate agent, so they are read from your default branch rathe
 
 ## Explicit commands versus agent detection
 
-Explicit `commands.test` and `commands.lint` give you deterministic local baseline behavior. Test always follows its optional command with agent-driven end-user scenarios; empty `commands.lint` folds lint into the document step's combined housekeeping pass.
+Explicit `commands.test` and `commands.lint` give you deterministic local baseline behavior. Whether Test follows its command with agent-driven end-user scenarios is set by [`test.live_validation`](/no-mistakes/reference/repo-config/#testlive_validation); empty `commands.lint` folds lint into the document step's combined housekeeping pass.
 When a clean run worktree needs ignored dependencies, configure `commands.prepare` once instead of repeating installation. Its [repository reference](/no-mistakes/reference/repo-config/#commandsprepare) owns sharing across configured commands and the trusted agent-only Test opt-in.
 An empty `commands.format` runs no separate formatter, so configure it explicitly when the push step must format agent changes.
 Test evidence is collected locally; GitHub.com/GHEC PRs also upload supported screenshots and recordings unless that is turned off. The [Test step reference](/no-mistakes/reference/pipeline-steps/#test) owns the live-validation behavior, and the [Global Config Reference](/no-mistakes/reference/global-config/#testevidence) owns evidence location, cleanup, GitHub attachments, orphan-branch publication, and fail-closed behavior.

@@ -8,12 +8,12 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `review.max_fix_rounds`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, and `pr.publish_intent` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `review.max_fix_rounds`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.live_validation`, `test.evidence.branch`, `pr.template`, and `pr.publish_intent` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, and `test.evidence.branch`.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.live_validation`, and `test.evidence.branch`.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -336,14 +336,14 @@ Explicit **targeted** local test command. Run via the platform shell - `sh -c` o
 | | |
 | --- | --- |
 | Type | `string` |
-| Default | Empty (agent derives and drives targeted end-user scenarios) |
+| Default | Empty (the Test agent runs targeted tests itself) |
 
 `commands.test` is local **targeted validation** of the change and requested intent, not a CI-parity repository-wide regression command.
 Broad regression belongs in remote CI and remains mandatory before a PR is ready; do not put a complete-suite walk here just to mirror CI.
 no-mistakes does not guess whether an arbitrary shell string is "too broad" - the contract is documented and dogfooded, not enforced with language- or filename-specific heuristics.
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
-Whether the baseline passes, fails, or is absent, the agent then derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
+What follows the baseline depends on [`test.live_validation`](#testlive_validation): with the default `off`, a passing baseline completes Test without an agent turn unless the run carries user intent; with `on`, the agent always derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
 A non-zero exit parks the Test step. Approving that gate records an explicit override on the step and on the PR attestation; the [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check treats that as non-compliant unless [`test.allow_approve_over_failure`](#testallow_approve_over_failure) is set.
 
 ### commands.lint
@@ -867,8 +867,27 @@ Repository-specific runbook for standing the product up during live validation.
 | Type | `string` (multiline) |
 | Default | Empty |
 
-The Test step injects these instructions into its evidence prompt so the agent can start and drive the real product the way an end user would.
+With [`test.live_validation: on`](#testlive_validation), the Test step injects these instructions into its evidence prompt so the agent can start and drive the real product the way an end user would.
 Like `document.instructions`, this field steers its own gate, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`. A contributor's pushed branch cannot rewrite the runbook that validates that branch.
+
+### test.live_validation
+
+Turns the Test step's live-validation evidence turn and verdict contract on or off.
+
+| | |
+| --- | --- |
+| Type | `string`: `off` or `on` |
+| Default | `off` |
+
+```yaml
+test:
+  live_validation: on
+```
+
+- `off` (default): a failing [`commands.test`](#commandstest) parks at once, without an agent turn. Otherwise an agent test turn runs only when `commands.test` is unset or the run carries user intent; that turn reports findings, `tested`, `testing_summary`, and `artifacts` but no scenarios or verdict, so Test never parks on `no-surface` or `inconclusive` and the PR attestation carries no `live_validation`. Its findings follow their `action` as usual.
+- `on`: the [Test step](/no-mistakes/reference/pipeline-steps/#test) always runs the evidence turn after the baseline, with its scenario list, verdict, and verdict-based approval policy.
+
+Any other value fails config parsing. This field is repository-only (setting it in global config is a parse error) and is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`: a contributor's pushed branch cannot switch off the live validation that tests it.
 
 ### test.allow_approve_over_failure
 
