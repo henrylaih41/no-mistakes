@@ -1105,7 +1105,19 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		}
 	}
 	if latestForBranch == nil {
-		return "", fmt.Errorf("no previous run for branch %s", branch)
+		// No run to replay, but the gate already holds the branch: a push whose
+		// hook notification was lost (daemon down or restarting) mirrored the
+		// ref without starting a run. A clean caller whose HEAD is exactly the
+		// gate head may start the branch's first run. The base is the zero SHA,
+		// as for a new branch's first push; steps resolve the real merge base.
+		if callerHeadSHA == "" || callerHeadSHA != gateHead {
+			return "", fmt.Errorf("no previous run for branch %s", branch)
+		}
+		intentSource := ""
+		if strings.TrimSpace(intent) != "" {
+			intentSource = db.RunIntentSourceAgent
+		}
+		return m.startRunWithIntentSource(ctx, repo, branch, gateHead, git.ZeroSHA, "rerun", skipSteps, intent, intentSource, strings.TrimSpace(prBaseBranch), omitIntent, "", planID, designContextPaths, profiles...)
 	}
 	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
 	if err != nil {

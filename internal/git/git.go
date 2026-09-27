@@ -21,10 +21,13 @@ import (
 // Used as a base when there is no prior commit to diff against.
 const EmptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+// ZeroSHA is the null ref git uses as the old value of a new branch.
+const ZeroSHA = "0000000000000000000000000000000000000000"
+
 // IsZeroSHA returns true if the SHA is the null/zero ref that git uses for
 // new or deleted branches (40 zeros).
 func IsZeroSHA(sha string) bool {
-	return sha == "0000000000000000000000000000000000000000"
+	return sha == ZeroSHA
 }
 
 // Run executes a git command in the given directory and returns trimmed stdout.
