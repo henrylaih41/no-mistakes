@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, and `pr.publish_intent` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `review.max_fix_rounds`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, and `pr.publish_intent` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -407,6 +407,23 @@ review:
 **Off (the default)**, the review step is the monologue it has always been: the reviewer is told nothing about a channel, no conversation files are written, no question findings are produced, and the PR body grows no conversation group. A repository that never opted in cannot have a conversation on disk, so for it every review turn also runs session-free and `no-mistakes axi answer` refuses and names this setting. A question asked while the setting was on stays answerable if you turn it off mid-run - see [Turning the setting off does not strand a question already asked](/no-mistakes/concepts/review-conversation/). Upgrading no-mistakes never starts a conversation under a repository that did not ask for one.
 
 The trade-off is latency against precision. A question costs the run a park - tens of minutes to hours of wall clock, waiting on you - and buys a review that decided the point instead of handing you a finding to rule on. Repositories whose changes rarely turn on product intent will not get much for that wait; repositories where the reviewer regularly cannot tell deliberate from accidental will.
+
+### review.max_fix_rounds
+
+Overrides the global [`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds) for this repository; that entry owns the cap's semantics.
+
+| | |
+|---|---|
+| Type | `int` |
+| Default | Inherits from global (default `3`) |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+review:
+  max_fix_rounds: 0 # no cap for this repository
+```
+
+`0` removes the cap and a negative value is a config error. A pushed branch cannot raise or remove the cap that bounds its own review.
 
 ### review.path_instructions
 

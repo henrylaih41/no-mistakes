@@ -749,6 +749,22 @@ Legacy alias: `auto_fix.babysit`.
 
 These are global defaults. Per-repo config can override individual steps.
 
+### review.max_fix_rounds
+
+How many Review fix rounds a run may take before Review stops fixing on its own. Every fix round counts, automatic or operator-selected, and the count is read from the persisted rounds, so it survives a daemon restart. Once the cap is reached and fixable findings remain, Review parks on the ordinary approval gate with the reserved `ask-user` finding `review-fix-round-cap`; the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns that gate's behavior.
+
+|         |       |
+| ------- | ----- |
+| Type    | `int` |
+| Default | `3`   |
+
+```yaml
+review:
+  max_fix_rounds: 5
+```
+
+`0` removes the cap, and a negative value is a config error. A repository can override it from its trusted default branch with [`review.max_fix_rounds`](/no-mistakes/reference/repo-config/#reviewmax_fix_rounds).
+
 ### review.fix_round_min_severity
 
 Minimum finding severity that Review treats as fix-round work. Actionable review findings ranked below it are carried as `no-op` follow-ups: they never park the run, are left out of `axi --yes` and the TUI's default selection, and are listed in the PR body. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns the follow-up behavior.

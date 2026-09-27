@@ -492,14 +492,14 @@ certifies its range and leaves `UncertifiedSourceRunID` empty, so the skip in
 `BindPreviousRunReviewRounds` does not fire and the fixer's commits are inside
 this run's own `base..head` scope.
 
-## No round cap
+## Round cap
 
-There is none, and none may be added. The captain's ruling of 2026-09-15:
-"there is no round cap we have introduced here". The pipeline enforces no limit
-on review fix rounds - neither user-driven nor answer-driven - and there is no
-`review.max_fix_rounds` setting. A worker-side convention about filing
-follow-ups after a couple of rounds is a convention; it is not a pipeline limit
-and must not become one.
+The conversation adds no round cap of its own. The one cap on Review is
+[`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds),
+a fork decision that supersedes the captain's no-cap ruling of 2026-09-15. It
+counts fix rounds only: an answer round is not a fix round, so answering
+questions never spends it, and a review question is never a residual that
+makes the cap park.
 
 ## The PR body
 

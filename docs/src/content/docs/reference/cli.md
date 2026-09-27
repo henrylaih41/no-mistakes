@@ -189,6 +189,7 @@ With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` fi
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
 So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so `--yes` stops at it and leaves the choice between `--action fix` and `no-mistakes axi abort` to the operator (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
+So is a Review gate carrying `review-fix-round-cap`: `--yes` stops at it and leaves the decision to the operator (see [`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds)).
 Without `--yes`, an agent driving `axi run` triages each `action: ask-user` finding before responding: it rules on implementation or scope questions the user's intent already settles, and stops to relay a product or guarantee choice to the user with the finding's ID, file, and full description.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
@@ -262,6 +263,8 @@ no-mistakes axi respond --action skip
 | `--instructions` | `string` | (none)        | Guidance applied to selected findings with `--action fix`            |
 | `--reason`       | `string` | (none)        | Operator's exception explanation for Test approval only              |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
+| `--fix-override` | `bool` | `false`     | Run one more fix round at a Review gate parked by [`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds); requires `--action fix` and `--override-reason`, and is refused at any other gate |
+| `--override-reason` | `string` | (none) | Why the extra fix round is warranted, recorded with the round; requires `--fix-override` |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve subsequent eligible gates until a decision point or outcome |
 | `--wait`         | `duration` | `8m`        | Maximum time for pre-drive reads and post-response driving before the caller must reattach |
 
