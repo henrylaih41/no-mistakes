@@ -38,10 +38,22 @@ func NormalizeFindingSeverity(severity string) string {
 	return strings.ToLower(strings.TrimSpace(severity))
 }
 
-// NormalizeFindingAction trims and lower-cases one action. It does not check
-// membership; see IsKnownFindingAction.
+// legacyActionAskMaster is the retired fourth action ("needs the master
+// agent's triage"). Nothing emits it any more, but persisted findings and eval
+// gold labels still carry it, so it parses as ask-user, whose meaning it now
+// shares: the finding needs a decision, and the driving agent decides whether
+// the user must make it.
+const legacyActionAskMaster = "ask-master"
+
+// NormalizeFindingAction trims and lower-cases one action and maps the retired
+// ask-master action to ask-user. It does not check membership; see
+// IsKnownFindingAction.
 func NormalizeFindingAction(action string) string {
-	return strings.ToLower(strings.TrimSpace(action))
+	normalized := strings.ToLower(strings.TrimSpace(action))
+	if normalized == legacyActionAskMaster {
+		return ActionAskUser
+	}
+	return normalized
 }
 
 // IsKnownFindingSeverity reports whether severity, once normalized, is part of
@@ -616,6 +628,9 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Line = wire.Line
 	f.Description = wire.Description
 	f.Action = wire.Action
+	if strings.EqualFold(strings.TrimSpace(wire.Action), legacyActionAskMaster) {
+		f.Action = ActionAskUser
+	}
 	f.Source = wire.Source
 	f.UserInstructions = wire.UserInstructions
 	f.ReviewScope = wire.ReviewScope

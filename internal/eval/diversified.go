@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 type diversifiedPin struct {
@@ -43,6 +45,9 @@ func findingType(c Case) string {
 			if sev == "" {
 				sev = "none"
 			}
+			// Legacy gold labels carry the retired ask-master action; it strata
+			// with ask-user, whose meaning it now shares.
+			action = types.NormalizeFindingAction(action)
 			if sevRank[sev] > sevRank[bestSev] || (sevRank[sev] == sevRank[bestSev] && (bestAction == "" || action < bestAction)) {
 				bestSev = sev
 				bestAction = action

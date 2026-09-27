@@ -177,9 +177,10 @@ Run the pipeline and decide on its findings as they come up:
    - `auto-fix` - mechanical and low-risk; you can authorize the fix on
      your own judgment by responding with `--action fix`.
    - `no-op` - informational only; nothing to do.
-   - `ask-user` - the finding challenges the user's deliberate intent or
-     touches product behavior. This is a call only the user can make - see
-     [Escalate `ask-user` findings](#escalate-ask-user-findings) below.
+   - `ask-user` - the finding needs a decision before anything changes: it
+     challenges the user's deliberate intent or touches product behavior. You
+     triage it and decide whether the user must answer - see
+     [Resolve `ask-user` findings](#resolve-ask-user-findings) below.
 
    **Review auto-fix is disabled by default** (`auto_fix.review: 0`; a repo
    or global `auto_fix.review > 0` override re-enables it), so blocking and
@@ -213,7 +214,7 @@ Run the pipeline and decide on its findings as they come up:
     Extra flags on `respond`:
     - `--wait` bounds the hold (default 8m).
     - `--reason "the operator's explanation"` records an explicitly authorized Test exception with `--step test --action approve`.
-      This does not grant approval authority; escalate ask-user findings as before.
+      This does not grant approval authority; triage ask-user findings as described below.
       Without a reason, Test approval remains effective; an approval past a failing command, `no-go`, or `inconclusive` verdict is reported as an exception with no operator reason supplied.
     - `--add-finding '<json>'` (with `--action fix`) folds a finding you
       spotted yourself - one the pipeline did not surface - into the fix round,
@@ -302,21 +303,28 @@ format - what was validated and what was found. If the output includes a
 acknowledge those misses and explicitly list each fix so the user can easily
 review them.
 
-## Escalate `ask-user` findings
+## Resolve `ask-user` findings
 
 A gate whose findings are all `auto-fix` or `no-op` is safe to drive on your
 own judgment: respond with `--action fix` or `--action approve` as
-appropriate. But a finding marked
-`ask-user` is a decision that belongs to the user, not you - the pipeline
-flagged it because it challenges their deliberate intent or changes product
-behavior. Do not approve, fix, or skip it on your own. Instead, stop and bring
-it to the user before you respond:
+appropriate. A finding marked `ask-user` needs a decision before anything
+changes. The reviewer reports it as-is and does not decide who makes that
+decision - you do. Triage every `ask-user` finding before you respond:
 
-- Relay each `ask-user` finding to them as the pipeline wrote it - its
-  `id`, `file`, and full `description` verbatim. Do not paraphrase,
-  summarize away the detail, or pre-judge the answer.
-- Ask how they want to proceed, then translate their decision into the matching
-  `respond` call: `--action fix` (pass their guidance through
+- Rule on it yourself when it is an implementation or scope question that the
+  user's stated intent, their recorded decisions, and the repository's rules
+  already answer - for example which of two equivalent remedies to take,
+  whether a component the intent does not require should be removed, or
+  whether a remedy stays inside the change's scope. Record your ruling and its
+  basis in the response (`--instructions` on `--action fix`), and list
+  every ruling you made in your final report so the user can review it.
+- Escalate only a genuine product or guarantee choice - what the product
+  should do, what it promises its users, or a trade-off the user's intent does
+  not settle. Stop and bring it to the user before you respond: relay the
+  finding as the pipeline wrote it - its `id`, `file`, and full
+  `description` verbatim, without paraphrasing or pre-judging the answer -
+  ask how they want to proceed, then translate their decision into the
+  matching `respond` call: `--action fix` (pass their guidance through
   `--instructions`), `--action approve`, or `--action skip`.
 
 The exception is `--yes` (below): it is the user's standing consent to
@@ -387,7 +395,8 @@ help[6]:
 
 Read the `action` column per row: decide `r1` (auto-fix) on your own
 judgment - `respond --action fix --findings r1` hands it to the pipeline to
-fix - but stop and escalate `r2` (ask-user) to the user before responding. A
+fix - and triage `r2` (ask-user) before responding: a flag that bypasses a
+confirmation prompt changes what the product promises, so it goes to the user. A
 final state
 instead shows `outcome: <checks-passed|passed|passed-with-override|passed-with-skips|failed|cancelled>` with no
 `findings` table. Field names and exact columns can vary by step and version,

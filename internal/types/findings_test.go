@@ -516,3 +516,24 @@ func TestFinding_Action_Values(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyAskMasterActionParsesAsAskUser(t *testing.T) {
+	findings, err := ParseFindingsJSON(`{"findings":[{"id":"f1","severity":"warning","description":"d","action":"ask-master"},{"id":"f2","severity":"warning","description":"d","action":" Ask-Master "}]}`)
+	if err != nil {
+		t.Fatalf("ParseFindingsJSON: %v", err)
+	}
+	for _, f := range findings.Items {
+		if f.Action != ActionAskUser {
+			t.Fatalf("finding %s action = %q, want ask-user", f.ID, f.Action)
+		}
+	}
+	if !HasAskUserFindings(findings) {
+		t.Fatal("legacy ask-master findings must park like ask-user")
+	}
+	if got := NormalizeFindingAction("ask-master"); got != ActionAskUser {
+		t.Fatalf("NormalizeFindingAction(ask-master) = %q, want ask-user", got)
+	}
+	if IsKnownFindingAction("ask-master") != true {
+		t.Fatal("the retired action must still validate as a known (legacy) spelling")
+	}
+}
