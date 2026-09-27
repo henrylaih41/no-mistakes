@@ -537,3 +537,43 @@ func TestLegacyAskMasterActionParsesAsAskUser(t *testing.T) {
 		t.Fatal("the retired action must still validate as a known (legacy) spelling")
 	}
 }
+
+func TestDemoteBelowSeverity(t *testing.T) {
+	findings := DemoteBelowSeverity(Findings{Items: []Finding{
+		{ID: "info-fix", Severity: FindingSeverityInfo, Action: ActionAutoFix, Description: "d"},
+		{ID: "info-noop", Severity: FindingSeverityInfo, Action: ActionNoOp, Description: "d"},
+		{ID: "warning", Severity: FindingSeverityWarning, Action: ActionAskUser, Description: "d"},
+	}}, FindingSeverityWarning)
+	if f := findings.Items[0]; !f.IsFollowUp() || f.Action != ActionNoOp || f.Description != "d (reviewer action: auto-fix)" {
+		t.Fatalf("info auto-fix = %+v, want a no-op follow-up that keeps its original action", f)
+	}
+	if f := findings.Items[1]; f.IsFollowUp() || f.Description != "d" {
+		t.Fatalf("an existing no-op finding was demoted: %+v", f)
+	}
+	if f := findings.Items[2]; f.IsFollowUp() || f.Action != ActionAskUser {
+		t.Fatalf("a finding at the floor was demoted: %+v", f)
+	}
+
+	strict := DemoteBelowSeverity(Findings{Items: []Finding{{ID: "w", Severity: FindingSeverityWarning, Action: ActionAutoFix}}}, FindingSeverityError)
+	if !strict.Items[0].IsFollowUp() {
+		t.Fatal("a warning below an error floor was not demoted")
+	}
+	unknown := DemoteBelowSeverity(Findings{Items: []Finding{{ID: "i", Severity: FindingSeverityInfo, Action: ActionAutoFix}}}, "critical")
+	if unknown.Items[0].IsFollowUp() {
+		t.Fatal("an unknown floor demoted a finding; it must fail closed")
+	}
+}
+
+func TestFindingDispositionRoundTrips(t *testing.T) {
+	raw, err := MarshalFindingsJSON(Findings{Items: []Finding{{ID: "f", Severity: FindingSeverityInfo, Action: ActionNoOp, Description: "d", Disposition: FindingDispositionFollowUp}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseFindingsJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Items[0].IsFollowUp() {
+		t.Fatalf("disposition dropped on parse: %s", raw)
+	}
+}

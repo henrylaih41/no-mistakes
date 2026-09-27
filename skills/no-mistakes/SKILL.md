@@ -176,7 +176,11 @@ Run the pipeline and decide on its findings as they come up:
    pipeline classified it:
    - `auto-fix` - mechanical and low-risk; you can authorize the fix on
      your own judgment by responding with `--action fix`.
-   - `no-op` - informational only; nothing to do.
+   - `no-op` - informational only; nothing to do. Findings below
+     `review.fix_round_min_severity` (default `warning`) arrive as `no-op`
+     follow-ups whose description ends with the reviewer's original action.
+     They are listed in the PR body, never park the run, and are left out of
+     `--yes`; fix one only by selecting its id.
    - `ask-user` - the finding needs a decision before anything changes: it
      challenges the user's deliberate intent or touches product behavior. You
      triage it and decide whether the user must answer - see

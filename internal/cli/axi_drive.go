@@ -1048,7 +1048,9 @@ func gateResolution(gate stepView, alreadyFixed bool) (types.ApprovalAction, []s
 	}
 	ids := make([]string, 0, len(parsed.Items))
 	for _, f := range parsed.Items {
-		if f.ID != "" {
+		// A follow-up is outside the fix loop; only an explicit selection
+		// by id fixes one.
+		if f.ID != "" && !f.IsFollowUp() {
 			ids = append(ids, f.ID)
 		}
 	}

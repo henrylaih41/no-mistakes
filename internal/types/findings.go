@@ -22,6 +22,12 @@ const (
 	FindingSeverityInfo    = "info"
 )
 
+// FindingDispositionFollowUp marks a finding the review severity gate carried
+// out of the fix loop (see DemoteBelowSeverity): it is reported, excluded from
+// automatic and select-all fixes, never parks the run, and never joins the
+// review's outstanding set. An operator may still select it by id.
+const FindingDispositionFollowUp = "follow-up"
+
 // This package owns the finding severity and action vocabularies. Callers that
 // accept a severity or action from outside a pipeline agent - a hand-written
 // eval miss, an IPC payload - validate against these rather than keeping their
@@ -44,6 +50,19 @@ func NormalizeFindingSeverity(severity string) string {
 // shares: the finding needs a decision, and the driving agent decides whether
 // the user must make it.
 const legacyActionAskMaster = "ask-master"
+
+// severityRank orders the review severity vocabulary. A severity outside the
+// vocabulary ranks as error: the gate never demotes what it cannot classify.
+func severityRank(severity string) int {
+	switch NormalizeFindingSeverity(severity) {
+	case FindingSeverityInfo:
+		return 0
+	case FindingSeverityWarning:
+		return 1
+	default:
+		return 2
+	}
+}
 
 // NormalizeFindingAction trims and lower-cases one action and maps the retired
 // ask-master action to ask-user. It does not check membership; see
@@ -209,6 +228,9 @@ type Finding struct {
 	Source           string `json:"source,omitempty"`
 	UserInstructions string `json:"user_instructions,omitempty"`
 	ReviewScope      string `json:"review_scope,omitempty"`
+	// Disposition is "" (normal) or FindingDispositionFollowUp. Only the
+	// review severity gate sets it; an agent-supplied value is discarded.
+	Disposition string `json:"disposition,omitempty"`
 	// Category separates the combined document+lint housekeeping pass's
 	// findings into their owning gates and the CI step's findings by kind
 	// (see the FindingCategoryCI* constants). Empty everywhere else.
@@ -286,6 +308,7 @@ type findingWire struct {
 	Source              string `json:"source,omitempty"`
 	UserInstructions    string `json:"user_instructions,omitempty"`
 	ReviewScope         string `json:"review_scope,omitempty"`
+	Disposition         string `json:"disposition,omitempty"`
 	Category            string `json:"category,omitempty"`
 	Check               string `json:"check,omitempty"`
 	CheckID             string `json:"check_id,omitempty"`
@@ -459,6 +482,44 @@ func AutoFixableFindings(findings Findings) Findings {
 		}
 	}
 	return result
+}
+
+// DemoteBelowSeverity carries every actionable finding whose severity ranks
+// below min as a follow-up: its action becomes no-op so it neither auto-fixes
+// nor parks the run, the reviewer's original action is appended to the
+// description for the audit trail, and Disposition marks it. Findings already
+// no-op are left alone. An empty or unknown min demotes nothing (fail closed).
+// The items are modified in place and returned.
+func DemoteBelowSeverity(findings Findings, min string) Findings {
+	if !IsKnownFindingSeverity(min) {
+		return findings
+	}
+	minRank := severityRank(min)
+	for i := range findings.Items {
+		item := &findings.Items[i]
+		action := item.ActionOrDefault()
+		if severityRank(item.Severity) < minRank && action != ActionNoOp {
+			item.Description += " (reviewer action: " + action + ")"
+			item.Action = ActionNoOp
+			item.Disposition = FindingDispositionFollowUp
+		}
+	}
+	return findings
+}
+
+// IsFollowUp reports whether the review severity gate carried a finding
+// outside the fix loop.
+func (f Finding) IsFollowUp() bool {
+	return f.Disposition == FindingDispositionFollowUp
+}
+
+// ClearDispositions discards every agent-supplied disposition, so only the
+// review severity gate can mark a finding as a follow-up.
+func ClearDispositions(findings Findings) Findings {
+	for i := range findings.Items {
+		findings.Items[i].Disposition = ""
+	}
+	return findings
 }
 
 // MergeUserOverrides applies per-finding user instructions to existing agent
@@ -637,6 +698,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Source = wire.Source
 	f.UserInstructions = wire.UserInstructions
 	f.ReviewScope = wire.ReviewScope
+	f.Disposition = wire.Disposition
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID

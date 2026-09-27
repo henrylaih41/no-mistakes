@@ -53,7 +53,7 @@ func unmarshalRequiredFindings(raw []byte, findings *Findings, requireNonEmptySu
 			return fmt.Errorf("finding %d missing action", i)
 		}
 	}
-	*findings = parsed
+	*findings = types.ClearDispositions(parsed)
 	return nil
 }
 

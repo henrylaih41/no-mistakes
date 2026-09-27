@@ -475,6 +475,16 @@ func TestGateResolution(t *testing.T) {
 			wantIDs:    []string{"review-1", "review-2"},
 		},
 		{
+			name: "follow-ups are left out of the fix selection",
+			gate: stepView{
+				Name:         "review",
+				Status:       string(types.StepStatusAwaitingApproval),
+				FindingsJSON: `{"findings":[{"id":"review-1","severity":"warning","description":"missing check","action":"auto-fix"},{"id":"review-2","severity":"info","description":"rename (reviewer action: auto-fix)","action":"no-op","disposition":"follow-up"}],"summary":"2"}`,
+			},
+			wantAction: types.ActionFix,
+			wantIDs:    []string{"review-1"},
+		},
+		{
 			name: "only non-actionable findings are approved",
 			gate: stepView{
 				Name:         "test",

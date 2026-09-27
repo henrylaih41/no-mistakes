@@ -964,3 +964,14 @@ func TestOutcomeBanner_FailureShowsElapsedTime(t *testing.T) {
 }
 
 // boxContentLine extracts the content between box border │ chars on a line.
+
+func TestResetFindingSelection_FollowUpsStartUnselected(t *testing.T) {
+	m := NewModel("", nil, testRun())
+	m.stepFindings[types.StepReview] = `{"summary":"test","items":[{"id":"f1","severity":"warning","description":"fix me","action":"auto-fix"},{"id":"f2","severity":"info","description":"later","action":"no-op","disposition":"follow-up"}]}`
+	m.resetFindingSelection(types.StepReview)
+
+	got := m.selectedFindingIDs(types.StepReview)
+	if len(got) != 1 || got[0] != "f1" {
+		t.Fatalf("selected = %v, want only the in-round finding f1", got)
+	}
+}

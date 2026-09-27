@@ -483,6 +483,20 @@ Risk assessment (after listing all findings):
 		findings = stripped
 	}
 
+	// Severity gate: actionable findings below review.fix_round_min_severity
+	// become follow-ups (action no-op) so they neither start a fix round nor
+	// park the run; the PR body still lists them. It runs on the validated
+	// attempt of every review turn, so the initial review and each rereview
+	// are gated alike, and before the reviewer's open questions are appended
+	// so a question always parks whatever the floor.
+	if min := sctx.Config.Review.FixRoundMinSeverity; min != "" {
+		before := countFollowUps(findings.Items)
+		findings = types.DemoteBelowSeverity(findings, min)
+		if n := countFollowUps(findings.Items) - before; n > 0 {
+			sctx.Log(fmt.Sprintf("carried %d finding(s) below %s severity as follow-ups (review.fix_round_min_severity)", n, min))
+		}
+	}
+
 	// Read the conversation the turn that just ended left behind. Answers
 	// arriving mid-turn are recorded here, once, so the next COLD reviewer -
 	// in this run or a later one - reads them as settled; open questions
@@ -533,6 +547,16 @@ Risk assessment (after listing all findings):
 	})
 }
 
+func countFollowUps(items []Finding) int {
+	count := 0
+	for _, item := range items {
+		if item.IsFollowUp() {
+			count++
+		}
+	}
+	return count
+}
+
 // reviewAnalyzerMaxAttempts bounds the review turns one Execute spends on
 // output that fails validation, including the first.
 const reviewAnalyzerMaxAttempts = 3
@@ -580,7 +604,7 @@ func parseReviewAnalyzerOutput(result *agent.Result) (Findings, error) {
 		}
 		findings.Items[i].Severity = types.NormalizeFindingSeverity(findings.Items[i].Severity)
 	}
-	return findings, nil
+	return types.ClearDispositions(findings), nil
 }
 
 // reviewRetryNote is the only thing a rerun review learns from the attempt

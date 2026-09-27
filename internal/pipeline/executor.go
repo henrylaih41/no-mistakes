@@ -1171,6 +1171,8 @@ rounds:
 			// that has nothing to do with it.
 			verificationFindings := dropReviewQuestionFindingsJSON(roundFindings)
 			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
+			// Follow-ups are this round's report, never carried debt.
+			outstandingFindings = dropFollowUpFindingsJSON(outstandingFindings, combineFindingIDLists(pendingVerificationIDs, selectedOutstandingIDs))
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no

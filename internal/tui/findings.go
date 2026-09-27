@@ -101,7 +101,8 @@ func (m *Model) resetFindingSelection(step types.StepName) {
 	}
 	selected := make(map[string]bool)
 	for _, item := range m.findingItems(step) {
-		if item.ID != "" {
+		// Follow-ups start unselected; the operator can still toggle one on.
+		if item.ID != "" && !item.IsFollowUp() {
 			selected[item.ID] = true
 		}
 	}

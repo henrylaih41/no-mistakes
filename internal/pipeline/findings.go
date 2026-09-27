@@ -282,6 +282,10 @@ func hasBlockingFindingsJSON(raw string) bool {
 		return true
 	}
 	for _, item := range findings.Items {
+		// A follow-up never blocks, whatever its original severity.
+		if item.IsFollowUp() {
+			continue
+		}
 		if item.Severity == types.FindingSeverityError || item.Severity == types.FindingSeverityWarning {
 			return true
 		}
@@ -786,6 +790,46 @@ func dropReviewQuestionFindingsJSON(raw string) string {
 	kept := make([]types.Finding, 0, len(findings.Items))
 	for _, item := range findings.Items {
 		if item.Category == types.FindingCategoryReviewQuestion || item.ID == ReviewQuestionsUnreadableFindingID {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(kept) == len(findings.Items) {
+		return raw
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	findings.Items = kept
+	encoded, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
+// dropFollowUpFindingsJSON removes unselected follow-ups from an outstanding
+// set. A follow-up was carried out of the fix loop by the severity gate
+// (types.DemoteBelowSeverity): nobody selected it, nothing verifies it, and the
+// review turn that raised it reported it in its own round. Carrying it forward
+// would re-list every earlier round's follow-ups at every later gate. One an
+// operator explicitly selected (keep) stays, so its fix is verified like any
+// other selected finding.
+func dropFollowUpFindingsJSON(raw string, keep []string) string {
+	if raw == "" {
+		return raw
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return raw
+	}
+	selected := make(map[string]bool, len(keep))
+	for _, id := range keep {
+		selected[id] = true
+	}
+	kept := make([]types.Finding, 0, len(findings.Items))
+	for _, item := range findings.Items {
+		if item.IsFollowUp() && !selected[item.ID] {
 			continue
 		}
 		kept = append(kept, item)
