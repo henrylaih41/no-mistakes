@@ -75,7 +75,7 @@ Rules:
 		baseSHA,
 		sctx.Run.HeadSHA,
 		requirement,
-		executionContextPromptSection(sctx.WorkDir)+roundHistoryPromptSection(sctx)+userIntentPromptSection(sctx),
+		executionContextPromptSection(sctx.WorkDir)+roundHistoryPromptSection(sctx)+userIntentPromptSection(sctx)+designContextPromptSection(sctx),
 	)
 	if sctx.PreviousFindings != "" {
 		prompt += `

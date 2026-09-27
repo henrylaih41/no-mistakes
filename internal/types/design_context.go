@@ -16,7 +16,6 @@ type DesignContext struct {
 type DesignContextFile struct {
 	Source        string `json:"source"`
 	Content       string `json:"content"`
-	Truncated     bool   `json:"truncated,omitempty"`
 	OriginalBytes int64  `json:"original_bytes,omitempty"`
 }
 

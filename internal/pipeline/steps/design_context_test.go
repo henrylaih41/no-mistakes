@@ -128,3 +128,31 @@ func writeDesignContextFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestCustomGateFixPromptCarriesDesignContext(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{name: "mock", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(filepath.Join(dir, "gate-satisfied.txt"), []byte("ok"), 0o644); err != nil {
+			return nil, err
+		}
+		return &agent.Result{Output: json.RawMessage(`{"summary":"satisfy gate"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"items":[{"id":"g-1","severity":"error","description":"gate failed"}],"summary":"gate failed"}`
+	sctx.DesignContext = types.DesignContext{Files: []types.DesignContextFile{{Source: "docs/design.md", Content: "gate contract"}}}
+
+	step := &CustomGateStep{Gate: config.Gate{Name: "budget", After: types.StepTest, Command: fileGateCommand("gate-satisfied.txt")}}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatalf("Execute() = %v", err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("agent calls = %d, want exactly the fix turn", len(ag.calls))
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "-----BEGIN DESIGN CONTEXT: docs/design.md-----\ngate contract\n-----END DESIGN CONTEXT: docs/design.md-----") {
+		t.Fatalf("custom gate fix prompt missing design context fence:\n%s", ag.calls[0].Prompt)
+	}
+}

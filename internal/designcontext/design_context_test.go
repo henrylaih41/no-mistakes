@@ -161,9 +161,6 @@ func TestMaterializeTruncatesWithVisibleMarker(t *testing.T) {
 	if len(ctx.Files) != 1 {
 		t.Fatalf("files = %d, want 1", len(ctx.Files))
 	}
-	if !ctx.Files[0].Truncated {
-		t.Fatal("expected file to be marked truncated")
-	}
 	if !strings.Contains(ctx.Files[0].Content, "design context truncated") {
 		t.Fatalf("missing truncation marker: %q", ctx.Files[0].Content)
 	}
@@ -201,8 +198,8 @@ func TestMaterializeBoundsReadForOversizeFile(t *testing.T) {
 		t.Fatalf("files = %d, want 1", len(ctx.Files))
 	}
 	f := ctx.Files[0]
-	if !f.Truncated {
-		t.Fatal("expected oversize file to be truncated")
+	if !strings.Contains(f.Content, "design context truncated") {
+		t.Fatalf("missing truncation marker: %q", f.Content[len(f.Content)-200:])
 	}
 	if f.OriginalBytes != int64(big) {
 		t.Fatalf("OriginalBytes = %d, want %d (true file size)", f.OriginalBytes, big)
@@ -273,8 +270,8 @@ func TestMaterializeTruncatesOversizeUTF8FileCutMidRune(t *testing.T) {
 		t.Fatalf("files = %d, want 1", len(ctx.Files))
 	}
 	f := ctx.Files[0]
-	if !f.Truncated {
-		t.Fatal("expected oversize file to be truncated")
+	if !strings.Contains(f.Content, "design context truncated") {
+		t.Fatalf("missing truncation marker: %q", f.Content[len(f.Content)-200:])
 	}
 	if !utf8.ValidString(f.Content) {
 		t.Fatalf("truncated content is not valid UTF-8: %q", f.Content)

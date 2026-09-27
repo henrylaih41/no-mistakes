@@ -274,11 +274,6 @@ func readTextFile(source, path string, totalBefore int) (types.DesignContextFile
 		limit = remaining
 	}
 	file := types.DesignContextFile{Source: source}
-	if limit <= 0 {
-		file.Content = fmt.Sprintf("[no-mistakes: design context omitted because the total cap of %d bytes was reached before this file]", MaxTotalBytes)
-		file.Truncated = true
-		return file, nil
-	}
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -306,7 +301,6 @@ func readTextFile(source, path string, totalBefore int) (types.DesignContextFile
 	}
 	if truncated {
 		file.Content = safePrefix(string(data), limit) + fmt.Sprintf("\n\n[no-mistakes: design context truncated at %d bytes; original file was %d bytes]", limit, file.OriginalBytes)
-		file.Truncated = true
 		return file, nil
 	}
 	file.Content = string(data)
@@ -330,7 +324,7 @@ func trimIncompleteTrailingRune(data []byte) []byte {
 }
 
 func accountedSourceBytes(original int64, remaining int) int {
-	if original <= 0 || remaining <= 0 {
+	if original <= 0 {
 		return 0
 	}
 	n := int64(MaxFileBytes)
@@ -344,9 +338,6 @@ func accountedSourceBytes(original int64, remaining int) int {
 }
 
 func safePrefix(s string, limit int) string {
-	if len(s) <= limit {
-		return s
-	}
 	for limit > 0 && !utf8.ValidString(s[:limit]) {
 		limit--
 	}
