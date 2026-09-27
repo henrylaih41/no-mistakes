@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -142,9 +141,6 @@ Rules:
 		findings.Tested = append(append([]string{}, in.tested...), findings.Tested...)
 	}
 	findings.TestedHeadSHA = sctx.Run.HeadSHA
-	if in.baselineSummary != "" {
-		findings.Summary = strings.TrimSpace(strings.Join([]string{in.baselineSummary, findings.Summary}, "\n"))
-	}
 
 	needsApproval := hasBlockingFindings(findings.Items)
 	for _, f := range mergeNewTestFiles(in.newTestsFromFix, detectNewTestFiles(sctx.Ctx, sctx.WorkDir)) {
