@@ -749,6 +749,22 @@ Legacy alias: `auto_fix.babysit`.
 
 These are global defaults. Per-repo config can override individual steps.
 
+### review.fix_round_min_severity
+
+Minimum finding severity that Review treats as fix-round work. Actionable review findings ranked below it are carried as `no-op` follow-ups: they never park the run, are left out of `axi --yes` and the TUI's default selection, and are listed in the PR body. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns the follow-up behavior.
+
+|         |                                  |
+| ------- | -------------------------------- |
+| Type    | `string` (`info`, `warning`, `error`) |
+| Default | `warning`                        |
+
+```yaml
+review:
+  fix_round_min_severity: error
+```
+
+The default carries `info` findings as follow-ups, `error` also carries warnings, and `info` carries nothing. The key is global-only, and an unknown value is a config error.
+
 ### ci.rerun_transient
 
 How many times the CI step may re-run a single provider-attributed check before that check reaches an approval gate.
