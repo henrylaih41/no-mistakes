@@ -164,3 +164,54 @@ func TestExecutor_UnselectedFollowUpsDoNotVetoVerification(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutor_SelectedFollowUpRereportedInOtherWordsStaysOutstanding checks
+// that an operator-selected follow-up is still held to the coverage rule: a
+// rereport worded differently cannot be matched to it, so it must keep the
+// selection outstanding rather than be dropped as an unrelated follow-up.
+func TestExecutor_SelectedFollowUpRereportedInOtherWordsStaysOutstanding(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	demote := func(description string) types.Findings {
+		return types.DemoteBelowSeverity(types.Findings{Items: []types.Finding{
+			{ID: "review-1", Severity: types.FindingSeverityInfo, Action: types.ActionAutoFix, File: "a.go", Description: description},
+		}}, types.FindingSeverityWarning)
+	}
+	first, err := types.MarshalFindingsJSON(demote("rename helper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rereport, err := types.MarshalFindingsJSON(demote("the helper still needs a clearer name"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewable := []string{"a.go"}
+	round := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		round++
+		if round == 1 {
+			return &StepOutcome{NeedsApproval: true, Findings: first, ReviewedPaths: reviewable, ReviewablePaths: reviewable}, nil
+		}
+		return &StepOutcome{Findings: rereport, ReviewedPaths: reviewable, ReviewablePaths: reviewable}, nil
+	}}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].FindingsJSON == nil || !strings.Contains(*steps[0].FindingsJSON, "rename helper") {
+		t.Fatalf("the selected follow-up was cleared by an unmatched rereport: %v", steps[0].FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}

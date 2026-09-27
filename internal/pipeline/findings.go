@@ -808,17 +808,14 @@ func dropReviewQuestionFindingsJSON(raw string) string {
 	return encoded
 }
 
-// dropFollowUpFindingsJSON removes unselected follow-ups from a findings set:
-// the outstanding set and a verification round's own output. A follow-up was
-// carried out of the fix loop by the severity gate (types.DemoteBelowSeverity):
-// nobody selected it, nothing verifies it, and the review turn that raised it
-// reported it in its own round. Carrying it forward would re-list every earlier
-// round's follow-ups at every later gate, and leaving it in the verification
-// input would let an unrelated follow-up keep a fixed selected finding
-// outstanding (same file) or refuse to clear any (no file). A follow-up that
-// matches a finding an operator explicitly selected (selectedRaw) stays, so its
-// fix is verified like any other selected finding.
-func dropFollowUpFindingsJSON(raw, selectedRaw string) string {
+// dropFollowUpFindingsJSON removes unselected follow-ups from a findings set. A
+// follow-up was carried out of the fix loop by the severity gate
+// (types.DemoteBelowSeverity): nobody selected it, nothing verifies it, and the
+// review turn that raised it reported it in its own round. Carrying it forward
+// would re-list every earlier round's follow-ups at every later gate. One an
+// operator explicitly selected (keep) stays, so its fix is verified like any
+// other selected finding.
+func dropFollowUpFindingsJSON(raw string, keep []string) string {
 	if raw == "" {
 		return raw
 	}
@@ -826,16 +823,13 @@ func dropFollowUpFindingsJSON(raw, selectedRaw string) string {
 	if err != nil {
 		return raw
 	}
-	selected, _ := types.ParseFindingsJSON(selectedRaw)
-	selectedKeys := make(map[types.Finding]bool, len(selected.Items))
-	for _, item := range selected.Items {
-		selectedKeys[findingKey(item)] = true
+	selected := make(map[string]bool, len(keep))
+	for _, id := range keep {
+		selected[id] = true
 	}
-	findingCounts := countFindingFingerprints(findings.Items)
-	selectedCounts := countFindingFingerprints(selected.Items)
 	kept := make([]types.Finding, 0, len(findings.Items))
 	for _, item := range findings.Items {
-		if item.IsFollowUp() && !hasFindingMatch(item, selectedKeys, findingCounts, selectedCounts) {
+		if item.IsFollowUp() && !selected[item.ID] {
 			continue
 		}
 		kept = append(kept, item)
@@ -852,6 +846,29 @@ func dropFollowUpFindingsJSON(raw, selectedRaw string) string {
 		return raw
 	}
 	return encoded
+}
+
+// selectsFollowUpJSON reports whether any finding in raw with one of ids is a
+// follow-up. An unreadable set reports true, so the caller stays on the
+// conservative verification path.
+func selectsFollowUpJSON(raw string, ids []string) bool {
+	if raw == "" || len(ids) == 0 {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return true
+	}
+	selected := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		selected[id] = true
+	}
+	for _, item := range findings.Items {
+		if item.IsFollowUp() && selected[item.ID] {
+			return true
+		}
+	}
+	return false
 }
 
 // dropWithdrawnFindingsJSON removes the findings an answer round explicitly

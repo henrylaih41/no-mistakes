@@ -1171,10 +1171,16 @@ rounds:
 			// that has nothing to do with it.
 			//
 			// Follow-ups are this round's report, never carried debt, and an
-			// unselected one is no verification evidence either.
-			selectedFindings := filterFindingsJSON(outstandingFindings, combineFindingIDLists(pendingVerificationIDs, selectedOutstandingIDs))
-			verificationFindings := dropFollowUpFindingsJSON(dropReviewQuestionFindingsJSON(roundFindings), selectedFindings)
-			outstandingFindings = dropFollowUpFindingsJSON(dropReviewQuestionFindingsJSON(outstandingFindings), selectedFindings)
+			// unselected one is no verification evidence either. Once a
+			// follow-up is itself selected, a rereport of it cannot be told
+			// apart from an unrelated one, so this round's follow-ups stay in
+			// the verification input and the coverage rule applies unchanged.
+			selectedIDs := combineFindingIDLists(pendingVerificationIDs, selectedOutstandingIDs)
+			verificationFindings := dropReviewQuestionFindingsJSON(roundFindings)
+			if !selectsFollowUpJSON(outstandingFindings, selectedIDs) {
+				verificationFindings = dropFollowUpFindingsJSON(verificationFindings, nil)
+			}
+			outstandingFindings = dropFollowUpFindingsJSON(dropReviewQuestionFindingsJSON(outstandingFindings), selectedIDs)
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no
