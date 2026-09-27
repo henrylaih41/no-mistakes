@@ -52,6 +52,12 @@ review:
       instructions: |
         Prose changes only. Do not request test coverage.
 
+# Optional design contract the run's agents check the change against,
+# read from this branch.
+design_context:
+  files:
+    - docs/design/*.md
+
 # For orchestration repos whose project instructions would misidentify gate agents.
 # Read only from the trusted default branch. Defaults to false.
 disable_project_settings: true
@@ -458,6 +464,27 @@ These checks run on whichever copy of the file is parsed, including the pushed b
 #### Trust
 
 Like `document.instructions`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of [`allow_repo_commands`](#allow_repo_commands): a value present only on a pushed branch is ignored, so a contributor cannot inject instructions into the review that gates them.
+
+### design_context
+
+Repository files (design notes, ADRs, a language style appendix) that the run's agents check the change against.
+
+| | |
+| --- | --- |
+| Type | `string[]` under `design_context.files` |
+| Default | Empty |
+| Trust | Read from the pushed branch |
+
+```yaml
+design_context:
+  files:
+    - docs/design/*.md
+    - STYLE.md
+```
+
+Each entry is a repository-relative path or glob (`*`, `?`, `[...]`, matched within one path segment; `**` is not recursive) with forward slashes. Absolute paths, `~`, `..` segments, and any entry containing `:` are rejected. The files are read from the run's worktree, so a pushed branch reviews against its own version. Every entry must match at least one file, and each match, after resolving symlinks, must be a regular file inside the worktree; otherwise the run fails at start.
+
+The field is non-executing prompt context, so unlike `document.instructions` it is honored from the pushed branch. The global [`design_context`](/no-mistakes/reference/global-config/#design_context) entry owns how these files combine with the machine's own files and `axi run --design-context`, the size caps, and which prompts receive them.
 
 ### gates
 

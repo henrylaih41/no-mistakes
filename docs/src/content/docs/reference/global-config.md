@@ -98,6 +98,10 @@ intent:
   disabled_readers: []
   # publish_intent: false # Keep the generated Intent section out of PR bodies by default
 
+design_context:
+  files:
+    - ~/.agents/QUALITY.md
+
 test:
   evidence:
     store_in_repo: false
@@ -922,6 +926,32 @@ For multi-file diffs, no-mistakes still requires at least two overlapping files 
 Partial matches older than 24 hours are rejected unless their raw score is at least `0.8`.
 If exactly one accepted candidate has a raw score of at least `0.85`, that decisive candidate wins before recency ranking.
 Otherwise, accepted candidates are ranked by confidence, which combines the raw score with a small recency boost, with ties going to the most recent matching session, and ambiguous accepted candidates may be disambiguated by the configured pipeline agent.
+
+### design_context
+
+Machine-owned design-contract files (for example a code-quality charter) that every new run on this machine checks its change against.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                  | Type       | Default | Description                                                        |
+| ---------------------- | ---------- | ------- | ------------------------------------------------------------------ |
+| `design_context.files` | `string[]` | Empty   | Files to supply to every run; each must be absolute or start with `~/` |
+
+```yaml
+design_context:
+  files:
+    - ~/.agents/QUALITY.md
+```
+
+Entries are expanded and must resolve to absolute paths when the config loads; globs are not supported, and a relative or empty entry is a config error.
+
+A run's design context is resolved once, at run start, from three sources in this order: the caller's [`axi run --design-context`](/no-mistakes/reference/cli/#no-mistakes-axi-run) files, these global files, then the repository's [`design_context.files`](/no-mistakes/reference/repo-config/#design_context) selectors. The same file named twice is read once. Every named file must be a readable, regular, valid UTF-8 file; a missing or unreadable one fails the run before any step starts. The bytes are pinned on the run, so every later round, fix, and recovery sees the same contract, and editing the source file mid-run changes nothing.
+
+Size caps bound the prompt: each file is cut at 64 KiB with a visible truncation note, the run keeps at most 256 KiB and 64 files, and once a cap is reached the remaining CLI and repository files are left out. A global file never is: if caller files exhaust the caps before a global file is reached, the run fails and asks for fewer `--design-context` files.
+
+Review, Test, Document and Lint turns, their fix turns, repository-gate repairs, rebase and merge conflict resolution, and CI repairs each receive the files as a fenced design-contract section. Each body is marked untrusted data: agents check the change against it and flag deviations, but instructions inside it do not override the prompt, and secrets are redacted before it is sent.
 
 ### test.evidence
 

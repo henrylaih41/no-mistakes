@@ -51,6 +51,7 @@ A case includes:
 - the reviewed commit, base, and trusted-config commit pinned at capture
 - agent-neutral global configuration and the effective repository configuration frozen at capture
 - the original run, step, review-round, decision, and local invocation-metric records
+- the run's pinned [design context](/no-mistakes/reference/global-config/#design_context), when it had one
 - a manifest with commit pins, changed-file counts, build identity, and a hash of the redacted remote URL
 - a local `labels.json` file that stores finding-level gold; queued unmatched candidate findings are counted from the recorded replays themselves, so replays never rewrite a case's labels
 
@@ -124,6 +125,8 @@ When a harness reports the model it served, replay verifies the model name again
 Effort is part of the candidate identity, so `codex,model=gpt-5.4,effort=low` and `codex,model=gpt-5.4,effort=high` are reported as two candidates rather than collapsing into one.
 
 The replay restores each case into a fresh temporary bare gate and worktree, then invokes only the existing Review step. Push, PR, CI, test, lint, document, and fix loops are outside this subject under test.
+
+The replayed review receives the design context the live review saw, read from the case. A case captured before design context was recorded instead rebuilds it from its frozen configuration's `design_context.files`, re-reading this machine's global files and the restored worktree; that replay is marked `design_context_source: rematerialized` (`captured` otherwise), and one whose named file can no longer be read fails rather than reviewing without its contract.
 
 Replay scores each candidate finding against that gold:
 

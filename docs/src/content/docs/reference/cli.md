@@ -130,6 +130,7 @@ no-mistakes axi run --intent "the user's goal" --no-publish-intent
 | --------------- | -------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `--intent`      | `string` | (none)  | What the user set out to accomplish; required to start a new run                                     |
 | `--verification-plan` | `string` | (none) | Path to a nonempty UTF-8 verification plan, at most 64 KiB (65,536 bytes), captured as separate evidence for a new run only |
+| `--design-context` | `string` | (none) | Design notes, ADRs, or agreements for agents to check the change against; repeatable, new runs only, see below |
 | `-y`, `--yes`   | `bool`   | `false` | Auto-resolve eligible gates until a decision point or outcome                                       |
 | `--skip`        | `string` | (none)  | Comma-separated pipeline steps to skip                                                               |
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
@@ -161,6 +162,14 @@ The captured bytes live privately at `<NM_HOME>/run-inputs/<run-id>/verification
 Review and Test, including their fix turns, receive the same digest-checked snapshot as labeled evidence. Editing or deleting the original source cannot change it; a missing or altered snapshot fails closed when consumed. Reattach with `no-mistakes axi run` **without** `--verification-plan`; providing the flag for an existing run is refused, including strict-launch replay. A new run without the flag does not inherit a prior run's plan. Capture time records when no-mistakes read the file, not proof that its author wrote it before implementation.
 
 Only attached runs receive plan-aware guidance. Review and Test assess the proposed scenarios and independent expected results against actual evidence; the attachment does not direct Review to execute verification. Test receives the execution guidance: when no existing check drives a scenario, perform repeatable product verification with a retained artifact, or name the missing capability and how to provide it and mark the scenario untested. Both steps must follow repository testing rules before changing permanent tests; an attached plan alone is not a reason to add tests. A missing-test finding must identify the observable failure, why existing checks and product evidence do not cover it, and the independent expected result. Runs without a plan retain their existing Review and Test guidance.
+
+### Design context
+
+```sh
+no-mistakes axi run --intent "the user's goal" --design-context docs/adr/0007-cache.md --design-context ~/notes/api-agreement.md
+```
+
+Each `--design-context` file is a design contract the run's agents check the change against. Relative paths resolve from the caller's working directory and `~/` expands; unlike repository selectors, the files may live outside the repository. The daemon reads them once when the run starts, together with the global and repository design-context files; the global [`design_context`](/no-mistakes/reference/global-config/#design_context) entry owns the ordering, size caps, and prompt handling. The flag is accepted only when starting a new run; reattaching with it is refused.
 
 ### Other run options
 
