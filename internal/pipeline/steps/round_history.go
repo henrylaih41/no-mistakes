@@ -255,7 +255,7 @@ func appendHumanDecisionLines(lines []string, stepName string, r *db.StepRound) 
 		return lines
 	}
 	lines = appendDeclinedLines(lines, stepName, r)
-	if selectionSourceValue(r.SelectionSource) != db.RoundSelectionSourceUser {
+	if !db.IsUserFixSelection(selectionSourceValue(r.SelectionSource)) {
 		return lines
 	}
 	selected, _, _ := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
@@ -279,7 +279,7 @@ func declinedFindingLines(r *db.StepRound) []string {
 		return nil
 	}
 	switch selectionSourceValue(r.SelectionSource) {
-	case db.RoundSelectionSourceUser, db.RoundSelectionSourceUserDeclined:
+	case db.RoundSelectionSourceUser, db.RoundSelectionSourceUserOverride, db.RoundSelectionSourceUserDeclined:
 	default:
 		return nil
 	}
@@ -421,7 +421,7 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 	}
 
 	switch selectionSourceValue(r.SelectionSource) {
-	case db.RoundSelectionSourceUser:
+	case db.RoundSelectionSourceUser, db.RoundSelectionSourceUserOverride:
 		if selected != nil {
 			b.WriteString("\nuser_chose_to_fix:")
 			for _, line := range selected {

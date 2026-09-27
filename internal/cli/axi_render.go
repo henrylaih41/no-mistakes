@@ -563,6 +563,11 @@ func gateFields(gate stepView) []toon.Field {
 			"Do not approve or fix to get past a review question: that throws away the paused review pass instead of answering it",
 		}, help...)
 	}
+	if pipeline.HasFixRoundCap(gate.FindingsJSON) {
+		help = []string{
+			"Review has used review.max_fix_rounds and findings remain. Decide: approve to accept them, abort to stop, or run one more fix round with `no-mistakes axi respond --action fix --findings <ids> --fix-override --override-reason \"<why>\"` (the reason is recorded with the round)",
+		}
+	}
 	if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
 		help = []string{
 			"Protected-path refusals require an explicit operator response; Approve is rejected.",

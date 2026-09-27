@@ -551,7 +551,7 @@ func goldFromRound(round *db.StepRound, decision Decision, prState string) Label
 			selected[id] = true
 		}
 	}
-	if decision.SelectionSource == db.RoundSelectionSourceUser {
+	if db.IsUserFixSelection(decision.SelectionSource) {
 		for _, id := range decision.SelectedFindingIDs {
 			id = strings.TrimSpace(id)
 			if id == "" || seen[id] {

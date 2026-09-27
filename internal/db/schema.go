@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     user_findings_json   TEXT,
     selected_finding_ids TEXT,
     selection_source     TEXT,
+    fix_override_reason  TEXT,
     fix_summary          TEXT,
     repair_published     INTEGER NOT NULL DEFAULT 0,
     duration_ms          INTEGER NOT NULL,
@@ -374,4 +375,7 @@ var migrationStatements = []string{
 	// pinned once before the first step so later rounds and eval capture read
 	// the exact bytes the run started with instead of rereading mutable files.
 	`ALTER TABLE runs ADD COLUMN design_context_json TEXT`,
+	// The operator's reason for a review fix round past review.max_fix_rounds,
+	// written with selection_source user_override.
+	`ALTER TABLE step_rounds ADD COLUMN fix_override_reason TEXT`,
 }

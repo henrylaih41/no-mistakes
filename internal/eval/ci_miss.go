@@ -94,7 +94,7 @@ func CIFalseNegativesFromRun(database *db.DB, runID string) ([]FindingGold, erro
 		if round.FindingsJSON == nil || round.SelectedFindingIDs == nil || !repairLandedAfter(rounds, i) {
 			continue
 		}
-		if round.SelectionSource == nil || (*round.SelectionSource != db.RoundSelectionSourceAutoFix && *round.SelectionSource != db.RoundSelectionSourceUser) {
+		if round.SelectionSource == nil || (*round.SelectionSource != db.RoundSelectionSourceAutoFix && !db.IsUserFixSelection(*round.SelectionSource)) {
 			continue
 		}
 		selected := parseSelectedFindingIDs(*round.SelectedFindingIDs)

@@ -469,3 +469,23 @@ func footerContains(plain string, needles ...string) bool {
 	}
 	return false
 }
+
+func TestModel_Yolo_FixRoundCapGateSendsNoAutomaticResponse(t *testing.T) {
+	sock, client, snapshot := captureRespond(t)
+	run := testRun()
+	fj := `{"findings":[{"id":"review-1","severity":"warning","description":"missing error check","action":"auto-fix"},{"id":"review-fix-round-cap","severity":"error","description":"review.max_fix_rounds (3) is reached","action":"ask-user"}],"summary":"cap"}`
+	run.Steps = []ipc.StepResultInfo{{StepName: types.StepReview, Status: types.StepStatusAwaitingApproval, FindingsJSON: &fj}}
+	m := NewModel(sock, client, run)
+	m.yoloMode = true
+	m.stepDiffLoaded[types.StepReview] = true
+	for range 2 {
+		if cmd := m.maybeAutoApproveCmd(); cmd != nil {
+			if msg := cmd(); msg != nil {
+				t.Fatalf("automatic response failed: %v", msg)
+			}
+		}
+	}
+	if calls := snapshot(); len(calls) != 0 {
+		t.Fatalf("a fix-round cap gate was auto-resolved: %+v", calls)
+	}
+}

@@ -992,6 +992,13 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 				fmt.Fprintf(progress, "%s: unvalidated work in the run worktree requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
 				return run, false, nil
 			}
+			// The cap exists to stop automatic fixing, so --yes has no standing
+			// consent here: a fix needs a stated reason and approving would pass
+			// the residual findings unexamined.
+			if pipeline.HasFixRoundCap(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: review.max_fix_rounds is reached with findings remaining, so this gate needs a decision; --yes leaves it awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
 			gateKey := gate.Name + "\x00" + gate.Status
 			if pendingGate == gateKey {
 				// Duplicate or delayed events can race persistence after a response.
@@ -1003,7 +1010,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
 			}
-			if err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, ""); err != nil {
+			if err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, "", ""); err != nil {
 				return nil, false, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
 			}
 			pendingGate = gateKey
@@ -1091,15 +1098,16 @@ func getRunInfo(ctx context.Context, socketPath, runID string) (*ipc.RunInfo, er
 }
 
 // sendRespond issues an approval action to the daemon for a step.
-func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string) error {
+func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, added []types.Finding, approvalReason, fixOverrideReason string) error {
 	params := &ipc.RespondParams{
-		RunID:          runID,
-		Step:           step,
-		Action:         action,
-		FindingIDs:     findingIDs,
-		Instructions:   instructions,
-		AddedFindings:  added,
-		ApprovalReason: approvalReason,
+		RunID:             runID,
+		Step:              step,
+		Action:            action,
+		FindingIDs:        findingIDs,
+		Instructions:      instructions,
+		AddedFindings:     added,
+		ApprovalReason:    approvalReason,
+		FixOverrideReason: fixOverrideReason,
 	}
 	var result ipc.RespondResult
 	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
@@ -1234,8 +1242,8 @@ func successReportHelp(fixes []fixRow) []string {
 }
 
 func newAxiRespondCmd() *cobra.Command {
-	var action, step, findings, instructions, addFinding, reason string
-	var autoYes bool
+	var action, step, findings, instructions, addFinding, reason, overrideReason string
+	var autoYes, fixOverride bool
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -1247,24 +1255,29 @@ func newAxiRespondCmd() *cobra.Command {
 			"tool cap gets a structured return instead of an unbounded hang. Elapsed wait\n" +
 			"is not a failed run: inspect with axi status and reattach. A slow live daemon\n" +
 			"is retried after a health probe rather than reported as I/O failure.\n\n" +
+			"A review gate parked at review.max_fix_rounds takes approve, skip, or abort\n" +
+			"as usual; one more fix there needs --fix-override --override-reason.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackAxiSurface("axi-respond", "/axi/respond", telemetry.Fields{
-				"action":   sanitizeAxiTelemetryAction(action),
-				"auto_yes": autoYes,
+				"action":       sanitizeAxiTelemetryAction(action),
+				"auto_yes":     autoYes,
+				"fix_override": fixOverride,
 			}, func() error {
 				return runAxiRespond(cmd, respondArgs{
-					action:       action,
-					step:         step,
-					findings:     findings,
-					instructions: instructions,
-					addFinding:   addFinding,
-					reason:       reason,
-					autoYes:      autoYes,
-					wait:         wait,
+					action:         action,
+					step:           step,
+					findings:       findings,
+					instructions:   instructions,
+					addFinding:     addFinding,
+					reason:         reason,
+					fixOverride:    fixOverride,
+					overrideReason: overrideReason,
+					autoYes:        autoYes,
+					wait:           wait,
 				})
 			})
 		},
@@ -1275,20 +1288,24 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&reason, "reason", "", "exception reason preserved with Test approval (with --action approve)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
+	cmd.Flags().BoolVar(&fixOverride, "fix-override", false, "run one more review fix round at a gate parked by review.max_fix_rounds (with --action fix and --override-reason)")
+	cmd.Flags().StringVar(&overrideReason, "override-reason", "", "why the extra fix round is warranted, recorded with the round (with --fix-override)")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path and Test unvalidated-work refusals require an explicit response")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
 
 type respondArgs struct {
-	action       string
-	step         string
-	findings     string
-	instructions string
-	addFinding   string
-	reason       string
-	autoYes      bool
-	wait         time.Duration
+	action         string
+	step           string
+	findings       string
+	instructions   string
+	addFinding     string
+	reason         string
+	fixOverride    bool
+	overrideReason string
+	autoYes        bool
+	wait           time.Duration
 }
 
 func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
@@ -1311,6 +1328,15 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
 			"Valid actions: approve, fix, skip")
+	}
+	overrideReason := strings.TrimSpace(ra.overrideReason)
+	switch {
+	case ra.fixOverride && act != types.ActionFix:
+		return emitError(cmd, 2, "--fix-override applies only to --action fix")
+	case ra.fixOverride && overrideReason == "":
+		return emitError(cmd, 2, "--fix-override requires a non-empty --override-reason")
+	case !ra.fixOverride && overrideReason != "":
+		return emitError(cmd, 2, "--override-reason requires --fix-override")
 	}
 
 	env, err := openAxiDaemonEnv()
@@ -1388,7 +1414,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		}
 	}
 
-	if err := sendRespond(env.client, runID, stepName, act, findingIDs, instructions, added, ra.reason); err != nil {
+	if err := sendRespond(env.client, runID, stepName, act, findingIDs, instructions, added, ra.reason, overrideReason); err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("respond to %s: %v", stepName, err))
 	}
 

@@ -126,6 +126,11 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if pipeline.HasUnreadableReviewQuestionHistory(m.stepFindings[step.StepName]) {
 		return nil
 	}
+	// Review stopped fixing at review.max_fix_rounds; what remains is a
+	// decision, not work for another automatic round, exactly as for --yes.
+	if pipeline.HasFixRoundCap(m.stepFindings[step.StepName]) {
+		return nil
+	}
 	if !m.approvalReady(step) {
 		return nil
 	}

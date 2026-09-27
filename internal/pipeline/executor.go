@@ -42,6 +42,9 @@ type approvalResponse struct {
 	instructions   map[string]string
 	addedFindings  []types.Finding
 	approvalReason string
+	// fixOverrideReason authorizes a fix at a gate parked by
+	// review.max_fix_rounds; Respond accepts it nowhere else.
+	fixOverrideReason string
 }
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
@@ -67,6 +70,7 @@ type Executor struct {
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	waitingFixRoundCap     bool                  // the waiting gate is parked at review.max_fix_rounds
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -157,16 +161,22 @@ func (e *Executor) SetGateReconcileTimings(interval, timeout time.Duration) {
 // The step parameter must match the step currently awaiting approval.
 // Returns an error if no step is awaiting approval or if the step name doesn't match.
 func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string) error {
-	return e.RespondWithOverrides(step, action, findingIDs, nil, nil, "")
+	return e.RespondWithOverrides(step, action, findingIDs, nil, nil, "", "")
 }
 
 // RespondWithOverrides is like Respond but also carries per-finding user
 // instructions and user-authored findings. Both are merged into the round's
 // findings on a fix action before the fix agent runs. approvalReason is only
 // accepted for Test approval and is never passed to a fix agent.
-func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string) error {
+// fixOverrideReason is required for, and only accepted with, a fix at a Review
+// gate parked by review.max_fix_rounds (HasFixRoundCap).
+func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason, fixOverrideReason string) error {
 	if approvalReason != "" && (step != types.StepTest || action != types.ActionApprove) {
 		return fmt.Errorf("an approval reason applies only to Test approval")
+	}
+	fixOverrideReason = strings.TrimSpace(fixOverrideReason)
+	if fixOverrideReason != "" && action != types.ActionFix {
+		return fmt.Errorf("a fix override reason applies only to a fix")
 	}
 	// The gate loop dispatches on the action, so an unknown one is refused
 	// here while the gate stays parked for a valid response, rather than
@@ -205,15 +215,24 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return errors.New(refusal)
 	}
+	if action == types.ActionFix && e.waitingFixRoundCap && fixOverrideReason == "" {
+		e.mu.Unlock()
+		return fmt.Errorf("%s has used review.max_fix_rounds: a further fix needs --fix-override --override-reason \"<why>\" (approve, skip, and abort need neither)", step)
+	}
+	if fixOverrideReason != "" && !e.waitingFixRoundCap {
+		e.mu.Unlock()
+		return fmt.Errorf("--fix-override applies only to a review gate parked at review.max_fix_rounds")
+	}
 	e.waiting = false
 	e.mu.Unlock()
 
 	e.approvalCh <- approvalResponse{
-		action:         action,
-		findingIDs:     findingIDs,
-		instructions:   instructions,
-		addedFindings:  addedFindings,
-		approvalReason: approvalReason,
+		action:            action,
+		findingIDs:        findingIDs,
+		instructions:      instructions,
+		addedFindings:     addedFindings,
+		approvalReason:    approvalReason,
+		fixOverrideReason: fixOverrideReason,
 	}
 	return nil
 }
@@ -504,6 +523,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingFixRoundCap = HasFixRoundCap(gate.findings)
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -589,7 +609,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			// findings no rereview ever verified - the exact failure the
 			// append-only set exists to prevent. An answer resolves the
 			// question it answers, never the code findings beside it.
-			state.outstandingFindings = gate.findings
+			state.outstandingFindings = withoutFixRoundCapFinding(gate.findings)
 			state.selectedOutstandingIDs = gate.selectedOutstandingIDs
 			// Inherit the parked gate's fix-round context, or the two answer
 			// paths disagree. A question can be asked by a rereview INSIDE a
@@ -612,10 +632,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			e.emitStepEvent(ipc.EventStepStarted, run, repo, gate.step.Name(), string(types.StepStatusRunning))
 		} else {
 			telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
-			selected := filterFindingsJSON(gate.findings, response.findingIDs)
+			// The reserved cap finding is the gate's, never work for the fixer
+			// or a member of the outstanding set.
+			gateFindings := withoutFixRoundCapFinding(gate.findings)
+			selected := filterFindingsJSON(gateFindings, response.findingIDs)
 			merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
 			selectedForPersistence := merged
-			outstandingFindings := gate.findings
+			outstandingFindings := gateFindings
 			selectedOutstandingIDs := gate.selectedOutstandingIDs
 			if gate.step.Name() == types.StepReview {
 				// APPEND-ONLY: mirror the live path (see the ActionFix case in
@@ -625,12 +648,23 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				// gate.selectedOutstandingIDs would strand a newly selected
 				// finding without verification and could silently drop a
 				// remapped user-added finding from the outstanding set.
-				outstandingFindings = mergeOutstandingFindingsJSON(gate.findings, merged, nil)
+				outstandingFindings = mergeOutstandingFindingsJSON(gateFindings, merged, nil)
 				selectedForPersistence = remapFindingIDsJSON(outstandingFindings, merged)
 				newSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
 				selectedOutstandingIDs = combineFindingIDLists(gate.selectedOutstandingIDs, newSelectedIDs)
 			}
-			if gate.lastRoundID != "" {
+			if response.fixOverrideReason != "" {
+				var userFindingsJSON *string
+				if merged != "" && merged != selected {
+					userFindingsJSON = &selectedForPersistence
+				}
+				if err := e.recordFixOverride(gate.lastRoundID, combineSelectedFindingIDs(response.findingIDs, selectedForPersistence), userFindingsJSON, response.fixOverrideReason); err != nil {
+					if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
+						slog.Warn("failed to mark recovered step as failed in db", "step", gate.step.Name(), "error", dbErr)
+					}
+					return e.failRun(run, repo, fmt.Errorf("step %s: %w", gate.step.Name(), err), ctx)
+				}
+			} else if gate.lastRoundID != "" {
 				allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
 				if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
 					var userFindingsJSON *string
@@ -648,7 +682,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
 			state.fixing = true
 			state.previousFindings = merged
-			state.deferredFindings = removeMatchingFindingsJSON(gate.findings, selected)
+			state.deferredFindings = removeMatchingFindingsJSON(gateFindings, selected)
 			state.outstandingFindings = outstandingFindings
 			state.selectedOutstandingIDs = selectedOutstandingIDs
 		}
@@ -702,7 +736,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				return nil, fmt.Errorf("recovered approval gate has no complete round")
 			}
 			latest := rounds[len(rounds)-1]
-			if latest.FindingsJSON == nil || *latest.FindingsJSON != *result.FindingsJSON {
+			if latest.FindingsJSON == nil || !isRoundGateFindings(*latest.FindingsJSON, *result.FindingsJSON) {
 				return nil, fmt.Errorf("recovered approval gate findings are incomplete")
 			}
 			autoFixes := 0
@@ -1249,11 +1283,18 @@ rounds:
 			e.emitRunEvent(ipc.EventRunUpdated, run, repo)
 		}
 
+		// Review stops fixing on its own once review.max_fix_rounds fix rounds
+		// have run; what remains parks for a decision (see FixRoundCapFindingID).
+		fixRoundCapReached, fixRounds, maxFixRounds, capErr := e.reviewFixRoundCap(stepName, sr.ID)
+		if capErr != nil {
+			return false, "", fmt.Errorf("step %s: %w", stepName, capErr)
+		}
+
 		// Check if auto-fix should be attempted.
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
-		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
+		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && !fixRoundCapReached {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)
@@ -1291,6 +1332,11 @@ rounds:
 			}
 		}
 
+		// gateFindings is what the parked gate shows. It differs from
+		// effectiveFindings only by the reserved cap finding, which never
+		// reaches the round, the outstanding set, or the fixer.
+		gateFindings := effectiveFindings
+		capGate := false
 		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs)) {
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
@@ -1299,6 +1345,17 @@ rounds:
 			stepSkipped = outcome.Skipped
 			skipReason = safeurl.RedactText(outcome.SkipReason)
 			break
+		}
+
+		if fixRoundCapReached {
+			if capped, ok := withFixRoundCapFinding(effectiveFindings, fixRounds, maxFixRounds); ok {
+				gateFindings, capGate = capped, true
+				findingsPtr = &gateFindings
+				if dbErr := e.db.SetStepFindings(sr.ID, gateFindings); dbErr != nil {
+					slog.Warn("failed to set step findings in db", "step", stepName, "error", dbErr)
+				}
+				writeLog(fmt.Sprintf("review.max_fix_rounds (%d) reached after %d fix rounds; parking for a decision", maxFixRounds, fixRounds))
+			}
 		}
 
 		// Freeze execution timer before entering approval wait.
@@ -1311,8 +1368,10 @@ rounds:
 			// limit kills the whole subscription and hides every event after it.
 			// Consumers fetch it on demand from the run's worktree instead
 			// (ipc.MethodGetStepDiff).
+			// A cap gate parks as awaiting_approval even after a fix round:
+			// fix_review tells the automatic resolvers the fix is done.
 			approvalStatus := types.StepStatusAwaitingApproval
-			if sctx.Fixing {
+			if sctx.Fixing && !capGate {
 				approvalStatus = types.StepStatusFixReview
 			}
 
@@ -1323,6 +1382,7 @@ rounds:
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
+			e.waitingFixRoundCap = capGate
 			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the
@@ -1341,9 +1401,9 @@ rounds:
 				e.mu.Unlock()
 				return false, "", fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
 			}
-			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), gateFindings, "", &executionMS)
 
-			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
+			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, gateFindings, true)
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
@@ -1433,7 +1493,19 @@ rounds:
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, newPendingIDs)
 				}
 				nextTrigger = "auto_fix"
-				if currentRoundID != "" {
+				if response.fixOverrideReason != "" {
+					var userFindingsJSON *string
+					if mergedFindings != "" && mergedFindings != selectedFindings {
+						userFindingsJSON = &selectedForPersistence
+					}
+					if err := e.recordFixOverride(currentRoundID, combineSelectedFindingIDs(response.findingIDs, selectedForPersistence), userFindingsJSON, response.fixOverrideReason); err != nil {
+						if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {
+							slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+						}
+						e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", err.Error(), &executionMS)
+						return false, "", fmt.Errorf("step %s: %w", stepName, err)
+					}
+				} else if currentRoundID != "" {
 					allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
 					if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
 						var userFindingsJSON *string

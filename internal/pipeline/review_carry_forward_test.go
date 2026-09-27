@@ -122,7 +122,7 @@ func TestExecutor_ReviewCarryForward_RecoveryPersistsRemappedSelection(t *testin
 	deadline := time.Now().Add(5 * time.Second)
 	var respondErr error
 	for time.Now().Before(deadline) {
-		if respondErr = exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, added, ""); respondErr == nil {
+		if respondErr = exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, added, "", ""); respondErr == nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -340,7 +340,7 @@ func TestExecutor_ReviewCarryForward_UserAddedFindingStaysOutstanding(t *testing
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	added := []types.Finding{{Severity: types.FindingSeverityWarning, File: "logger.go", Description: "audit logger setup", Action: types.ActionAskUser}}
-	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, added, ""); err != nil {
+	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, added, "", ""); err != nil {
 		t.Fatalf("fix with added finding: %v", err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
@@ -405,7 +405,7 @@ func TestExecutor_ReviewCarryForward_RemintsUserAddedCollisionForPendingVerifica
 		Description: "new user note",
 		Action:      types.ActionNoOp,
 	}}
-	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, added, ""); err != nil {
+	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, added, "", ""); err != nil {
 		t.Fatalf("fix with colliding user finding: %v", err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
@@ -1319,7 +1319,7 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundCannotWithdrawTheOperatorsOwnF
 		Line:        10,
 		Description: "the operator's own instruction: keep the /v1 shim",
 		Action:      types.ActionAskUser,
-	}}, ""); err != nil {
+	}}, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)

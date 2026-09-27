@@ -220,6 +220,8 @@ Run the pipeline and decide on its findings as they come up:
     - `--reason "the operator's explanation"` records an explicitly authorized Test exception with `--step test --action approve`.
       This does not grant approval authority; triage ask-user findings as described below.
       Without a reason, Test approval remains effective; an approval past a failing command, `no-go`, or `inconclusive` verdict is reported as an exception with no operator reason supplied.
+    - `--fix-override --override-reason "why"` (with `--action fix`) runs one more
+      review fix round at a `review-fix-round-cap` gate; the reason is recorded with the round.
     - `--add-finding '<json>'` (with `--action fix`) folds a finding you
       spotted yourself - one the pipeline did not surface - into the fix round,
       as a JSON finding object. Use it for a problem you noticed that is not in
@@ -348,6 +350,15 @@ or skip it. Approval is rejected. Have the operator inspect and resolve the
 reported edit, then send `--action fix` to retry the unfinished step.
 The [protected-path reference](https://kunchenguid.github.io/no-mistakes/reference/repo-config/#protected_paths)
 owns the staging guard's scope and limitations.
+
+A `review-fix-round-cap` finding means Review has run `review.max_fix_rounds`
+fix rounds and findings remain; `--yes` stops at that gate without
+responding. Decide it like any `ask-user` finding: approve when the residuals
+are not worth another round (say so in your final report), or, when one is a
+real defect a further round should fix, send
+`--action fix --findings <ids> --fix-override --override-reason "why"`.
+A fix without the override is refused.
+Escalate to the user only when the residual is a product or guarantee choice.
 
 A `test-agent-unvalidated-work` finding means a timed-out Test agent left
 commits or changes no Test turn validated. Approval is rejected, so `--yes`

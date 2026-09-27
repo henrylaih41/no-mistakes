@@ -8,6 +8,11 @@ import (
 const (
 	RoundSelectionSourceUser    = "user"
 	RoundSelectionSourceAutoFix = "auto_fix"
+	// RoundSelectionSourceUserOverride is a user selection made at the review
+	// fix-round cap gate, where a fix needs an explicit reason
+	// (StepRound.FixOverrideReason). It is a human decision like
+	// RoundSelectionSourceUser; IsUserFixSelection reads both.
+	RoundSelectionSourceUserOverride = "user_override"
 	// RoundSelectionSourceUserDeclined records that a human resolved the
 	// round's approval gate without selecting any finding to fix: approve,
 	// skip, or abort. Before this existed, those three resolutions wrote no
@@ -55,6 +60,9 @@ type StepRound struct {
 	// deliberately left unselected.
 	SelectedFindingIDs *string
 	SelectionSource    *string
+	// FixOverrideReason is the operator's reason for a fix selected past the
+	// review fix-round cap; set only with RoundSelectionSourceUserOverride.
+	FixOverrideReason *string
 	// FixSummary, when non-nil, records a fix round's result.
 	FixSummary      *string
 	RepairPublished bool
@@ -77,6 +85,12 @@ type StepRoundStats struct {
 	SelectedForFix     bool
 	AutoSelectedForFix bool
 	PendingFixSource   string
+}
+
+// IsUserFixSelection reports whether a round's selection source records a
+// human choosing findings to fix, with or without a fix-round-cap override.
+func IsUserFixSelection(source string) bool {
+	return source == RoundSelectionSourceUser || source == RoundSelectionSourceUserOverride
 }
 
 // IsFixRound reports whether this round was a fix attempt. Legacy "user_fix"
@@ -255,6 +269,26 @@ func (d *DB) SetStepRoundUserDecision(id string, selectedFindingIDs *string, sou
 	return nil
 }
 
+// SetStepRoundFixOverride records a user's fix selection past the review
+// fix-round cap together with the reason that authorized it, in one write so
+// the override round is never persisted unattributed.
+func (d *DB) SetStepRoundFixOverride(id string, selectedFindingIDs *string, userFindingsJSON *string, reason string) error {
+	if reason == "" {
+		return fmt.Errorf("set step round fix override: empty reason")
+	}
+	res, err := d.sql.Exec(
+		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, user_findings_json = ?, fix_override_reason = ? WHERE id = ?`,
+		selectedFindingIDs, RoundSelectionSourceUserOverride, userFindingsJSON, reason, id,
+	)
+	if err != nil {
+		return fmt.Errorf("set step round fix override: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("set step round fix override: round %s not found", id)
+	}
+	return nil
+}
+
 // SetStepRoundSelectedFindingIDs preserves the old API for callers that do not
 // need to distinguish how the selection was made.
 func (d *DB) SetStepRoundSelectedFindingIDs(id string, selectedFindingIDs *string) error {
@@ -277,7 +311,7 @@ func (d *DB) SetStepRoundUserFindings(id string, userFindingsJSON *string) error
 // GetRoundsByStep returns all rounds for a step result, ordered by round number.
 func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	rows, err := d.sql.Query(
-		`SELECT id, step_result_id, round, trigger_type, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, repair_published, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
+		`SELECT id, step_result_id, round, trigger_type, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_override_reason, fix_summary, repair_published, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
 		stepResultID,
 	)
 	if err != nil {
@@ -287,7 +321,7 @@ func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	var rounds []*StepRound
 	for rows.Next() {
 		r := &StepRound{}
-		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.FindingsJSON, &r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA, &r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary, &r.RepairPublished, &r.DurationMS, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.FindingsJSON, &r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA, &r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixOverrideReason, &r.FixSummary, &r.RepairPublished, &r.DurationMS, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan step round: %w", err)
 		}
 		rounds = append(rounds, r)

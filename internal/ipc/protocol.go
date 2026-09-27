@@ -259,6 +259,9 @@ type RespondParams struct {
 	Instructions   map[string]string    `json:"instructions,omitempty"`
 	AddedFindings  []types.Finding      `json:"added_findings,omitempty"`
 	ApprovalReason string               `json:"approval_reason,omitempty"` // Test approval only
+	// FixOverrideReason authorizes a fix at a Review gate parked by
+	// review.max_fix_rounds; the executor refuses it anywhere else.
+	FixOverrideReason string `json:"fix_override_reason,omitempty"`
 }
 
 // CancelRunParams cancels an active pipeline run.
