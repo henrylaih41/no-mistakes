@@ -124,6 +124,7 @@ no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --yes
 no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
 no-mistakes axi run --intent "the user's goal" --no-publish-intent
+no-mistakes axi run --intent "the user's goal" --design-context docs/architecture.md
 ```
 
 | Flag            | Type     | Default | Description                                                                                          |
@@ -188,6 +189,8 @@ If the configured native agent or ACP runner is unavailable, the run fails befor
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
+So is a Review gate parked at [`review.max_fix_rounds`](/no-mistakes/reference/repo-config/#reviewmax_fix_rounds) (the `review-fix-round-cap` finding): `--yes` stops there and leaves the decision to the driving agent.
+Actionable findings below [`review.fix_round_min_severity`](/no-mistakes/reference/global-config/#reviewfix_round_min_severity) arrive as `no-op` follow-ups, and `--yes` never selects them.
 So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so `--yes` stops at it and leaves the choice between `--action fix` and `no-mistakes axi abort` to the operator (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
 So is a Review gate carrying `review-fix-round-cap`: `--yes` stops at it and leaves the decision to the operator (see [`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds)).
 Without `--yes`, an agent driving `axi run` triages each `action: ask-user` finding before responding: it rules on implementation or scope questions the user's intent already settles, and stops to relay a product or guarantee choice to the user with the finding's ID, file, and full description.
@@ -253,6 +256,7 @@ no-mistakes axi respond --action approve
 no-mistakes axi respond --action fix --findings F1,F2 --instructions "optional guidance"
 no-mistakes axi respond --action fix --add-finding '{"description":"...","action":"auto-fix"}'
 no-mistakes axi respond --action skip
+no-mistakes axi respond --action fix --findings F1 --fix-override --override-reason "the residual is a real crash"
 ```
 
 | Flag             | Type     | Default       | Description                                                          |
@@ -274,6 +278,8 @@ The step retains its findings and exit code, and the reason is durable local evi
 Revalidation, a new fix round, or skipping the step clears that current-step approval so a later result cannot inherit it.
 This is separate from the configured-command waiver and trusted repository opt-in used by [PR enforcement](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation); neither that policy nor approval authority changes.
 `--instructions` remains fix guidance, not an approval-reason input.
+
+A Review gate parked at [`review.max_fix_rounds`](/no-mistakes/reference/repo-config/#reviewmax_fix_rounds) carries the reserved `review-fix-round-cap` finding. Approve, skip, and abort work there as usual. A fix is refused unless it carries `--fix-override` and a non-empty `--override-reason`; the reason is stored as `step_rounds.fix_override_reason` with selection source `user_override`, and it buys exactly one more round. Findings left after that round park at the cap again. `--fix-override` is refused at any other gate.
 
 After the explicit response, `--yes` uses the same [auto-resolution behavior and exceptions as `axi run --yes`](#no-mistakes-axi-run).
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome, subject to the same default `--wait 8m` boundary as `axi run`. That boundary also covers its initial active-run and run-state reads plus event-subscription acknowledgement, so a caller can interrupt establishment as well as the later event wait.

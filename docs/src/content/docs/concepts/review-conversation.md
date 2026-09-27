@@ -494,12 +494,15 @@ this run's own `base..head` scope.
 
 ## Round cap
 
-The conversation adds no round cap of its own. The one cap on Review is
+The conversation adds no cap of its own. The only limit on Review rounds is
 [`review.max_fix_rounds`](/no-mistakes/reference/global-config/#reviewmax_fix_rounds),
-a fork decision that supersedes the captain's no-cap ruling of 2026-09-15. It
-counts fix rounds only: an answer round is not a fix round, so answering
-questions never spends it, and a review question is never a residual that
-makes the cap park.
+a fork decision that supersedes the captain's no-cap ruling of 2026-09-15.
+It counts fix rounds only: an answer round changes no code and is not a fix
+round, so answering questions never uses up the cap. At the cap, Review parks
+on the ordinary approval gate with the reserved `review-fix-round-cap`
+finding. That finding is not a review question, so it cannot be answered, and
+it lists only non-question residuals. An open question on the same gate is
+still settled by `axi answer`.
 
 ## The PR body
 

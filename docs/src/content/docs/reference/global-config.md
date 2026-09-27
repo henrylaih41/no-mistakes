@@ -69,6 +69,14 @@ forge_profiles:
   gitlab-work:
     glab_config_dir: ~/.config/glab-work
 
+design_context:
+  files:
+    - ~/.agents/QUALITY.md
+
+review:
+  max_fix_rounds: 3
+  fix_round_min_severity: warning
+
 auto_fix:
   rebase: 3
   review: 0
@@ -97,10 +105,6 @@ intent:
   slack_days: 3
   disabled_readers: []
   # publish_intent: false # Keep the generated Intent section out of PR bodies by default
-
-design_context:
-  files:
-    - ~/.agents/QUALITY.md
 
 test:
   evidence:
@@ -726,6 +730,27 @@ The key is matched against the checkout path recorded at `init`. After moving a 
 
 `no-mistakes init --worktree-root <dir>` prints the exact entry to add for the checkout you are initializing. The global config is hand-maintained, so init never rewrites it for you.
 
+### review
+
+Machine-wide Review fix-loop policy. Global config carries only the two keys below; review prompts and routing live in repository config and in [`review_agents`](#review_agents).
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `review.max_fix_rounds` | `int` | `3` | Fix rounds Review may run in one step before it parks for a decision; `0` removes the cap. The trusted repository [`review.max_fix_rounds`](/no-mistakes/reference/repo-config/#reviewmax_fix_rounds) overrides it |
+| `review.fix_round_min_severity` | `string` | `warning` | Lowest severity (`info`, `warning`, or `error`) that Review fixes, selects automatically, or pauses on |
+
+#### review.max_fix_rounds
+
+The count covers every fix round in one Review step, automatic or user-selected, and is read from the persisted rounds, so it survives a daemon restart. After a round with fixable findings left, once that many fix rounds have run, Review stops auto-fixing. It parks on the ordinary `awaiting_approval` gate with a reserved `ask-user` finding, `review-fix-round-cap`, that names the residual findings. A clean rereview completes as usual. At the cap gate, approve, skip, and abort work as before. A fix needs [`axi respond --fix-override --override-reason`](/no-mistakes/reference/cli/#no-mistakes-axi-respond); it runs exactly one more round and records the reason. AXI `--yes` and TUI yolo stop at the gate.
+
+#### review.fix_round_min_severity
+
+Actionable Review findings (`auto-fix` or `ask-user`) below this severity become follow-ups: the action becomes `no-op`, the description keeps the reviewer's original action, and the finding carries `disposition: follow-up`. Follow-ups never start a fix round or pause the run, AXI `--yes` and TUI yolo leave them unselected, and the PR body lists them under a "Follow-ups (not fixed in-round)" heading. An operator can still select one by id for a manual fix. A finding that was already `no-op` stays an ordinary informational finding, and an unrecognized severity is never demoted. `info` turns demotion off; `error` also carries warnings as follow-ups. A reviewer cannot mark its own findings as follow-ups.
+
+#### Retired keys
+
+`review.max_parallel` and a disabled `review_loop` block (`review_loop.enabled: false`) are accepted with a deprecation warning and have no effect, so older configs and captured eval cases still load. `review_loop.enabled: true` fails config loading, because the post-PR review loop was removed. `review.agent` is rejected; use [`review_agents`](#review_agents) instead.
+
 ### auto_fix
 
 Maximum follow-up auto-fix attempts per step. Set a step to `0` to disable the follow-up auto-fix loop, so findings require manual approval.
@@ -748,38 +773,6 @@ For empty `commands.lint`, the document step's combined housekeeping pass also a
 Legacy alias: `auto_fix.babysit`.
 
 These are global defaults. Per-repo config can override individual steps.
-
-### review.max_fix_rounds
-
-How many Review fix rounds a run may take before Review stops fixing on its own. Every fix round counts, automatic or operator-selected, and the count is read from the persisted rounds, so it survives a daemon restart. Once the cap is reached and fixable findings remain, Review parks on the ordinary approval gate with the reserved `ask-user` finding `review-fix-round-cap`; the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns that gate's behavior.
-
-|         |       |
-| ------- | ----- |
-| Type    | `int` |
-| Default | `3`   |
-
-```yaml
-review:
-  max_fix_rounds: 5
-```
-
-`0` removes the cap, and a negative value is a config error. A repository can override it from its trusted default branch with [`review.max_fix_rounds`](/no-mistakes/reference/repo-config/#reviewmax_fix_rounds).
-
-### review.fix_round_min_severity
-
-Minimum finding severity that Review treats as fix-round work. Actionable review findings ranked below it are carried as `no-op` follow-ups: they never park the run, are left out of `axi --yes` and the TUI's default selection, and are listed in the PR body. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns the follow-up behavior.
-
-|         |                                  |
-| ------- | -------------------------------- |
-| Type    | `string` (`info`, `warning`, `error`) |
-| Default | `warning`                        |
-
-```yaml
-review:
-  fix_round_min_severity: error
-```
-
-The default carries `info` findings as follow-ups, `error` also carries warnings, and `info` carries nothing. The key is global-only, and an unknown value is a config error.
 
 ### ci.rerun_transient
 

@@ -13,7 +13,7 @@ The daemon also reads `document.instructions`, `review.conversation`, `review.pa
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.live_validation`, and `test.evidence.branch`.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `design_context`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.live_validation`, and `test.evidence.branch`.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -44,6 +44,7 @@ document:
 # and extra guidance scoped to the paths a change touches.
 review:
   conversation: true
+  max_fix_rounds: 3
   path_instructions:
     - path: "internal/scm/**"
       instructions: |
@@ -105,6 +106,8 @@ intent:
   disabled_readers: []
 
 test:
+  # Live-validation evidence turn: off (the default) or on. Read only from the trusted default branch.
+  live_validation: on
   # Product startup and live-validation runbook, read only from the trusted default branch.
   instructions: |
     Start the app with `make dev`, then drive the checkout flow in a browser.
