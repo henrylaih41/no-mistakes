@@ -1,6 +1,8 @@
 package config
 
 import (
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -75,8 +77,22 @@ review_loop:
   enabled: false
 `
 
+// exampleHome stands in for the /Users/example home in the YAML above, as an
+// absolute path on the host running the test: design_context.files entries
+// must be absolute, and "/Users/..." is not absolute on Windows.
+func exampleHome() string {
+	if runtime.GOOS == "windows" {
+		return `C:\Users\example`
+	}
+	return "/Users/example"
+}
+
+func onThisHost(yaml string) []byte {
+	return []byte(strings.ReplaceAll(yaml, "/Users/example", exampleHome()))
+}
+
 func TestCutoverGlobalConfigLoadsAndMerges(t *testing.T) {
-	global, err := LoadGlobalFromBytes([]byte(cutoverGlobalYAML))
+	global, err := LoadGlobalFromBytes(onThisHost(cutoverGlobalYAML))
 	if err != nil {
 		t.Fatalf("LoadGlobalFromBytes: %v", err)
 	}
@@ -87,14 +103,14 @@ func TestCutoverGlobalConfigLoadsAndMerges(t *testing.T) {
 	if got := merged.ReviewAgents["reviewer"].Agent; got != "codex" {
 		t.Fatalf("review_agents.reviewer.agent = %q, want codex", got)
 	}
-	want := []string{"/Users/example/.agents/QUALITY.md", "/Users/example/.agents/REVIEW-QUALITY.md"}
+	want := []string{filepath.Join(exampleHome(), ".agents", "QUALITY.md"), filepath.Join(exampleHome(), ".agents", "REVIEW-QUALITY.md")}
 	if strings.Join(merged.DesignContext.GlobalFiles, ",") != strings.Join(want, ",") {
 		t.Fatalf("design_context global files = %v, want %v", merged.DesignContext.GlobalFiles, want)
 	}
 }
 
 func TestCapturedEvalGlobalConfigStillLoads(t *testing.T) {
-	global, err := LoadGlobalFromBytes([]byte(capturedEvalGlobalYAML))
+	global, err := LoadGlobalFromBytes(onThisHost(capturedEvalGlobalYAML))
 	if err != nil {
 		t.Fatalf("captured eval global config must load: %v", err)
 	}
@@ -102,7 +118,7 @@ func TestCapturedEvalGlobalConfigStillLoads(t *testing.T) {
 	if merged.Review.MaxFixRounds != 3 {
 		t.Fatalf("max_fix_rounds = %d, want 3", merged.Review.MaxFixRounds)
 	}
-	without, err := LoadGlobalFromBytes([]byte(strings.Replace(capturedEvalGlobalYAML, "  max_parallel: 2\n", "", 1)))
+	without, err := LoadGlobalFromBytes(onThisHost(strings.Replace(capturedEvalGlobalYAML, "  max_parallel: 2\n", "", 1)))
 	if err != nil {
 		t.Fatalf("LoadGlobalFromBytes without max_parallel: %v", err)
 	}
