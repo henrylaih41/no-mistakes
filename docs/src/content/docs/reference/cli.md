@@ -512,6 +512,11 @@ inspect `no-mistakes axi status` and follow its custody guidance, then use
 `no-mistakes axi run` to submit local commits. The refusal leaves both branches
 unchanged; rerun never replaces its selected head with the caller's head.
 The same check applies to `axi run`'s rerun fallback after an up-to-date push.
+When the branch has no recorded run at all, `rerun` refuses with
+`no previous run for branch <branch>`. Only `axi run`'s fallback may then start
+the branch's first run - for a gate branch whose push notification was lost,
+for example while the daemon was down - and only from a clean worktree whose
+HEAD is exactly the gate head.
 Dirty worktrees and callers without clean-head evidence, including TUI reruns,
 retain the existing selection behavior.
 If the selected prior run has explicit intent, rerun inherits it exactly by default;
