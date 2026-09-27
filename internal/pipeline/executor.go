@@ -1169,10 +1169,12 @@ rounds:
 			// file instead poisons that path in reportedFiles. Either way an
 			// answered-and-verified finding would stay outstanding for a reason
 			// that has nothing to do with it.
-			verificationFindings := dropReviewQuestionFindingsJSON(roundFindings)
-			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
-			// Follow-ups are this round's report, never carried debt.
-			outstandingFindings = dropFollowUpFindingsJSON(outstandingFindings, combineFindingIDLists(pendingVerificationIDs, selectedOutstandingIDs))
+			//
+			// Follow-ups are this round's report, never carried debt, and an
+			// unselected one is no verification evidence either.
+			selectedFindings := filterFindingsJSON(outstandingFindings, combineFindingIDLists(pendingVerificationIDs, selectedOutstandingIDs))
+			verificationFindings := dropFollowUpFindingsJSON(dropReviewQuestionFindingsJSON(roundFindings), selectedFindings)
+			outstandingFindings = dropFollowUpFindingsJSON(dropReviewQuestionFindingsJSON(outstandingFindings), selectedFindings)
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no

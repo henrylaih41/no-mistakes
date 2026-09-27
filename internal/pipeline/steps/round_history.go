@@ -258,7 +258,7 @@ func appendHumanDecisionLines(lines []string, stepName string, r *db.StepRound) 
 	if selectionSourceValue(r.SelectionSource) != db.RoundSelectionSourceUser {
 		return lines
 	}
-	selected, _ := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
+	selected, _, _ := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
 	for _, line := range selected {
 		lines = append(lines, fmt.Sprintf("  - %s round %d user chose to fix: %s", sanitizePromptText(stepName), r.Round, line))
 	}
@@ -283,7 +283,7 @@ func declinedFindingLines(r *db.StepRound) []string {
 	default:
 		return nil
 	}
-	_, unselected := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
+	_, unselected, _ := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
 	return unselected
 }
 
@@ -408,8 +408,7 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 		}
 	}
 
-	selected, unselected := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
-	followUps := followUpFindingLines(r.FindingsJSON, r.SelectedFindingIDs)
+	selected, unselected, followUps := partitionRoundFindings(r.FindingsJSON, r.UserFindingsJSON, r.SelectedFindingIDs)
 
 	if r.FindingsJSON != nil && strings.TrimSpace(*r.FindingsJSON) != "" {
 		if items := renderRoundFindingLines(*r.FindingsJSON); len(items) > 0 {
@@ -530,40 +529,18 @@ func parseRoundFindingLines(raw string) []roundFindingLine {
 	return lines
 }
 
-// followUpFindingLines returns the round's follow-ups nobody selected. They
-// are listed apart from every decision block: a follow-up was never presented
-// for a decision, so its absence from a selection is not a human declining it.
-func followUpFindingLines(findingsJSON *string, selectedJSON *string) []string {
-	if findingsJSON == nil || strings.TrimSpace(*findingsJSON) == "" {
-		return nil
-	}
-	selectedSet := map[string]bool{}
-	if selectedJSON != nil {
-		var selected []string
-		if err := json.Unmarshal([]byte(*selectedJSON), &selected); err == nil {
-			for _, id := range selected {
-				selectedSet[id] = true
-			}
-		}
-	}
-	var lines []string
-	for _, item := range parseRoundFindingLines(*findingsJSON) {
-		if item.FollowUp && !selectedSet[item.ID] {
-			lines = append(lines, item.Line)
-		}
-	}
-	return lines
-}
-
 // partitionRoundFindings splits the round's findings into (selected,
-// unselected) lists using SelectedFindingIDs as the source of truth for what
-// was chosen. An explicitly selected follow-up belongs to selected; an
-// unselected follow-up belongs to neither list. A nil return for either side indicates the information is
-// unavailable, so the caller can omit the line entirely rather than emit a
-// misleading empty set.
-func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, selectedJSON *string) (selected []string, unselected []string) {
+// unselected, followUps) lists using SelectedFindingIDs as the source of truth
+// for what was chosen. An explicitly selected follow-up belongs to selected;
+// an unselected follow-up belongs only to followUps, which is listed apart
+// from every decision block: a follow-up was never presented for a decision,
+// so its absence from a selection is not a human declining it. A nil return
+// for selected or unselected indicates the selection is unavailable, so the
+// caller can omit the line entirely rather than emit a misleading empty set;
+// followUps is still returned then, with nothing counted as selected.
+func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, selectedJSON *string) (selected []string, unselected []string, followUps []string) {
 	if findingsJSON == nil || strings.TrimSpace(*findingsJSON) == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	allFindings := parseRoundFindingLines(*findingsJSON)
 	selectedFindings := allFindings
@@ -571,19 +548,23 @@ func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, sele
 		selectedFindings = parseRoundFindingLines(*userFindingsJSON)
 	}
 
-	if selectedJSON == nil {
-		return nil, nil
-	}
 	var parsed []string
-	if err := json.Unmarshal([]byte(*selectedJSON), &parsed); err != nil {
-		return nil, nil
-	}
+	selectionKnown := selectedJSON != nil && json.Unmarshal([]byte(*selectedJSON), &parsed) == nil
 	selectedSet := make(map[string]bool, len(parsed))
 	for _, id := range parsed {
 		if id == "" {
 			continue
 		}
 		selectedSet[id] = true
+	}
+
+	for _, item := range allFindings {
+		if item.FollowUp && !(item.ID != "" && selectedSet[item.ID]) {
+			followUps = append(followUps, item.Line)
+		}
+	}
+	if !selectionKnown {
+		return nil, nil, followUps
 	}
 
 	selected = make([]string, 0, len(selectedSet))
@@ -609,7 +590,7 @@ func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, sele
 			selected = append(selected, marshalSanitizedIDList([]string{id}))
 		}
 	}
-	return selected, unselected
+	return selected, unselected, followUps
 }
 
 func selectionSourceValue(source *string) string {
