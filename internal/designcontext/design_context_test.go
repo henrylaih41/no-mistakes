@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -317,7 +318,8 @@ func TestMaterializeFailsWhenCLIFilesExhaustCapsBeforeAGlobalFile(t *testing.T) 
 	writeFile(t, global, "machine charter")
 
 	_, err := Materialize(t.TempDir(), cli, []string{global}, nil)
-	if err == nil || !strings.Contains(err.Error(), global) || !strings.Contains(err.Error(), "--design-context") {
+	// The error quotes the path (%q), which doubles Windows backslashes.
+	if err == nil || !strings.Contains(err.Error(), strconv.Quote(global)) || !strings.Contains(err.Error(), "--design-context") {
 		t.Fatalf("Materialize() error = %v, want the dropped global file named", err)
 	}
 }
