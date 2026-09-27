@@ -91,7 +91,7 @@ func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
 	// A trusted lint command that fails until the fix turn creates its
 	// sentinel gives the Lint step a gate and a fix turn of its own, so the
 	// journey can check that step's rendered prompt too.
-	pushMainRepoConfig(t, h, "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\nallow_repo_commands: true\ncommands:\n  lint: 'test -f lint.ok'\n")
+	pushMainRepoConfig(t, h, "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\nallow_repo_commands: true\ncommands:\n  lint: 'test -f lint.ok'\n"+liveValidationOn)
 	branch := "feature/linear-decision"
 	h.CommitChange(branch, "feature.txt", "incorrect feature\n", "feature")
 	worktree := h.AddWorktree(branch)

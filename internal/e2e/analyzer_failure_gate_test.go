@@ -77,7 +77,7 @@ func TestAnalyzerEvidenceFailuresFailPipelineJourney(t *testing.T) {
 	}
 
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: scenario})
-	h.CommitChange("main", ".no-mistakes.yaml", "ignore_patterns:\n  - '*.generated.go'\n", "ignore generated test fixture")
+	h.CommitChange("main", ".no-mistakes.yaml", "ignore_patterns:\n  - '*.generated.go'\n"+liveValidationOn, "ignore generated test fixture")
 	if out, err := h.runGit(context.Background(), h.WorkDir, "push", "origin", "main"); err != nil {
 		t.Fatalf("push trusted test config: %v\n%s", err, out)
 	}

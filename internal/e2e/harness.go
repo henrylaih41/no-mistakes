@@ -271,7 +271,11 @@ func (h *Harness) initGitRepos() {
 		allowRepoCommands = *h.allowRepoCommands
 	}
 	repoConfig := filepath.Join(h.WorkDir, ".no-mistakes.yaml")
-	repoCfg := fmt.Sprintf("ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\nallow_repo_commands: %t\n", allowRepoCommands)
+	// test.live_validation is trusted-only and defaults off (the fork's
+	// pre-live-validation Test); the journeys exercise the evidence turn, so
+	// the harness opts in. A test that rewrites the trusted config and still
+	// needs the evidence turn keeps this line.
+	repoCfg := fmt.Sprintf("ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\nallow_repo_commands: %t\n%s", allowRepoCommands, liveValidationOn)
 	if err := os.WriteFile(repoConfig, []byte(repoCfg), 0o644); err != nil {
 		h.t.Fatalf("write repo config: %v", err)
 	}
@@ -280,6 +284,10 @@ func (h *Harness) initGitRepos() {
 	mustGit(h.WorkDir, "remote", "add", "origin", h.UpstreamDir)
 	mustGit(h.WorkDir, "push", "-u", "origin", "main")
 }
+
+// liveValidationOn is the trusted repo-config line that turns on Test's live
+// validation (the evidence turn and its verdict contract).
+const liveValidationOn = "test:\n  live_validation: on\n"
 
 // Run invokes the no-mistakes binary in the working repo and returns
 // (stdout+stderr, error). It propagates the harness env via os.Environ().

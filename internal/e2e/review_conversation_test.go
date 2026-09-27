@@ -341,6 +341,7 @@ allow_repo_commands: true
 review:
   conversation: true
 test:
+  live_validation: on
   evidence:
     store_in_repo: true
     attach_media: false
