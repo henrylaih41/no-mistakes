@@ -1114,11 +1114,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		if !bootstrapFirstRun || callerHeadSHA == "" || callerHeadSHA != gateHead {
 			return "", fmt.Errorf("no previous run for branch %s", branch)
 		}
-		intentSource := ""
-		if strings.TrimSpace(intent) != "" {
-			intentSource = db.RunIntentSourceAgent
-		}
-		return m.startRunWithIntentSource(ctx, repo, branch, gateHead, git.ZeroSHA, "rerun", skipSteps, intent, intentSource, strings.TrimSpace(prBaseBranch), omitIntent, "", planID, designContextPaths, profiles...)
+		return m.startRun(ctx, repo, branch, gateHead, git.ZeroSHA, "rerun", skipSteps, intent, strings.TrimSpace(prBaseBranch), omitIntent, planID, designContextPaths, profiles...)
 	}
 	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
 	if err != nil {
