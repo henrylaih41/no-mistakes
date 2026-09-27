@@ -3347,10 +3347,11 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		Intent:         intent,
 		Test:           test,
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
-		// repo is the EffectiveRepoConfig result, so both values are already
-		// trusted-only. Like document.instructions and test.instructions, the
-		// review block is resolved from the repository alone - global config
-		// carries no review block to overlay.
+		// repo is the EffectiveRepoConfig result, so the repository values are
+		// already trusted-only. Conversation and path_instructions come from the
+		// repository alone; the fix-round cap overlays the global review policy
+		// with the repository's value, and the follow-up severity floor is
+		// global-only (see GlobalReviewRaw).
 		Review: Review{
 			Conversation:        repo.Review.Conversation,
 			PathInstructions:    resolvePathInstructions(repo.Review.PathInstructions),
