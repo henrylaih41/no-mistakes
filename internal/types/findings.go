@@ -628,7 +628,10 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Line = wire.Line
 	f.Description = wire.Description
 	f.Action = wire.Action
-	if strings.EqualFold(strings.TrimSpace(wire.Action), legacyActionAskMaster) {
+	// Any spelling of ask-user, including the retired ask-master that
+	// NormalizeFindingAction owns, is stored as ask-user. Other values are
+	// kept exactly as written.
+	if NormalizeFindingAction(wire.Action) == ActionAskUser {
 		f.Action = ActionAskUser
 	}
 	f.Source = wire.Source
