@@ -1070,7 +1070,7 @@ func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
 // retarget can prove it is moving the same still-open review object.
 // A supplied clean caller head must match the selected head before any run
 // starts or is superseded. It never changes head selection.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, callerHeadSHA, planID string, designContextPaths []string, profiles ...*agentcfg.PiProfile) (string, error) {
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, callerHeadSHA string, bootstrapFirstRun bool, planID string, designContextPaths []string, profiles ...*agentcfg.PiProfile) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -1107,10 +1107,11 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if latestForBranch == nil {
 		// No run to replay, but the gate already holds the branch: a push whose
 		// hook notification was lost (daemon down or restarting) mirrored the
-		// ref without starting a run. A clean caller whose HEAD is exactly the
-		// gate head may start the branch's first run. The base is the zero SHA,
-		// as for a new branch's first push; steps resolve the real merge base.
-		if callerHeadSHA == "" || callerHeadSHA != gateHead {
+		// ref without starting a run. `axi run` (bootstrapFirstRun) with a
+		// clean HEAD exactly at the gate head may start the branch's first run;
+		// plain `rerun` stays replay-only. The base is the zero SHA, as for a
+		// new branch's first push; steps resolve the real merge base.
+		if !bootstrapFirstRun || callerHeadSHA == "" || callerHeadSHA != gateHead {
 			return "", fmt.Errorf("no previous run for branch %s", branch)
 		}
 		intentSource := ""

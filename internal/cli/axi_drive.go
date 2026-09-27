@@ -706,6 +706,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	params.PiProfile = profile
 	params.VerificationPlanID = planID
 	params.DesignContextPaths = designContextPaths
+	params.BootstrapFirstRun = true
 	params.CallerHeadSHA, err = rerunCallerHead(ctx)
 	if err != nil {
 		return "", err

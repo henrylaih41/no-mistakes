@@ -237,6 +237,10 @@ type RerunParams struct {
 	// CallerHeadSHA is a clean caller worktree's HEAD, when known. It guards
 	// the daemon's selected head; it never supplies a replacement run head.
 	CallerHeadSHA string `json:"caller_head_sha,omitempty"`
+	// BootstrapFirstRun lets a branch with no recorded run start its first
+	// run when CallerHeadSHA is exactly the gate head. Only `axi run`'s
+	// already-pushed fallback sets it; plain `rerun` stays replay-only.
+	BootstrapFirstRun bool `json:"bootstrap_first_run,omitempty"`
 }
 
 // SubscribeParams starts an event stream for a run.

@@ -11,8 +11,9 @@ import (
 )
 
 // The gate holds the branch but no run was ever recorded (a push whose hook
-// notification was lost). A caller whose clean HEAD is the gate head starts
-// the first run; anything else keeps the replay-only error.
+// notification was lost). `axi run`'s fallback, whose clean HEAD is the gate
+// head, starts the first run; anything else, including a plain rerun on that
+// exact head, keeps the replay-only error.
 func TestRerunBootstrapsTheFirstRunOnlyForTheGateHead(t *testing.T) {
 	review := &mockPassStep{name: types.StepReview}
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
@@ -26,19 +27,21 @@ func TestRerunBootstrapsTheFirstRunOnlyForTheGateHead(t *testing.T) {
 	}
 	defer client.Close()
 
-	for name, callerHead := range map[string]string{
-		"no caller head":         "",
-		"mismatched caller head": strings.Repeat("d", 40),
+	for name, params := range map[string]ipc.RerunParams{
+		"no caller head":         {BootstrapFirstRun: true},
+		"mismatched caller head": {BootstrapFirstRun: true, CallerHeadSHA: strings.Repeat("d", 40)},
+		"plain rerun":            {CallerHeadSHA: headSHA},
 	} {
+		params.RepoID, params.Branch = "bootstrap-repo", "main"
 		var result ipc.RerunResult
-		if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: "bootstrap-repo", Branch: "main", CallerHeadSHA: callerHead}, &result); err == nil || !strings.Contains(err.Error(), "no previous run") {
+		if err := client.Call(ipc.MethodRerun, &params, &result); err == nil || !strings.Contains(err.Error(), "no previous run") {
 			t.Fatalf("%s: err = %v, want 'no previous run'", name, err)
 		}
 	}
 
 	var boot ipc.RerunResult
 	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
-		RepoID: "bootstrap-repo", Branch: "main", CallerHeadSHA: headSHA, Intent: "ship the thing",
+		RepoID: "bootstrap-repo", Branch: "main", CallerHeadSHA: headSHA, BootstrapFirstRun: true, Intent: "ship the thing",
 	}, &boot); err != nil {
 		t.Fatalf("bootstrap rerun: %v", err)
 	}
