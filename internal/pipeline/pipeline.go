@@ -74,6 +74,11 @@ type StepContext struct {
 	// authoritative acceptance criteria; an agent name ("claude", "codex", ...)
 	// means it was inferred from a transcript (a hint). Empty when no intent exists.
 	IntentSource string
+	// DesignContext is the design contract materialized once at run start
+	// (runs.design_context_json). Steps render it into their prompts so agents
+	// check the change against agreed decisions without rereading mutable
+	// files in later rounds.
+	DesignContext types.DesignContext
 	// UncertifiedFromSHA/ToSHA/SourceRunID name a previous run's fixer
 	// commits on this branch whose re-review did not complete. They are set
 	// on a later run's initial review (Fixing==false) so that review still

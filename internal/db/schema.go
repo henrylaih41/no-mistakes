@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS runs (
     omit_intent          INTEGER NOT NULL DEFAULT 0,
     pi_profile           TEXT,
     verification_plan    TEXT,
+    design_context_json  TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -369,4 +370,8 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN workload_lines INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN finding_count INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN approval_reason TEXT`,
+	// The run's materialized design context (types.DesignContext JSON),
+	// pinned once before the first step so later rounds and eval capture read
+	// the exact bytes the run started with instead of rereading mutable files.
+	`ALTER TABLE runs ADD COLUMN design_context_json TEXT`,
 }

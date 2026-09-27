@@ -63,6 +63,10 @@ type sourceRun struct {
 	NoMistakesBuildSHA string `json:"no_mistakes_build_sha,omitempty"`
 	CreatedAt          int64  `json:"created_at"`
 	UpdatedAt          int64  `json:"updated_at"`
+	// DesignContextJSON is the run's pinned design context. It is written
+	// verbatim to original/design-context.json rather than into run.json, so
+	// a replay reads exactly the bytes the live review saw.
+	DesignContextJSON string `json:"-"`
 }
 
 type sourceStep struct {
@@ -384,6 +388,11 @@ func writeCase(ctx context.Context, store *Store, gateDir string, c Case, global
 			return fmt.Errorf("write case %s: %w", item.path, err)
 		}
 	}
+	if run.DesignContextJSON != "" {
+		if err := os.WriteFile(filepath.Join(tmp, designContextCaseFile), []byte(run.DesignContextJSON), 0o644); err != nil {
+			return fmt.Errorf("write case %s: %w", designContextCaseFile, err)
+		}
+	}
 	if err := os.Rename(tmp, c.Dir); err != nil {
 		return fmt.Errorf("publish captured case: %w", err)
 	}
@@ -403,6 +412,9 @@ func sourceRunFor(run *db.Run) sourceRun {
 	}
 	if run.NoMistakesBuildSHA != nil {
 		out.NoMistakesBuildSHA = *run.NoMistakesBuildSHA
+	}
+	if run.DesignContextJSON != nil {
+		out.DesignContextJSON = *run.DesignContextJSON
 	}
 	return out
 }

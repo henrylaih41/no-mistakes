@@ -1403,3 +1403,38 @@ func TestGetRunGatesForUnknownRun(t *testing.T) {
 		t.Errorf("gates for unknown run = %q, want empty", pinned)
 	}
 }
+
+func TestSetRunDesignContextIsWriteOnce(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/repo", "https://github.com/test/repo.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	raw, err := types.MarshalDesignContextJSON(types.DesignContext{
+		Files: []types.DesignContextFile{{Source: "docs/design.md", Content: "contract"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunDesignContext(run.ID, raw); err != nil {
+		t.Fatalf("SetRunDesignContext: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.DesignContextJSON == nil || *got.DesignContextJSON != raw {
+		t.Fatalf("DesignContextJSON = %v, want %q", got.DesignContextJSON, raw)
+	}
+	if err := d.SetRunDesignContext(run.ID, `{"files":[{"source":"other","content":"x"}]}`); err == nil {
+		t.Fatal("a second pin replaced the run's design context")
+	}
+	again, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if again.DesignContextJSON == nil || *again.DesignContextJSON != raw {
+		t.Fatalf("DesignContextJSON after refused pin = %v, want %q", again.DesignContextJSON, raw)
+	}
+}

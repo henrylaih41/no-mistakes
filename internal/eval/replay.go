@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/designcontext"
 	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -273,6 +276,14 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	defer baseAgent.Close()
 	observed := &observedAgent{inner: agent.WithSteering(baseAgent, isolatedPaths.EvidenceDir()), ownership: ownership}
 
+	designContext, designContextSource, err := replayDesignContext(c, cfg, workDir)
+	if err != nil {
+		evaluation.Error = safeurl.RedactText(err.Error())
+		evaluation.CompletedAt = time.Now().Unix()
+		return evaluation
+	}
+	evaluation.DesignContextSource = designContextSource
+
 	replayDB, stepResultID, fixing, previousFindings, err := replayRoundContext(isolatedPaths, c, workDir)
 	if err != nil {
 		evaluation.Error = safeurl.RedactText(err.Error())
@@ -318,12 +329,13 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		// the same harness sign-in and user settings as an ordinary pipeline
 		// agent spawn. That is not a security sandbox; a candidate may still
 		// read and write ordinary HOME-relative agent files.
-		Env:          []string{"NM_HOME=" + isolatedPaths.Root()},
-		Log:          func(string) {},
-		LogChunk:     func(string) {},
-		LogFile:      func(string) {},
-		UserIntent:   c.Intent,
-		IntentSource: c.IntentSource,
+		Env:           []string{"NM_HOME=" + isolatedPaths.Root()},
+		Log:           func(string) {},
+		LogChunk:      func(string) {},
+		LogFile:       func(string) {},
+		UserIntent:    c.Intent,
+		IntentSource:  c.IntentSource,
+		DesignContext: designContext,
 	})
 	// Candidate wall time is the actual review invocations, every rerun
 	// included, matching the local agent-invocation metric rather than
@@ -369,6 +381,37 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	evaluation.FalsePositiveGold = score.FalsePositiveGold
 	evaluation.Pending = score.Pending
 	return evaluation
+}
+
+// designContextCaseFile holds the captured run's pinned design context.
+var designContextCaseFile = filepath.Join("original", "design-context.json")
+
+// replayDesignContext returns the design context the replayed review sees:
+// the run's pinned copy when the case captured one, otherwise (a case
+// captured before design context was recorded) the files its pinned
+// configuration names, re-read from the restored worktree and this machine.
+// A rebuild that cannot read a named file fails the evaluation rather than
+// replaying a review that silently lost its contract.
+func replayDesignContext(c Case, cfg *config.Config, workDir string) (types.DesignContext, string, error) {
+	raw, err := os.ReadFile(filepath.Join(c.Dir, designContextCaseFile))
+	if err == nil {
+		captured, err := types.ParseDesignContextJSON(string(raw))
+		if err != nil {
+			return types.DesignContext{}, "", fmt.Errorf("read captured design context: %w", err)
+		}
+		return captured, "captured", nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return types.DesignContext{}, "", fmt.Errorf("read captured design context: %w", err)
+	}
+	if len(cfg.DesignContext.GlobalFiles) == 0 && len(cfg.DesignContext.Files) == 0 {
+		return types.DesignContext{}, "", nil
+	}
+	rebuilt, err := designcontext.Materialize(workDir, nil, cfg.DesignContext.GlobalFiles, cfg.DesignContext.Files)
+	if err != nil {
+		return types.DesignContext{}, "", fmt.Errorf("rematerialize design context from the pinned configuration: %w", err)
+	}
+	return rebuilt, "rematerialized", nil
 }
 
 func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string, bool, string, error) {

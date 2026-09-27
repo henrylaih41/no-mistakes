@@ -1030,6 +1030,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
 		return nil
 	}
+	var designContext types.DesignContext
+	if run.DesignContextJSON != nil {
+		parsed, err := types.ParseDesignContextJSON(*run.DesignContextJSON)
+		if err != nil {
+			return false, "", fmt.Errorf("parse run design context: %w", err)
+		}
+		designContext = parsed
+	}
 	sctx := &StepContext{
 		Ctx:               ctx,
 		Run:               run,
@@ -1043,6 +1051,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		StepResultID:      sr.ID,
 		UserIntent:        userIntent,
 		IntentSource:      userIntentSource,
+		DesignContext:     designContext,
 		Sessions:          e.sessions,
 		Shared:            e.shared,
 		EvidenceDir:       e.runEvidenceDir(run.ID),

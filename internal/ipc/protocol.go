@@ -78,6 +78,9 @@ func (e *RPCError) Error() string { return e.Message }
 type PushReceivedParams struct {
 	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
 	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	// DesignContextPaths are the caller's explicit --design-context files
+	// (absolute paths). The daemon reads them once at run start.
+	DesignContextPaths []string `json:"design_context_paths,omitempty"`
 	// Gate is the absolute path to the gate bare repo.
 	Gate                 string           `json:"gate"`
 	Ref                  string           `json:"ref"`
@@ -105,6 +108,9 @@ type PushReceivedParams struct {
 type StartFreshRunParams struct {
 	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
 	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	// DesignContextPaths are the caller's explicit --design-context files
+	// (absolute paths). The daemon reads them once at run start.
+	DesignContextPaths []string `json:"design_context_paths,omitempty"`
 
 	RepoID               string           `json:"repo_id"`
 	Branch               string           `json:"branch"`
@@ -214,6 +220,9 @@ type GetActiveRunParams struct {
 type RerunParams struct {
 	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
 	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	// DesignContextPaths are the caller's explicit --design-context files
+	// (absolute paths). The daemon reads them once at run start.
+	DesignContextPaths []string `json:"design_context_paths,omitempty"`
 
 	RepoID        string           `json:"repo_id"`
 	Branch        string           `json:"branch"`

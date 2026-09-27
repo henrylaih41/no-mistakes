@@ -50,6 +50,35 @@ func TestExecutor_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestExecutor_PassesRunDesignContextToSteps(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	raw, err := types.MarshalDesignContextJSON(types.DesignContext{
+		Files: []types.DesignContextFile{{Source: "docs/design.md", Content: "contract"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.DesignContextJSON = &raw
+
+	var got types.DesignContext
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			got = sctx.DesignContext
+			return &StepOutcome{}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(got.Files) != 1 || got.Files[0].Source != "docs/design.md" || got.Files[0].Content != "contract" {
+		t.Fatalf("step design context = %+v, want the run's pinned file", got)
+	}
+}
+
 func TestExecutor_ContextCancelCause(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

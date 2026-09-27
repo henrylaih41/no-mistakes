@@ -248,6 +248,7 @@ CI logs:
 	// by pipeline.BindBranchDecisions, which the executor runs for every step.
 	prompt += roundHistoryPromptSection(sctx)
 	prompt += userIntentPromptSection(sctx)
+	prompt += designContextPromptSection(sctx)
 	prompt += executionContextPromptSection(sctx.WorkDir)
 	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt))
 

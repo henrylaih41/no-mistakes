@@ -298,6 +298,11 @@ type Evaluation struct {
 	TokensReported    bool   `json:"tokens_reported"`
 	DurationMS        int64  `json:"duration_ms"`
 	Model             string `json:"model,omitempty"`
+	// DesignContextSource says where the replayed review's design context came
+	// from: "captured" (the run's pinned copy), "rematerialized" (a case
+	// captured before design context was recorded, rebuilt from its pinned
+	// configuration), or empty when the review had none.
+	DesignContextSource string `json:"design_context_source,omitempty"`
 }
 
 // EvaluationSummary aggregates finding-level scores. A case with no gold is
