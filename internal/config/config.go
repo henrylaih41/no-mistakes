@@ -12,11 +12,13 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/designcontext"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -49,6 +51,12 @@ const (
 	// review or review-fix invocation. Every later invocation derives a fresh
 	// limit, so a stalled agent is bounded without charging the next turn.
 	DefaultReviewAgentTimeout = 30 * time.Minute
+	// DefaultReviewMaxFixRounds caps persisted review fix rounds per run when
+	// review.max_fix_rounds is unset. An explicit 0 removes the cap.
+	DefaultReviewMaxFixRounds = 3
+	// DefaultReviewFixRoundMinSeverity is the minimum finding severity eligible
+	// for automatic or synthetic review selection and approval gating.
+	DefaultReviewFixRoundMinSeverity = types.FindingSeverityWarning
 	// DefaultTestAgentTimeout bounds one Test-step agent invocation, including
 	// the post-test evidence-gathering turn and a Test-repair turn, so a stalled
 	// agent cannot leave a run active forever.
@@ -201,6 +209,14 @@ type GlobalConfig struct {
 	Commit GlobalCommitRaw
 	Intent GlobalIntentRaw
 	Test   TestRaw
+	// Review is the machine-owned review policy: the fix-round cap and the
+	// follow-up severity floor. Repository review settings live in
+	// RepoConfig.Review.
+	Review GlobalReviewRaw
+	// DesignContext is machine-owned input applied to every run. Paths are
+	// expanded and syntax-validated when the global config is loaded; the
+	// referenced files are validated and materialized at run start.
+	DesignContext DesignContextRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -238,7 +254,13 @@ type globalConfigRaw struct {
 	Commit                  GlobalCommitRaw            `yaml:"commit"`
 	Intent                  GlobalIntentRaw            `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
+	Review                  GlobalReviewRaw            `yaml:"review"`
+	DesignContext           DesignContextRaw           `yaml:"design_context"`
 	Eval                    EvalRaw                    `yaml:"eval"`
+	// ReviewLoop is the retired post-PR review loop, kept as a parse-only
+	// tombstone because every captured eval case pins it (see
+	// retiredReviewLoop).
+	ReviewLoop retiredReviewLoop `yaml:"review_loop"`
 	// Jev is the retired jev.review_assist pre-brief block. The feature was
 	// removed after the offline trial showed its candidate listing cannot
 	// reach the review findings it is meant to surface. The key stays in the
@@ -356,6 +378,10 @@ type RepoConfig struct {
 	// able to turn it off (or on). Default false; a plain bool so a missing key
 	// or a YAML/JSON null is falsy and preserves current loading.
 	DisableProjectSettings bool `yaml:"disable_project_settings"`
+	// DesignContext selects repository files materialized into the run's
+	// design context. It is non-executing prompt context, so it is read from
+	// the pushed branch; the daemon jails every selector to the worktree.
+	DesignContext DesignContextRaw `yaml:"design_context"`
 	// NoCI declares that this repository intentionally has no CI. When true and
 	// the forge reports zero checks, the CI monitor treats that empty result as
 	// all-checks-passed. It is a readiness boundary honored ONLY from the trusted
@@ -397,6 +423,34 @@ type ReviewRaw struct {
 	// at least one changed file; a run that touches nothing matching leaves
 	// the review prompt exactly as it is without this setting.
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
+	// MaxFixRounds overrides the global review fix-round cap for this
+	// repository. Trusted-only with the rest of this block. 0 removes the cap.
+	MaxFixRounds *int `yaml:"max_fix_rounds"`
+}
+
+// GlobalReviewRaw is the global config's review: block. It is global-only
+// policy, separate from the repository ReviewRaw, and has no agent key:
+// reviewer selection is review_agents, so a leftover review.agent fails the
+// strict decode loudly instead of being ignored.
+type GlobalReviewRaw struct {
+	// MaxFixRounds caps persisted review fix rounds per run. Nil means
+	// DefaultReviewMaxFixRounds; 0 removes the cap.
+	MaxFixRounds *int `yaml:"max_fix_rounds"`
+	// FixRoundMinSeverity is the minimum finding severity eligible for
+	// automatic or synthetic review selection and approval gating; actionable
+	// findings below it are carried as follow-ups.
+	FixRoundMinSeverity string `yaml:"fix_round_min_severity"`
+	// MaxParallel is the retired reviewer-panel fan-out width. It is a
+	// parse-only tombstone because captured eval cases pin it; it has no
+	// effect and is reported as deprecated at load.
+	MaxParallel *int `yaml:"max_parallel"`
+}
+
+// DesignContextRaw is the YAML representation of design-context file entries.
+// Global entries are machine-owned paths; repo entries are prompt-context
+// selectors that the daemon validates and jails to the worktree before reading.
+type DesignContextRaw struct {
+	Files []string `yaml:"files"`
 }
 
 // PRRaw is the YAML representation of pull-request settings.
@@ -525,24 +579,25 @@ func RenderedInstructions(instructions string) string {
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent                  agentList    `yaml:"agent"`
-		Commands               Commands     `yaml:"commands"`
-		IgnorePatterns         []string     `yaml:"ignore_patterns"`
-		ProtectedPaths         []string     `yaml:"protected_paths"`
-		AllowRepoCommands      bool         `yaml:"allow_repo_commands"`
-		AutoFix                AutoFixRaw   `yaml:"auto_fix"`
-		CI                     CIRaw        `yaml:"ci"`
-		Rebase                 RebaseRaw    `yaml:"rebase"`
-		Commit                 CommitRaw    `yaml:"commit"`
-		Intent                 IntentRaw    `yaml:"intent"`
-		Test                   TestRaw      `yaml:"test"`
-		PR                     PRRaw        `yaml:"pr"`
-		Document               DocumentRaw  `yaml:"document"`
-		Review                 ReviewRaw    `yaml:"review"`
-		Gates                  []Gate       `yaml:"gates"`
-		DisableProjectSettings bool         `yaml:"disable_project_settings"`
-		NoCI                   bool         `yaml:"no_ci"`
-		Providers              ProvidersRaw `yaml:"providers"`
+		Agent                  agentList        `yaml:"agent"`
+		Commands               Commands         `yaml:"commands"`
+		IgnorePatterns         []string         `yaml:"ignore_patterns"`
+		ProtectedPaths         []string         `yaml:"protected_paths"`
+		AllowRepoCommands      bool             `yaml:"allow_repo_commands"`
+		AutoFix                AutoFixRaw       `yaml:"auto_fix"`
+		CI                     CIRaw            `yaml:"ci"`
+		Rebase                 RebaseRaw        `yaml:"rebase"`
+		Commit                 CommitRaw        `yaml:"commit"`
+		Intent                 IntentRaw        `yaml:"intent"`
+		Test                   TestRaw          `yaml:"test"`
+		PR                     PRRaw            `yaml:"pr"`
+		Document               DocumentRaw      `yaml:"document"`
+		Review                 ReviewRaw        `yaml:"review"`
+		Gates                  []Gate           `yaml:"gates"`
+		DisableProjectSettings bool             `yaml:"disable_project_settings"`
+		DesignContext          DesignContextRaw `yaml:"design_context"`
+		NoCI                   bool             `yaml:"no_ci"`
+		Providers              ProvidersRaw     `yaml:"providers"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -565,6 +620,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Review = raw.Review
 	c.Gates = raw.Gates
 	c.DisableProjectSettings = raw.DisableProjectSettings
+	c.DesignContext = raw.DesignContext
 	c.NoCI = raw.NoCI
 	c.Providers = raw.Providers
 	return nil
@@ -719,6 +775,7 @@ type Config struct {
 	Intent         Intent
 	Test           Test
 	Document       Document
+	DesignContext  DesignContext
 	Review         Review
 	PR             PR
 	ForgeProfiles  ForgeProfiles
@@ -832,6 +889,18 @@ type Review struct {
 	// reviewer session a finalize turn resumes, and `no-mistakes axi answer`.
 	Conversation     bool
 	PathInstructions []PathInstruction
+	// MaxFixRounds caps persisted review fix rounds per run; 0 is uncapped.
+	// The repository's trusted value wins over the global one.
+	MaxFixRounds int
+	// FixRoundMinSeverity is the global follow-up severity floor.
+	FixRoundMinSeverity string
+}
+
+// DesignContext is the resolved design-context config: machine-global file
+// paths and the repository's worktree-relative selectors.
+type DesignContext struct {
+	GlobalFiles []string
+	Files       []string
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -983,6 +1052,53 @@ func warnRetiredJev(raw retiredJev) {
 	if raw.CandidateExcerptBytes != nil {
 		slog.Warn("jev.candidate_excerpt_bytes is deprecated: the jev review pre-brief was removed and this setting has no effect")
 	}
+}
+
+// retiredReviewLoop is the removed post-PR review loop (the Devin loop). Its
+// fields are inert and exist only so a config that still carries the block,
+// which every captured eval case pins, keeps parsing under the strict decoder.
+// Enabling a loop this build cannot run is rejected rather than ignored. Do not
+// repurpose the review_loop key.
+type retiredReviewLoop struct {
+	Enabled               *bool   `yaml:"enabled"`
+	BotLogin              *string `yaml:"bot_login"`
+	MaxRounds             *int    `yaml:"max_rounds"`
+	FailOpen              *bool   `yaml:"fail_open"`
+	ReplyOnFix            *bool   `yaml:"reply_on_fix"`
+	Retrigger             *bool   `yaml:"retrigger"`
+	DevinAPIKeyFile       *string `yaml:"devin_api_key_file"`
+	DevinReviewAPIKeyFile *string `yaml:"devin_review_api_key_file"`
+	DevinOrgID            *string `yaml:"devin_org_id"`
+}
+
+// validateRetiredReviewLoop rejects an enabled review loop and reports a
+// present block as deprecated once at load time.
+func validateRetiredReviewLoop(raw retiredReviewLoop) error {
+	if raw.Enabled != nil && *raw.Enabled {
+		return fmt.Errorf("review_loop.enabled must be false: the post-PR review loop was removed")
+	}
+	if raw != (retiredReviewLoop{}) {
+		slog.Warn("review_loop is deprecated: the post-PR review loop was removed and this block has no effect")
+	}
+	return nil
+}
+
+// validateGlobalReviewRaw validates the global review policy and reports the
+// retired max_parallel key as deprecated.
+func validateGlobalReviewRaw(review GlobalReviewRaw) error {
+	if review.MaxFixRounds != nil && *review.MaxFixRounds < 0 {
+		return fmt.Errorf("review.max_fix_rounds must be >= 0, got %d", *review.MaxFixRounds)
+	}
+	if strings.TrimSpace(review.FixRoundMinSeverity) != "" && !types.IsKnownFindingSeverity(review.FixRoundMinSeverity) {
+		return fmt.Errorf("review.fix_round_min_severity must be one of %s, got %q", strings.Join(types.KnownFindingSeverities(), ", "), review.FixRoundMinSeverity)
+	}
+	if review.MaxParallel != nil {
+		if *review.MaxParallel < 0 {
+			return fmt.Errorf("review.max_parallel must be >= 0, got %d", *review.MaxParallel)
+		}
+		slog.Warn("review.max_parallel is deprecated: the reviewer panel was removed and this setting has no effect")
+	}
+	return nil
 }
 
 // IntentRaw is the YAML representation of user-intent extraction settings.
@@ -1230,6 +1346,19 @@ log_level: info
 # root, and it must be outside NM_HOME and outside every checkout.
 # worktree_roots:
 #   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
+
+# Machine-owned design-context files materialized into every new run. Entries
+# must be absolute or start with ~/; globs are not supported.
+# design_context:
+#   files:
+#     - ~/.agents/QUALITY.md
+
+# Review policy. max_fix_rounds caps review fix rounds per run (0 = no cap);
+# actionable findings below fix_round_min_severity are carried as follow-ups
+# instead of being fixed or parking the run.
+# review:
+#   max_fix_rounds: 3
+#   fix_round_min_severity: warning
 
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.
@@ -2177,6 +2306,18 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	warnRetiredJev(raw.Jev)
+	if err := validateRetiredReviewLoop(raw.ReviewLoop); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if err := validateGlobalReviewRaw(raw.Review); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	globalDesignContextFiles, err := designcontext.ResolveGlobalPaths(raw.DesignContext.Files)
+	if err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	cfg.DesignContext = DesignContextRaw{Files: globalDesignContextFiles}
+	cfg.Review = raw.Review
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -2506,6 +2647,9 @@ func validatePRRaw(pr PRRaw) error {
 // invalid block has to fail here, before it merges, rather than brick the
 // repository's pipeline afterwards. Do not scope this to the trusted copy.
 func validateReviewRaw(review ReviewRaw) error {
+	if review.MaxFixRounds != nil && *review.MaxFixRounds < 0 {
+		return fmt.Errorf("review.max_fix_rounds must be >= 0, got %d", *review.MaxFixRounds)
+	}
 	if len(review.PathInstructions) > MaxReviewPathInstructions {
 		return fmt.Errorf("review.path_instructions has %d entries, at most %d are allowed", len(review.PathInstructions), MaxReviewPathInstructions)
 	}
@@ -3158,6 +3302,18 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		pr.TitleFormat = *repo.PR.TitleFormat
 	}
 
+	reviewMaxFixRounds := DefaultReviewMaxFixRounds
+	if global.Review.MaxFixRounds != nil {
+		reviewMaxFixRounds = *global.Review.MaxFixRounds
+	}
+	if repo.Review.MaxFixRounds != nil {
+		reviewMaxFixRounds = *repo.Review.MaxFixRounds
+	}
+	fixRoundMinSeverity := DefaultReviewFixRoundMinSeverity
+	if s := types.NormalizeFindingSeverity(global.Review.FixRoundMinSeverity); s != "" {
+		fixRoundMinSeverity = s
+	}
+
 	cfg := &Config{
 		Agent:                 global.Agent,
 		Agents:                copyAgents(global.Agents),
@@ -3196,8 +3352,14 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		// review block is resolved from the repository alone - global config
 		// carries no review block to overlay.
 		Review: Review{
-			Conversation:     repo.Review.Conversation,
-			PathInstructions: resolvePathInstructions(repo.Review.PathInstructions),
+			Conversation:        repo.Review.Conversation,
+			PathInstructions:    resolvePathInstructions(repo.Review.PathInstructions),
+			MaxFixRounds:        reviewMaxFixRounds,
+			FixRoundMinSeverity: fixRoundMinSeverity,
+		},
+		DesignContext: DesignContext{
+			GlobalFiles: slices.Clone(global.DesignContext.Files),
+			Files:       resolveDesignContextFiles(repo.DesignContext.Files),
 		},
 		PR:            pr,
 		ForgeProfiles: global.ForgeProfiles,
@@ -3217,6 +3379,18 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	}
 
 	return cfg
+}
+
+// resolveDesignContextFiles drops blank repository selectors; the daemon
+// validates the rest against the worktree when it materializes the run.
+func resolveDesignContextFiles(raw []string) []string {
+	files := make([]string, 0, len(raw))
+	for _, file := range raw {
+		if trimmed := strings.TrimSpace(file); trimmed != "" {
+			files = append(files, trimmed)
+		}
+	}
+	return files
 }
 
 // EnableEvalProvenance pins the exact configuration this run reviews under so

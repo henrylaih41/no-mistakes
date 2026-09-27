@@ -4,6 +4,9 @@ on:
   pull_request:
     branches:
       - main
+      - integration
+      - integration-v184
+      - v184/**
     # Never create a run for a release-please PR. GITHUB_TOKEN-opened PRs land in
     # action_required and never start; excluding the exact release-output set means
     # no run is created at all. push/tag/release triggers are unaffected.
