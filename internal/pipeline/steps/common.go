@@ -58,6 +58,17 @@ func unmarshalRequiredFindings(raw []byte, findings *Findings, requireNonEmptySu
 }
 
 func unmarshalRequiredTestFindings(raw []byte, findings *Findings) error {
+	if err := unmarshalRequiredTestEvidence(raw, findings); err != nil {
+		return err
+	}
+	return validateLiveValidationContract(raw, findings)
+}
+
+// unmarshalRequiredTestEvidence validates the evidence half of a Test turn's
+// output: findings, what was tested, a summary, and artifacts. It is the whole
+// contract when test.live_validation is off, where the turn reports no
+// scenarios or verdict.
+func unmarshalRequiredTestEvidence(raw []byte, findings *Findings) error {
 	if err := unmarshalRequiredFindings(raw, findings, false); err != nil {
 		return err
 	}
@@ -67,8 +78,6 @@ func unmarshalRequiredTestFindings(raw []byte, findings *Findings) error {
 		Artifacts      *[]struct {
 			Label *string `json:"label"`
 		} `json:"artifacts"`
-		Scenarios *[]testScenarioContractFields `json:"scenarios"`
-		Verdict   *string                       `json:"verdict"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return err
@@ -102,6 +111,19 @@ func unmarshalRequiredTestFindings(raw []byte, findings *Findings) error {
 		if artifact.Label == nil {
 			return fmt.Errorf("artifact %d missing label", i)
 		}
+	}
+	return nil
+}
+
+// validateLiveValidationContract validates the live-validation half of a Test
+// turn's output: the scenarios and the verdict.
+func validateLiveValidationContract(raw []byte, findings *Findings) error {
+	var payload struct {
+		Scenarios *[]testScenarioContractFields `json:"scenarios"`
+		Verdict   *string                       `json:"verdict"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return err
 	}
 	// The scenario list and the verdict are the step's live-validation
 	// contract, held exactly as strictly as the evidence fields above: a turn
@@ -295,6 +317,30 @@ var testFindingsSchema = json.RawMessage(`{
 	},
 	"required": ["findings", "summary", "tested", "testing_summary", "artifacts", "scenarios", "verdict"]
 }`)
+
+// testEvidenceSchema is testFindingsSchema without the live-validation
+// contract (scenarios and verdict), for the Test turn under
+// test.live_validation: off. It is cut from the one literal so the shared
+// properties keep their order and never drift apart.
+var testEvidenceSchema = func() json.RawMessage {
+	full := string(testFindingsSchema)
+	start := strings.Index(full, `,
+		"scenarios": {`)
+	end := strings.Index(full, `
+	},
+	"required": [`)
+	if start < 0 || end < start {
+		panic("testFindingsSchema layout changed: cannot derive testEvidenceSchema")
+	}
+	schema := full[:start] + `
+	},
+	"required": ["findings", "summary", "tested", "testing_summary", "artifacts"]
+}`
+	if !json.Valid([]byte(schema)) {
+		panic("derived testEvidenceSchema is not valid JSON")
+	}
+	return json.RawMessage(schema)
+}()
 
 // reviewFindingsSchema is the JSON schema for structured review output with risk assessment.
 // Field order matters for chain-of-thought: findings first, then risk level, then rationale.

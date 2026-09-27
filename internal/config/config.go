@@ -927,7 +927,18 @@ type TestRaw struct {
 	// (see EffectiveRepoConfig): a contributor's pushed branch must not be able
 	// to waive the configured-test gate that validates it.
 	AllowApproveOverFailure string `yaml:"allow_approve_over_failure"`
+	// LiveValidation turns the Test step's live-validation evidence turn on
+	// ("on") or off ("off", the default when empty). Repository-only, and
+	// honored ONLY from the trusted default-branch copy: a pushed branch must
+	// not switch off the validation that tests it.
+	LiveValidation string `yaml:"live_validation"`
 }
+
+// Test live-validation modes (test.live_validation).
+const (
+	LiveValidationOff = "off"
+	LiveValidationOn  = "on"
+)
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
 // Pointer fields distinguish "not set" (nil) from explicit zero/false values.
@@ -970,6 +981,8 @@ type Test struct {
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	// LiveValidation is true only for test.live_validation: on.
+	LiveValidation bool
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -2299,6 +2312,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateTestRaw(raw.Test); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if strings.TrimSpace(raw.Test.LiveValidation) != "" {
+		return nil, fmt.Errorf("parse global config: test.live_validation is repository-only; set it in the repository's .no-mistakes.yaml on its default branch")
+	}
 	if err := validateEvalRaw(raw.Eval); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
@@ -2813,6 +2829,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// trusted-only for the same reason no_ci is: a pushed branch must not
 		// waive the gate that certifies it.
 		effective.Test.AllowApproveOverFailure = trusted.Test.AllowApproveOverFailure
+		effective.Test.LiveValidation = trusted.Test.LiveValidation
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -2837,6 +2854,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Instructions = ""
 		effective.Test.Prepare = false
 		effective.Test.AllowApproveOverFailure = ""
+		effective.Test.LiveValidation = ""
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3038,6 +3056,11 @@ func validateEvalRaw(raw EvalRaw) error {
 // though EffectiveRepoConfig only honors the trusted branch name: a branch
 // carrying an invalid value has to fail before it merges.
 func validateTestRaw(test TestRaw) error {
+	switch strings.TrimSpace(test.LiveValidation) {
+	case "", LiveValidationOff, LiveValidationOn:
+	default:
+		return fmt.Errorf("test.live_validation must be %q or %q, got %q", LiveValidationOff, LiveValidationOn, test.LiveValidation)
+	}
 	if test.Evidence.Branch != nil {
 		if _, err := evidence.NormalizeBranch(*test.Evidence.Branch); err != nil {
 			return fmt.Errorf("test.evidence.branch: %w", err)
@@ -3255,6 +3278,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	test.Prepare = repo.Test.Prepare
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
+	test.LiveValidation = strings.TrimSpace(repo.Test.LiveValidation) == LiveValidationOn
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {

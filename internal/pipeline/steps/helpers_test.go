@@ -205,11 +205,14 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 		EvidenceDir: filepath.Join(t.TempDir(), "evidence", "run-1"),
 		WorkDir:     workDir,
 		Agent:       ag,
-		Config:      &config.Config{Agent: types.AgentClaude, Commands: cmds},
-		DB:          database,
-		Log:         func(s string) { t.Log(s) },
-		LogChunk:    func(s string) {},
-		LogFile:     func(s string) {},
+		// Live validation is on here so the upstream Test-step tests keep
+		// exercising the evidence turn; production defaults it off, and the
+		// off-mode tests turn it off explicitly.
+		Config:   &config.Config{Agent: types.AgentClaude, Commands: cmds, Test: config.Test{LiveValidation: true}},
+		DB:       database,
+		Log:      func(s string) { t.Log(s) },
+		LogChunk: func(s string) {},
+		LogFile:  func(s string) {},
 	}
 }
 
