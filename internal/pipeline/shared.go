@@ -46,7 +46,7 @@ func (s *RunShared) SetSizeTier(tier SizeTier) {
 
 // SizeTier returns the run's size classification; ok is false when this
 // executor never classified the run (tiers off, Review skipped, or a daemon
-// restart), and consumers then keep their untiered behavior.
+// restart).
 func (s *RunShared) SizeTier() (SizeTier, bool) {
 	if s == nil {
 		return SizeTier{}, false
@@ -87,8 +87,8 @@ func (s *RunShared) EnsurePrepared(prepare func() error) error {
 	if s == nil {
 		return prepare()
 	}
-	s.tierMu.Lock()
-	defer s.tierMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.prepared {
 		return nil
 	}
@@ -106,8 +106,8 @@ func (s *RunShared) SetHousekeepingLint(result HousekeepingLintResult) {
 	if s == nil {
 		return
 	}
-	s.tierMu.Lock()
-	defer s.tierMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.housekeepingLint = &result
 }
 
@@ -118,8 +118,8 @@ func (s *RunShared) ClearHousekeepingLint() {
 	if s == nil {
 		return
 	}
-	s.tierMu.Lock()
-	defer s.tierMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.housekeepingLint = nil
 }
 
@@ -130,8 +130,8 @@ func (s *RunShared) TakeHousekeepingLint() (HousekeepingLintResult, bool) {
 	if s == nil {
 		return HousekeepingLintResult{}, false
 	}
-	s.tierMu.Lock()
-	defer s.tierMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.housekeepingLint == nil {
 		return HousekeepingLintResult{}, false
 	}

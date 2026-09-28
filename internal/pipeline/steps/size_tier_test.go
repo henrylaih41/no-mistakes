@@ -106,7 +106,7 @@ func TestReviewStep_SizeTierSelectsTheSmallReviewer(t *testing.T) {
 // testWithTier runs the live-validation-off Test step with a passing
 // commands.test, the given recorded tier and review risk, and counts the
 // agent test turns.
-func testWithTier(t *testing.T, cmds config.Commands, tier *pipeline.SizeTier, risk string) (int, string) {
+func testWithTier(t *testing.T, cmds config.Commands, tiers config.SizeTiers, tier *pipeline.SizeTier, risk string) (int, string) {
 	t.Helper()
 	calls := 0
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
@@ -117,6 +117,7 @@ func testWithTier(t *testing.T, cmds config.Commands, tier *pipeline.SizeTier, r
 	headSHA := commitCIWorkflowOnlyChange(t, dir, baseSHA)
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, cmds)
 	sctx.Config.Test.LiveValidation = false
+	sctx.Config.SizeTiers = tiers
 	sctx.Shared = &pipeline.RunShared{}
 	if tier != nil {
 		sctx.Shared.SetSizeTier(*tier)
@@ -139,25 +140,28 @@ func TestTestStep_SizeTierDecidesTheAgentTestTurn(t *testing.T) {
 	passing := config.Commands{Test: "exit 0"}
 	small := &pipeline.SizeTier{Small: true, Lines: 12}
 	standard := &pipeline.SizeTier{Lines: 412}
+	on := config.SizeTiers{SmallMaxLines: 100, SmallReviewEffort: "high"}
 	cases := []struct {
 		name      string
 		cmds      config.Commands
+		tiers     config.SizeTiers
 		tier      *pipeline.SizeTier
 		risk      string
 		wantTurns int
 		wantLog   string
 	}{
-		{"small, passing command, low risk ends after the command", passing, small, "low", 0, "skipping the agent test turn"},
-		{"small, passing command, medium risk ends after the command", passing, small, "medium", 0, "skipping the agent test turn"},
-		{"small with high review risk runs the turn", passing, small, "high", 1, "size tier small (12 lines) with high review risk, asking agent"},
-		{"small with no commands.test runs the turn", config.Commands{}, small, "low", 1, "no test command configured"},
-		{"standard runs the turn", passing, standard, "low", 1, "size tier standard (412 lines), asking agent"},
-		{"no recorded tier keeps the untiered rule", passing, nil, "high", 0, "all tests passed"},
+		{"small, passing command, low risk ends after the command", passing, on, small, "low", 0, "skipping the agent test turn"},
+		{"small, passing command, medium risk ends after the command", passing, on, small, "medium", 0, "skipping the agent test turn"},
+		{"small with high review risk runs the turn", passing, on, small, "high", 1, "size tier small (12 lines) with high review risk, asking agent"},
+		{"small with no commands.test runs the turn", config.Commands{}, on, small, "low", 1, "no test command configured"},
+		{"standard runs the turn", passing, on, standard, "low", 1, "size tier standard (412 lines), asking agent"},
+		{"tiers on with no recorded tier runs the turn", passing, on, nil, "", 1, "size tier unknown, asking agent"},
+		{"tiers off keeps the untiered rule", passing, config.SizeTiers{}, nil, "high", 0, "all tests passed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			turns, logs := testWithTier(t, tc.cmds, tc.tier, tc.risk)
+			turns, logs := testWithTier(t, tc.cmds, tc.tiers, tc.tier, tc.risk)
 			if turns != tc.wantTurns {
 				t.Fatalf("agent test turns = %d, want %d; logs:\n%s", turns, tc.wantTurns, logs)
 			}
