@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -155,6 +156,55 @@ func uncoveredReviewMessage(reviewedPaths, reviewablePaths []string) string {
 		msg += fmt.Sprintf("; %d reviewed_paths entry(ies) outside the reviewable set: %s", len(outOfScope), strings.Join(outOfScope, ", "))
 	}
 	return msg
+}
+
+// relativizeReviewedPaths rewrites each absolute reviewed_paths entry that
+// lies inside worktree to its worktree-relative slash form, the form the
+// reviewable set uses. Reviewers sometimes report the absolute path of the
+// file they read; left as is, a clean review parks as "outside the reviewable
+// set" and a covered finding never clears. Absolute paths outside the worktree
+// and relative paths are returned unchanged, so they are judged as before.
+func relativizeReviewedPaths(paths []string, worktree string) []string {
+	if len(paths) == 0 || worktree == "" {
+		return paths
+	}
+	roots := withResolvedSymlinks(filepath.Clean(worktree))
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = relativizeReviewedPath(p, roots)
+	}
+	return out
+}
+
+func relativizeReviewedPath(p string, roots []string) string {
+	trimmed := strings.TrimSpace(p)
+	if !filepath.IsAbs(trimmed) {
+		return p
+	}
+	cleaned := filepath.Clean(trimmed)
+	candidates := []string{cleaned}
+	// A deleted file cannot be resolved itself, so resolve its directory:
+	// macOS reports /var/... and /private/var/... for the same worktree.
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(cleaned)); err == nil {
+		candidates = append(candidates, filepath.Join(dir, filepath.Base(cleaned)))
+	}
+	for _, root := range roots {
+		for _, candidate := range candidates {
+			rel, err := filepath.Rel(root, candidate)
+			if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			return filepath.ToSlash(rel)
+		}
+	}
+	return p
+}
+
+func withResolvedSymlinks(dir string) []string {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != dir {
+		return []string{dir, resolved}
+	}
+	return []string{dir}
 }
 
 func normalizeReviewedPath(value string) string {
