@@ -183,10 +183,12 @@ func relativizeReviewedPath(p string, roots []string) string {
 		return p
 	}
 	cleaned := filepath.Clean(trimmed)
-	// A deleted file (or directory) cannot be resolved itself, so resolve its
-	// nearest existing ancestor: macOS reports /var/... and /private/var/...
+	// Resolve only the directory, through its nearest existing ancestor: a
+	// deleted file or directory cannot be resolved itself, a tracked symlink
+	// is reviewed as itself, and macOS reports /var/... and /private/var/...
 	// for the same worktree.
-	candidates := []string{cleaned, resolveArtifactPathSymlinks(cleaned)}
+	resolved := filepath.Join(resolveArtifactPathSymlinks(filepath.Dir(cleaned)), filepath.Base(cleaned))
+	candidates := []string{cleaned, resolved}
 	for _, root := range roots {
 		for _, candidate := range candidates {
 			rel, err := filepath.Rel(root, candidate)

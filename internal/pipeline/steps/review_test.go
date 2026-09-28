@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -293,20 +294,29 @@ func TestReviewStep_AbsoluteReviewedPathsInsideTheWorktreeCountAsCovered(t *test
 		}
 	})
 
-	t.Run("deleted directory through a symlinked root resolves", func(t *testing.T) {
+	t.Run("deleted directory and tracked symlink through a symlinked root resolve", func(t *testing.T) {
 		t.Parallel()
 		realDir := filepath.Join(t.TempDir(), "real")
 		workDir := filepath.Join(realDir, "run")
 		if err := os.MkdirAll(workDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(workDir, "target.go"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
 		alias := filepath.Join(t.TempDir(), "alias")
 		if err := os.Symlink(realDir, alias); err != nil {
 			t.Skipf("symlink unavailable: %v", err)
 		}
-		got := relativizeReviewedPaths([]string{filepath.Join(alias, "run", "old", "file.go")}, workDir)
-		if len(got) != 1 || got[0] != "old/file.go" {
-			t.Fatalf("relativizeReviewedPaths = %q, want the worktree-relative old/file.go", got)
+		if err := os.Symlink("target.go", filepath.Join(workDir, "link.go")); err != nil {
+			t.Fatal(err)
+		}
+		got := relativizeReviewedPaths([]string{
+			filepath.Join(alias, "run", "old", "file.go"),
+			filepath.Join(alias, "run", "link.go"),
+		}, workDir)
+		if want := []string{"old/file.go", "link.go"}; !slices.Equal(got, want) {
+			t.Fatalf("relativizeReviewedPaths = %q, want %q", got, want)
 		}
 	})
 }
