@@ -168,7 +168,8 @@ func relativizeReviewedPaths(paths []string, worktree string) []string {
 	if len(paths) == 0 || worktree == "" {
 		return paths
 	}
-	roots := withResolvedSymlinks(filepath.Clean(worktree))
+	root := filepath.Clean(worktree)
+	roots := []string{root, resolveArtifactPathSymlinks(root)}
 	out := make([]string, len(paths))
 	for i, p := range paths {
 		out[i] = relativizeReviewedPath(p, roots)
@@ -182,12 +183,10 @@ func relativizeReviewedPath(p string, roots []string) string {
 		return p
 	}
 	cleaned := filepath.Clean(trimmed)
-	candidates := []string{cleaned}
-	// A deleted file cannot be resolved itself, so resolve its directory:
-	// macOS reports /var/... and /private/var/... for the same worktree.
-	if dir, err := filepath.EvalSymlinks(filepath.Dir(cleaned)); err == nil {
-		candidates = append(candidates, filepath.Join(dir, filepath.Base(cleaned)))
-	}
+	// A deleted file (or directory) cannot be resolved itself, so resolve its
+	// nearest existing ancestor: macOS reports /var/... and /private/var/...
+	// for the same worktree.
+	candidates := []string{cleaned, resolveArtifactPathSymlinks(cleaned)}
 	for _, root := range roots {
 		for _, candidate := range candidates {
 			rel, err := filepath.Rel(root, candidate)
@@ -198,13 +197,6 @@ func relativizeReviewedPath(p string, roots []string) string {
 		}
 	}
 	return p
-}
-
-func withResolvedSymlinks(dir string) []string {
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != dir {
-		return []string{dir, resolved}
-	}
-	return []string{dir}
 }
 
 func normalizeReviewedPath(value string) string {

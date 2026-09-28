@@ -292,6 +292,23 @@ func TestReviewStep_AbsoluteReviewedPathsInsideTheWorktreeCountAsCovered(t *test
 			t.Fatalf("NeedsApproval = true, want the resolved path to count as covered; logs:\n%s", logs)
 		}
 	})
+
+	t.Run("deleted directory through a symlinked root resolves", func(t *testing.T) {
+		t.Parallel()
+		realDir := filepath.Join(t.TempDir(), "real")
+		workDir := filepath.Join(realDir, "run")
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(t.TempDir(), "alias")
+		if err := os.Symlink(realDir, alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		got := relativizeReviewedPaths([]string{filepath.Join(alias, "run", "old", "file.go")}, workDir)
+		if len(got) != 1 || got[0] != "old/file.go" {
+			t.Fatalf("relativizeReviewedPaths = %q, want the worktree-relative old/file.go", got)
+		}
+	})
 }
 
 func TestReviewStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
