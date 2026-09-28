@@ -84,6 +84,9 @@ func (c *Config) ApplyPiProfile(pin *agentcfg.PiProfile) error {
 	c.Agent = types.AgentPi
 	c.Agents = []types.AgentName{types.AgentPi}
 	c.ReviewAgents = nil // both roles now use the same pinned primary
+	// The pin also outranks the size tier's reviewer effort; the run is still
+	// classified, which only shapes the Test step.
+	c.SizeTiers.SmallReviewEffort = ""
 	c.AgentConfig = map[string]agentcfg.Profile{"pi": {Model: pin.Model, Effort: pin.Effort}}
 	args := pin.PinnedBaseArgs(c.AgentArgsFor(types.AgentPi))
 	c.AgentArgsOverride = maps.Clone(c.AgentArgsOverride)
