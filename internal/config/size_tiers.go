@@ -40,9 +40,8 @@ func defaultSizeTiers() SizeTiers {
 }
 
 // parseSizeTiers applies raw over the defaults. An explicitly configured
-// effort is validated for the harness that serves the reviewer
-// (review_agents.reviewer, else the primary agent) the same way review_agents
-// validates its own effort. The default effort is not: a reviewer harness that
+// effort is validated for the review_agents.reviewer harness the same way
+// review_agents validates its own effort. The default effort is not: a reviewer harness that
 // cannot express effort keeps its own effort for small changes
 // (SmallReviewerEntry), so the default never refuses a config.
 func parseSizeTiers(raw sizeTiersRaw, reviewer types.AgentName) (SizeTiers, error) {
@@ -70,20 +69,19 @@ func parseSizeTiers(raw sizeTiersRaw, reviewer types.AgentName) (SizeTiers, erro
 }
 
 // SmallReviewerEntry is the review_agents entry that serves a small change's
-// review turns: the configured reviewer (or the primary agent) with its effort
-// replaced by SmallReviewEffort. When ok is false the change is still
+// review turns: the configured review_agents.reviewer with its effort replaced
+// by SmallReviewEffort. Only an explicit reviewer role qualifies, because
+// synthesizing one from the primary agent would replace the primary's
+// fallback chain with a single harness. When ok is false the change is still
 // classified but reviewed at the reviewer's own effort; why is non-empty when
-// that happens despite tiers being enabled, so the operator can see it.
+// that happens despite a configured reviewer, so the operator can see it.
 func (c *Config) SmallReviewerEntry() (entry ReviewAgent, ok bool, why string) {
 	if c == nil || !c.SizeTiers.Enabled() || c.SizeTiers.SmallReviewEffort == "" {
 		return ReviewAgent{}, false, ""
 	}
 	entry, configured := c.ReviewAgents[RoleReviewer]
 	if !configured {
-		if !agentcfg.Known(c.Agent) {
-			return ReviewAgent{}, false, "the primary agent is auto-detected, so there is no reviewer harness to set an effort on"
-		}
-		entry = ReviewAgent{Agent: c.Agent}
+		return ReviewAgent{}, false, ""
 	}
 	entry.Effort = c.SizeTiers.SmallReviewEffort
 	if err := agentcfg.Validate(entry.Agent, agentcfg.Profile{Model: entry.Model, Effort: entry.Effort}); err != nil {

@@ -1969,23 +1969,6 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 	return exec.RespondWithOverrides(step, action, findingIDs, instructions, addedFindings, approvalReason, fixOverrideReason)
 }
 
-// SizeTier renders an active run's size classification for status surfaces,
-// or "" when the run has no live executor or was not classified. It is
-// in-memory only by design: the tier is logged, never persisted.
-func (m *RunManager) SizeTier(runID string) string {
-	m.mu.Lock()
-	exec, ok := m.executors[runID]
-	m.mu.Unlock()
-	if !ok {
-		return ""
-	}
-	tier, ok := exec.SizeTier()
-	if !ok {
-		return ""
-	}
-	return tier.String()
-}
-
 // HandleAnswerReviewQuestion records one operator answer to a question the
 // run's reviewer asked, and releases the review gate once nothing is left
 // open.

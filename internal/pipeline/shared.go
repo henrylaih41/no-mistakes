@@ -22,8 +22,12 @@ type RunShared struct {
 	mu               sync.Mutex
 	prepared         bool
 	housekeepingLint *HousekeepingLintResult
-	sizeTier         *SizeTier
-	reviewRisk       string
+
+	// tierMu guards only the size tier and review risk, never mu: mu is held
+	// across commands.prepare, and a tier read must not wait on it.
+	tierMu     sync.Mutex
+	sizeTier   *SizeTier
+	reviewRisk string
 }
 
 // SetSizeTier records the run's size classification. The first call wins:
@@ -33,8 +37,8 @@ func (s *RunShared) SetSizeTier(tier SizeTier) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
 	if s.sizeTier == nil {
 		s.sizeTier = &tier
 	}
@@ -47,8 +51,8 @@ func (s *RunShared) SizeTier() (SizeTier, bool) {
 	if s == nil {
 		return SizeTier{}, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
 	if s.sizeTier == nil {
 		return SizeTier{}, false
 	}
@@ -60,8 +64,8 @@ func (s *RunShared) SetReviewRisk(level string) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
 	s.reviewRisk = level
 }
 
@@ -71,8 +75,8 @@ func (s *RunShared) ReviewRisk() string {
 	if s == nil {
 		return ""
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
 	return s.reviewRisk
 }
 
@@ -83,8 +87,8 @@ func (s *RunShared) EnsurePrepared(prepare func() error) error {
 	if s == nil {
 		return prepare()
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
 	if s.prepared {
 		return nil
 	}
@@ -102,8 +106,8 @@ func (s *RunShared) SetHousekeepingLint(result HousekeepingLintResult) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
 	s.housekeepingLint = &result
 }
 
@@ -114,8 +118,8 @@ func (s *RunShared) ClearHousekeepingLint() {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
 	s.housekeepingLint = nil
 }
 
@@ -126,8 +130,8 @@ func (s *RunShared) TakeHousekeepingLint() (HousekeepingLintResult, bool) {
 	if s == nil {
 		return HousekeepingLintResult{}, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
 	if s.housekeepingLint == nil {
 		return HousekeepingLintResult{}, false
 	}

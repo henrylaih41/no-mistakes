@@ -352,19 +352,7 @@ func (e *Executor) prepareRestart(runID string, name types.StepName, currentInde
 func (e *Executor) initializeRunScopes(runID string) {
 	sessionsEnabled := e.config != nil && e.config.SessionReuse && e.agent != nil
 	e.sessions = NewRunSessions(e.db, runID, e.agent, sessionsEnabled)
-	// Under mu because SizeTier reads it from the daemon's IPC goroutines.
-	e.mu.Lock()
 	e.shared = &RunShared{}
-	e.mu.Unlock()
-}
-
-// SizeTier reports this run's size classification while the executor is
-// alive; ok is false before Review classified the run or when it never will.
-func (e *Executor) SizeTier() (SizeTier, bool) {
-	e.mu.Lock()
-	shared := e.shared
-	e.mu.Unlock()
-	return shared.SizeTier()
 }
 
 type stepExecutionState struct {

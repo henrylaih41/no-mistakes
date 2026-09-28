@@ -219,6 +219,7 @@ Previous review findings to address:
 		// Nothing changed, so nothing needed covering; an empty coverage record
 		// is honest here and cannot clear any outstanding finding.
 		noChangeFindings.ReviewedPaths = nil
+		sctx.Shared.SetReviewRisk(noChangeFindings.RiskLevel)
 		findingsJSON, _ := json.Marshal(noChangeFindings)
 		return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
 			Findings:        string(findingsJSON),

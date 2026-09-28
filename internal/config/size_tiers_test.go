@@ -11,7 +11,8 @@ import (
 // outranks the size tier's reviewer effort the same way it outranks
 // review_agents.
 func TestApplyPiProfileOutranksTheSmallReviewerEffort(t *testing.T) {
-	cfg := &Config{Agent: types.AgentPi, Agents: []types.AgentName{types.AgentPi}, SizeTiers: defaultSizeTiers()}
+	cfg := &Config{Agent: types.AgentPi, Agents: []types.AgentName{types.AgentPi}, SizeTiers: defaultSizeTiers(),
+		ReviewAgents: map[string]ReviewAgent{RoleReviewer: {Agent: types.AgentPi}}}
 	if _, ok, _ := cfg.SmallReviewerEntry(); !ok {
 		t.Fatal("precondition: an unpinned pi run gets a small reviewer")
 	}
@@ -23,5 +24,19 @@ func TestApplyPiProfileOutranksTheSmallReviewerEffort(t *testing.T) {
 	}
 	if !cfg.SizeTiers.Enabled() {
 		t.Fatal("the pin must keep classification on; only the reviewer effort yields")
+	}
+}
+
+// Only an explicit review_agents.reviewer gets a small reviewer: a synthesized
+// one would replace the primary's fallback chain with a single harness.
+func TestSmallReviewerNeedsAnExplicitReviewerRole(t *testing.T) {
+	cfg := &Config{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex, types.AgentClaude}, SizeTiers: defaultSizeTiers()}
+	if entry, ok, why := cfg.SmallReviewerEntry(); ok || why != "" {
+		t.Fatalf("SmallReviewerEntry = %+v ok=%v why=%q, want none without review_agents.reviewer", entry, ok, why)
+	}
+	cfg.ReviewAgents = map[string]ReviewAgent{RoleReviewer: {Agent: types.AgentCodex, Effort: agentcfg.EffortXHigh}}
+	entry, ok, _ := cfg.SmallReviewerEntry()
+	if !ok || entry.Agent != types.AgentCodex || entry.Effort != agentcfg.EffortHigh {
+		t.Fatalf("SmallReviewerEntry = %+v ok=%v, want codex at high", entry, ok)
 	}
 }

@@ -2374,11 +2374,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, err
 	}
 	cfg.ReviewAgents = raw.ReviewAgents
-	reviewerHarness := cfg.Agent
-	if entry, ok := raw.ReviewAgents[RoleReviewer]; ok {
-		reviewerHarness = entry.Agent
-	}
-	sizeTiers, err := parseSizeTiers(raw.SizeTiers, reviewerHarness)
+	sizeTiers, err := parseSizeTiers(raw.SizeTiers, raw.ReviewAgents[RoleReviewer].Agent)
 	if err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}

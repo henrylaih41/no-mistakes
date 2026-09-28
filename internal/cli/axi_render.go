@@ -134,7 +134,8 @@ type runView struct {
 	// genuinely green run in agent-facing output.
 	CIOverrideReason   string
 	TestOverrideReason string
-	// SizeTier is the live run's size classification, e.g. "small (37 lines)".
+	// SizeTier is the run's size classification, e.g. "small (37 lines)", read
+	// from the Review step log (the tier is logged, never persisted).
 	SizeTier string
 }
 
@@ -149,7 +150,6 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		AwaitingAgentSince: r.AwaitingAgentSince,
 		CIOverrideReason:   r.CIOverrideReason,
 		TestOverrideReason: r.TestOverrideReason,
-		SizeTier:           r.SizeTier,
 		PiProfile:          r.PiProfile,
 		VerificationPlan:   r.VerificationPlan,
 	}

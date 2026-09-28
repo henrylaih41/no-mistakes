@@ -448,10 +448,6 @@ type RunInfo struct {
 	// axi's outcome wording does not need to inspect every step itself.
 	CIOverrideReason   string `json:"ci_override_reason,omitempty"`
 	TestOverrideReason string `json:"test_override_reason,omitempty"`
-	// SizeTier is the live run's size classification ("small (37 lines)"),
-	// read from its executor; empty once the executor is gone or before
-	// Review classified the run. Never persisted.
-	SizeTier string `json:"size_tier,omitempty"`
 	// StateRev is the monotonic run-state revision this snapshot is at least
 	// as new as. It is sampled before the database read, so every event at or
 	// below it is already reflected here and every event above it still
