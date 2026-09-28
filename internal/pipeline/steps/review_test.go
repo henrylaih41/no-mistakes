@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -216,6 +217,108 @@ func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReviewStep_AbsoluteReviewedPathsInsideTheWorktreeCountAsCovered pins
+// issue #73: a reviewer that reports the absolute path of a file it read inside
+// the worktree covered that file, so a clean review completes without a park
+// and the recorded coverage is the worktree-relative form the carry-forward
+// matches on. An absolute path outside the worktree is still outside.
+func TestReviewStep_AbsoluteReviewedPathsInsideTheWorktreeCountAsCovered(t *testing.T) {
+	t.Parallel()
+	cleanWith := func(paths ...string) json.RawMessage {
+		encoded, _ := json.Marshal(paths)
+		return json.RawMessage(`{"findings":[],"reviewed_paths":` + string(encoded) + `,"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)
+	}
+	run := func(t *testing.T, workDir func(dir string) string, reported func(dir string) []string) (*pipeline.StepOutcome, string) {
+		t.Helper()
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: cleanWith(reported(dir)...)}, nil
+		}}
+		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+		sctx.WorkDir = workDir(dir)
+		var logs []string
+		sctx.Log = func(msg string) { logs = append(logs, msg) }
+		outcome, err := (&ReviewStep{}).Execute(sctx)
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		return outcome, strings.Join(logs, "\n")
+	}
+	same := func(dir string) string { return dir }
+
+	t.Run("absolute inside the worktree covers and completes", func(t *testing.T) {
+		t.Parallel()
+		outcome, logs := run(t, same, func(dir string) []string { return []string{filepath.Join(dir, "feature.txt")} })
+		if outcome.NeedsApproval || strings.Contains(logs, "parking for approval") {
+			t.Fatalf("NeedsApproval = %v, want a clean completion; logs:\n%s", outcome.NeedsApproval, logs)
+		}
+		if len(outcome.ReviewedPaths) != 1 || outcome.ReviewedPaths[0] != "feature.txt" {
+			t.Fatalf("ReviewedPaths = %q, want the worktree-relative feature.txt", outcome.ReviewedPaths)
+		}
+	})
+
+	t.Run("absolute outside the worktree is still outside", func(t *testing.T) {
+		t.Parallel()
+		outside := filepath.Join(t.TempDir(), "feature.txt")
+		outcome, logs := run(t, same, func(string) []string { return []string{"feature.txt", outside} })
+		if !outcome.NeedsApproval {
+			t.Fatal("NeedsApproval = false, want the out-of-worktree path to keep the park")
+		}
+		if want := "1 reviewed_paths entry(ies) outside the reviewable set: " + outside; !strings.Contains(logs, want) {
+			t.Fatalf("log missing %q; logs:\n%s", want, logs)
+		}
+	})
+
+	t.Run("symlinked worktree root resolves", func(t *testing.T) {
+		t.Parallel()
+		link := filepath.Join(t.TempDir(), "worktree-link")
+		viaLink := func(dir string) string {
+			if err := os.Symlink(dir, link); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			return link
+		}
+		// The worktree is reached through a link (macOS /var -> /private/var);
+		// the reviewer reports the resolved path.
+		outcome, logs := run(t, viaLink, func(dir string) []string {
+			resolved, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return []string{filepath.Join(resolved, "feature.txt")}
+		})
+		if outcome.NeedsApproval {
+			t.Fatalf("NeedsApproval = true, want the resolved path to count as covered; logs:\n%s", logs)
+		}
+	})
+
+	t.Run("deleted directory and tracked symlink through a symlinked root resolve", func(t *testing.T) {
+		t.Parallel()
+		realDir := filepath.Join(t.TempDir(), "real")
+		workDir := filepath.Join(realDir, "run")
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(workDir, "target.go"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(t.TempDir(), "alias")
+		if err := os.Symlink(realDir, alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if err := os.Symlink("target.go", filepath.Join(workDir, "link.go")); err != nil {
+			t.Fatal(err)
+		}
+		got := relativizeReviewedPaths([]string{
+			filepath.Join(alias, "run", "old", "file.go"),
+			filepath.Join(alias, "run", "link.go"),
+		}, workDir)
+		if want := []string{"old/file.go", "link.go"}; !slices.Equal(got, want) {
+			t.Fatalf("relativizeReviewedPaths = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestReviewStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {

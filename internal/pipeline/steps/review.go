@@ -522,6 +522,7 @@ Risk assessment (after listing all findings):
 		}
 		findings.Items = append(findings.Items, questionFindings...)
 	}
+	findings.ReviewedPaths = relativizeReviewedPaths(findings.ReviewedPaths, sctx.WorkDir)
 	needsApproval := hasBlockingFindings(findings.Items)
 	if !needsApproval && !reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable) {
 		// A clean round certifies the whole head, so it is held to a positive
