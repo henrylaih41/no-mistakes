@@ -58,6 +58,10 @@ type RunOpts struct {
 	// apply an operator-configured later-round role override; concrete adapters
 	// ignore it. An unknown round always keeps the primary role selection.
 	Round int
+	// SmallChange marks a review invocation for a run classified small
+	// (size_tiers). The review-role router serves it with the small-change
+	// reviewer when one is configured; concrete adapters ignore it.
+	SmallChange bool
 	// SessionFallbackReason is the low-cardinality reason a failed resume forced
 	// this fresh-session retry (see db.FallbackReason*). Set only when
 	// SessionFallback is true. Instrumentation only; adapters ignore it.

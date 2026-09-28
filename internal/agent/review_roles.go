@@ -18,8 +18,13 @@ type RoundedRole struct {
 }
 
 // ReviewRoles carries both review-loop roles with their optional later-round
-// overlays.
-type ReviewRoles struct{ Reviewer, Fixer RoundedRole }
+// overlays. SmallReviewer, when set, serves the base reviewer's turns for a
+// small change (RunOpts.SmallChange); it is the same reviewer profile at the
+// size_tiers effort.
+type ReviewRoles struct {
+	Reviewer, Fixer RoundedRole
+	SmallReviewer   Agent
+}
 
 // agents lists every non-nil agent this role owns, primary first.
 func (r RoundedRole) agents() []Agent {
@@ -63,16 +68,17 @@ func WithReviewAgents(primary, reviewer, fixer Agent) Agent {
 // independent instance. Only the fixer resumes sessions; review turns remain
 // fresh.
 func WithReviewRoles(primary Agent, roles ReviewRoles) Agent {
-	if len(roles.Reviewer.agents()) == 0 && len(roles.Fixer.agents()) == 0 {
+	if len(roles.Reviewer.agents()) == 0 && len(roles.Fixer.agents()) == 0 && roles.SmallReviewer == nil {
 		return primary
 	}
-	return &reviewAgents{primary: primary, reviewer: roles.Reviewer, fixer: roles.Fixer}
+	return &reviewAgents{primary: primary, reviewer: roles.Reviewer, fixer: roles.Fixer, smallReviewer: roles.SmallReviewer}
 }
 
 type reviewAgents struct {
-	primary  Agent
-	reviewer RoundedRole
-	fixer    RoundedRole
+	primary       Agent
+	reviewer      RoundedRole
+	fixer         RoundedRole
+	smallReviewer Agent
 }
 
 func (a *reviewAgents) Name() string { return a.primary.Name() }
@@ -113,7 +119,11 @@ func (a *reviewAgents) SupportsSessionProvider(provider string) bool {
 func (a *reviewAgents) ReportsAgentAttempts() bool { return true }
 
 func (a *reviewAgents) all() []Agent {
-	return append([]Agent{a.primary}, append(a.reviewer.agents(), a.fixer.agents()...)...)
+	all := append([]Agent{a.primary}, append(a.reviewer.agents(), a.fixer.agents()...)...)
+	if a.smallReviewer != nil {
+		all = append(all, a.smallReviewer)
+	}
+	return all
 }
 
 func (a *reviewAgents) NeutralizesGateInstructions() bool {
@@ -130,6 +140,10 @@ func (a *reviewAgents) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	switch opts.Purpose {
 	case "review":
 		selected = a.reviewer.pick(opts.Round, a.primary)
+		// A later-round overlay the operator configured wins over the tier.
+		if opts.SmallChange && a.smallReviewer != nil && selected != a.reviewer.Late {
+			selected = a.smallReviewer
+		}
 		opts.Session = nil
 	case "review-fix":
 		selected = a.fixer.pick(opts.Round, a.primary)

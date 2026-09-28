@@ -217,6 +217,9 @@ type GlobalConfig struct {
 	// expanded and syntax-validated when the global config is loaded; the
 	// referenced files are validated and materialized at run start.
 	DesignContext DesignContextRaw
+	// SizeTiers is the machine-owned small/standard change policy (reviewer
+	// effort and the agent test turn). Global-only; see SizeTiers.
+	SizeTiers SizeTiers
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -256,6 +259,7 @@ type globalConfigRaw struct {
 	Test                    TestRaw                    `yaml:"test"`
 	Review                  GlobalReviewRaw            `yaml:"review"`
 	DesignContext           DesignContextRaw           `yaml:"design_context"`
+	SizeTiers               sizeTiersRaw               `yaml:"size_tiers"`
 	Eval                    EvalRaw                    `yaml:"eval"`
 	// ReviewLoop is the retired post-PR review loop, kept as a parse-only
 	// tombstone because every captured eval case pins it (see
@@ -761,6 +765,7 @@ type Config struct {
 	LogLevel              string
 	SessionReuse          bool
 	Eval                  Eval
+	SizeTiers             SizeTiers
 	Commands              Commands
 	// Gates are the repository's extra checks, already trusted-only by the
 	// time they reach here (EffectiveRepoConfig sourced them from the trusted
@@ -2145,6 +2150,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		GateReconcileTimeout:    DefaultGateReconcileTimeout,
 		LogLevel:                "info",
 		SessionReuse:            true,
+		SizeTiers:               defaultSizeTiers(),
 		Eval:                    evalDefaults(),
 	}
 }
@@ -2368,6 +2374,15 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, err
 	}
 	cfg.ReviewAgents = raw.ReviewAgents
+	reviewerHarness := cfg.Agent
+	if entry, ok := raw.ReviewAgents[RoleReviewer]; ok {
+		reviewerHarness = entry.Agent
+	}
+	sizeTiers, err := parseSizeTiers(raw.SizeTiers, reviewerHarness)
+	if err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	cfg.SizeTiers = sizeTiers
 	if raw.WorktreeRoots != nil {
 		if err := ValidateWorktreeRoots(raw.WorktreeRoots); err != nil {
 			return nil, err
@@ -3360,6 +3375,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		// Eval is global-only by design (see GlobalConfig.Eval), so it is
 		// copied straight through with no repository override step.
 		Eval:           global.Eval,
+		SizeTiers:      global.SizeTiers,
 		Commands:       repo.Commands,
 		Gates:          copyGates(repo.Gates),
 		IgnorePatterns: repo.IgnorePatterns,

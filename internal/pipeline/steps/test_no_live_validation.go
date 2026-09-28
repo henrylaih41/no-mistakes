@@ -28,7 +28,7 @@ type testTurnInputs struct {
 // testWithoutLiveValidation finishes the Test step under test.live_validation:
 // off (the default). It keeps the fork's pre-live-validation behavior: a
 // failing commands.test parks at once; otherwise an agent test turn runs only
-// when there is no commands.test or the run carries user intent, and it
+// when there is no commands.test or agentTestTurnReason asks for one, and it
 // reports findings and evidence but no scenarios or verdict, so no-surface and
 // inconclusive parks cannot happen.
 func testWithoutLiveValidation(sctx *pipeline.StepContext, in testTurnInputs) (*pipeline.StepOutcome, error) {
@@ -44,7 +44,11 @@ func testWithoutLiveValidation(sctx *pipeline.StepContext, in testTurnInputs) (*
 		}, nil
 	}
 
-	if testCmd != "" && cleanedUserIntent(sctx) == "" {
+	turnReason := "no test command configured"
+	if testCmd != "" {
+		turnReason = agentTestTurnReason(sctx)
+	}
+	if turnReason == "" {
 		findings := Findings{Tested: in.tested}
 		for _, f := range in.newTestsFromFix {
 			findings.Items = append(findings.Items, newTestFileFinding(f))
@@ -64,7 +68,7 @@ func testWithoutLiveValidation(sctx *pipeline.StepContext, in testTurnInputs) (*
 	if testCmd == "" {
 		sctx.Log("no test command configured, asking agent to run tests...")
 	} else {
-		sctx.Log("user intent available, asking agent to gather test evidence...")
+		sctx.Log(turnReason + ", asking agent to gather test evidence...")
 	}
 	evidenceGuidance := fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree: %s", evidenceDir)
 	if sctx.Config.Test.Evidence.StoreInRepo {
@@ -164,4 +168,28 @@ func newTestFileFinding(file string) Finding {
 		File:        file,
 		Description: fmt.Sprintf("new test file written by agent: %s", file),
 	}
+}
+
+// agentTestTurnReason decides, after a passing commands.test, whether the
+// agent test turn still runs, and names why ("" means it does not). With the
+// run's size tier known, a standard change always gets the turn and a small
+// one only when the latest review round rated its risk high. Without a tier
+// (size_tiers off, Review skipped, or a daemon restart) the untiered rule
+// holds: the turn runs only when the run carries user intent.
+func agentTestTurnReason(sctx *pipeline.StepContext) string {
+	tier, ok := sctx.Shared.SizeTier()
+	if !ok {
+		if cleanedUserIntent(sctx) != "" {
+			return "user intent available"
+		}
+		return ""
+	}
+	if !tier.Small {
+		return "size tier " + tier.String()
+	}
+	if sctx.Shared.ReviewRisk() == "high" {
+		return "size tier " + tier.String() + " with high review risk"
+	}
+	sctx.Log(fmt.Sprintf("size tier %s, test command passed and review risk is not high: skipping the agent test turn", tier))
+	return ""
 }

@@ -1322,3 +1322,14 @@ func TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion(t *testing.T) {
 		})
 	}
 }
+
+func TestAxiRunObjectShowsTheLiveSizeTier(t *testing.T) {
+	rv := runViewFromIPC(&ipc.RunInfo{ID: "r1", Branch: "b", Status: "running", HeadSHA: "abc", SizeTier: "small (37 lines)"})
+	if out := axiDoc(runObjectField(rv)); !strings.Contains(out, "size_tier: small (37 lines)") {
+		t.Fatalf("run object missing the size tier:\n%s", out)
+	}
+	rv.SizeTier = ""
+	if out := axiDoc(runObjectField(rv)); strings.Contains(out, "size_tier") {
+		t.Fatalf("an unclassified run must not render a size tier:\n%s", out)
+	}
+}

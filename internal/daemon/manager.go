@@ -315,7 +315,21 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		}
 		roles[role] = next
 	}
+	var smallReviewer agent.Agent
+	if entry, ok, why := cfg.SmallReviewerEntry(); ok {
+		smallReviewer, err = newConfiguredAgent(ctx, cfg.ForReviewAgent(entry), evidenceRoot, lookPath, environment)
+		if err != nil {
+			_ = primary.Close()
+			for _, existing := range roles {
+				_ = existing.Close()
+			}
+			return nil, fmt.Errorf("create size_tiers small reviewer: %w", err)
+		}
+	} else if why != "" {
+		slog.Warn("size_tiers: small changes keep the reviewer's own effort", "reason", why)
+	}
 	return agent.WithReviewRoles(primary, agent.ReviewRoles{
+		SmallReviewer: smallReviewer,
 		Reviewer: agent.RoundedRole{
 			Agent:    roles[config.RoleReviewer],
 			Late:     roles[config.RoleReviewerAfterRound],
@@ -1953,6 +1967,23 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 	}
 
 	return exec.RespondWithOverrides(step, action, findingIDs, instructions, addedFindings, approvalReason, fixOverrideReason)
+}
+
+// SizeTier renders an active run's size classification for status surfaces,
+// or "" when the run has no live executor or was not classified. It is
+// in-memory only by design: the tier is logged, never persisted.
+func (m *RunManager) SizeTier(runID string) string {
+	m.mu.Lock()
+	exec, ok := m.executors[runID]
+	m.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	tier, ok := exec.SizeTier()
+	if !ok {
+		return ""
+	}
+	return tier.String()
 }
 
 // HandleAnswerReviewQuestion records one operator answer to a question the

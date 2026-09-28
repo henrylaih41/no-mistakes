@@ -1125,7 +1125,9 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			if err != nil {
 				return nil, fmt.Errorf("get steps: %w", err)
 			}
-			return runToInfo(d, run, steps), nil
+			info := runToInfo(d, run, steps)
+			info.SizeTier = mgr.SizeTier(runID)
+			return info, nil
 		})
 		if err != nil {
 			return nil, err
@@ -1204,7 +1206,9 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err != nil {
 			return nil, fmt.Errorf("get steps: %w", err)
 		}
-		return &ipc.GetActiveRunResult{Run: runToInfo(d, run, steps)}, nil
+		info := runToInfo(d, run, steps)
+		info.SizeTier = mgr.SizeTier(run.ID)
+		return &ipc.GetActiveRunResult{Run: info}, nil
 	})
 
 	srv.Handle(ipc.MethodGateContext, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
