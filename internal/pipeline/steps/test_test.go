@@ -435,7 +435,10 @@ func TestTestStep_RepeatedCutKeepsRefusingUnvalidatedWork(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 	sctx.PreviousFindings = noGoTestGateJSON(headSHA)
-	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+	// The budget also bounds the first (repair) call, which must finish inside
+	// it; a loaded -race runner took 87ms. The later calls block until the cut,
+	// so the budget sets only how long they wait, not whether the cut happens.
+	sctx.Config.TestAgentTimeout = time.Second
 
 	first, err := (&TestStep{}).Execute(sctx)
 	if err != nil {
