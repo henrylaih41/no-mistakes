@@ -596,6 +596,7 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
 	}
 	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy)
+	riskLine = withSizeTierLine(riskLine, sctx.Shared)
 	// The review conversation rides inside the Pipeline section as an ordinary
 	// `### ` group, so the existing body-budget logic can drop it whole rather
 	// than competing with the attestation it must never displace.
@@ -1511,4 +1512,19 @@ func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingM
 		Title: title,
 		Body:  body,
 	}, nil
+}
+
+// withSizeTierLine adds the run's size tier under the Risk Assessment heading
+// when this executor classified the run; a run it did not classify (tiers off,
+// Review skipped, a daemon restart) gets no line rather than a guessed one.
+func withSizeTierLine(riskLine string, shared *pipeline.RunShared) string {
+	tier, ok := shared.SizeTier()
+	if !ok {
+		return riskLine
+	}
+	line := "size tier: " + tier.String()
+	if riskLine == "" {
+		return line
+	}
+	return riskLine + "\n\n" + line
 }

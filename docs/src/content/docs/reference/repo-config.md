@@ -346,7 +346,7 @@ Broad regression belongs in remote CI and remains mandatory before a PR is ready
 no-mistakes does not guess whether an arbitrary shell string is "too broad" - the contract is documented and dogfooded, not enforced with language- or filename-specific heuristics.
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
-What follows the baseline depends on [`test.live_validation`](#testlive_validation): with the default `off`, a passing baseline completes Test without an agent turn unless the run carries user intent; with `on`, the agent always derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
+What follows the baseline depends on [`test.live_validation`](#testlive_validation): with the default `off`, a passing baseline completes Test without an agent turn for a small change reviewed below high risk and runs one for a standard change ([`size_tiers`](/no-mistakes/reference/global-config/#size_tiers); a run tiers could not classify also gets one, and with tiers disabled only a run with user intent does); with `on`, the agent always derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
 A non-zero exit parks the Test step. Approving that gate records an explicit override on the step and on the PR attestation; the [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check treats that as non-compliant unless [`test.allow_approve_over_failure`](#testallow_approve_over_failure) is set.
 
 ### commands.lint
@@ -887,7 +887,7 @@ test:
   live_validation: on
 ```
 
-- `off` (default): a failing [`commands.test`](#commandstest) parks at once, without an agent turn. Otherwise an agent test turn runs only when `commands.test` is unset or the run carries user intent; that turn reports findings, `tested`, `testing_summary`, and `artifacts` but no scenarios or verdict, so Test never parks on `no-surface` or `inconclusive` and the PR attestation carries no `live_validation`. Its findings follow their `action` as usual.
+- `off` (default): a failing [`commands.test`](#commandstest) parks at once, without an agent turn. Otherwise an agent test turn runs when `commands.test` is unset, or after it passes as the machine's [`size_tiers`](/no-mistakes/reference/global-config/#size_tiers) decide (standard changes, small ones reviewed at high risk, and runs with no recorded tier; with tiers disabled, only a run with user intent); that turn reports findings, `tested`, `testing_summary`, and `artifacts` but no scenarios or verdict, so Test never parks on `no-surface` or `inconclusive` and the PR attestation carries no `live_validation`. Its findings follow their `action` as usual.
 - `on`: the [Test step](/no-mistakes/reference/pipeline-steps/#test) always runs the evidence turn after the baseline, with its scenario list, verdict, and verdict-based approval policy.
 
 Any other value fails config parsing. This field is repository-only (setting it in global config is a parse error) and is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`: a contributor's pushed branch cannot switch off the live validation that tests it.

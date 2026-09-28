@@ -151,6 +151,7 @@ func annotateRunView(env *axiEnv, rv *runView) {
 	if env == nil || rv == nil {
 		return
 	}
+	rv.SizeTier = sizeTierFromStepLog(filepath.Join(env.p.RunLogDir(rv.ID), string(types.StepReview)+".log"))
 	quietWarning := configQuietWarning(env)
 	for i := range rv.Steps {
 		step := &rv.Steps[i]
@@ -411,4 +412,20 @@ func (p *progressPrinter) update(run *ipc.RunInfo) {
 			fmt.Fprintf(p.w, "  %s: %s\n", name, status)
 		}
 	}
+}
+
+// sizeTierFromStepLog returns the size tier the Review step logged ("size
+// tier: small (37 lines)"), or "" when the run was never classified.
+func sizeTierFromStepLog(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	const prefix = "size tier: "
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), prefix); ok {
+			return rest
+		}
+	}
+	return ""
 }

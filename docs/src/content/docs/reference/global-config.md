@@ -952,6 +952,31 @@ Partial matches older than 24 hours are rejected unless their raw score is at le
 If exactly one accepted candidate has a raw score of at least `0.85`, that decisive candidate wins before recency ranking.
 Otherwise, accepted candidates are ranked by confidence, which combines the raw score with a small recency boost, with ties going to the most recent matching session, and ambiguous accepted candidates may be disambiguated by the configured pipeline agent.
 
+### size_tiers
+
+Machine-owned small/standard change policy. Each run is classified once, by the Review step, on the submitted diff (the same base..head range Review reads): its changed lines are additions plus deletions from `git diff --numstat` (a binary file is a changed file with 0 lines), and it is docs-only when every changed path is Markdown, reStructuredText, plain text, or under `docs/`. A docs-only change, or one with fewer than `small_max_lines` changed lines, is **small**; every other change is **standard**. Fix rounds never reclassify.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                            | Type      | Default | Description                                                              |
+| -------------------------------- | --------- | ------- | ------------------------------------------------------------------------ |
+| `size_tiers.small_max_lines`     | `integer` | `100`   | Exclusive changed-line cutoff for a small change; `0` disables tiers      |
+| `size_tiers.small_review_effort` | `string`  | `high`  | Reviewer effort for a small change (the [`agent_config`](#agent_config) effort vocabulary) |
+
+```yaml
+size_tiers:
+  small_max_lines: 100
+  small_review_effort: high
+```
+
+A small change's reviewer turns (rereviews included) run on the [`review_agents.reviewer`](#review_agents) profile with its effort replaced by `small_review_effort`; the fixer and every other step are unchanged. Only an explicit `review_agents.reviewer` gets this: without one, small changes are still classified but reviewed on the primary agent (and its fallback chain) at its own effort. A reviewer turn that `reviewer_after_round` has moved to its later profile keeps that operator-chosen profile, effort included. Because [`agent_args_override`](#agent_args_override) wins over a profile effort, an effort pinned there for the reviewer's harness (for example `-c model_reasoning_effort=...` for codex) keeps small changes at the pinned effort and the daemon logs a warning; state the reviewer's model and effort in `review_agents.reviewer` instead. The same fallback applies to a harness that cannot express effort. An explicitly set `small_review_effort` the reviewer's harness cannot express is a config error. A [per-run Pi pin](#per-run-pi-profiles) outranks `small_review_effort`: every reviewer turn keeps the pinned effort, and the run is still classified for the Test step.
+
+With [`test.live_validation: off`](/no-mistakes/reference/repo-config/#testlive_validation), the tier also decides whether the Test step's agent turn runs after a passing [`commands.test`](/no-mistakes/reference/repo-config/#commandstest); see [Test](/no-mistakes/reference/pipeline-steps/#test). The tier is written to the Review step log (`size tier: small (37 lines)`), which `axi status` reads to show `size_tier`, and to the PR body's Risk Assessment section. The decision itself is held in memory only: a run the daemon resumes after a restart is unclassified, and its Test step runs the agent turn.
+
+Global-only: a repository cannot set it.
+
 ### design_context
 
 Machine-owned design-contract files (for example a code-quality charter) that every new run on this machine checks its change against.

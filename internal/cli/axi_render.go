@@ -134,6 +134,9 @@ type runView struct {
 	// genuinely green run in agent-facing output.
 	CIOverrideReason   string
 	TestOverrideReason string
+	// SizeTier is the run's size classification, e.g. "small (37 lines)", read
+	// from the Review step log (the tier is logged, never persisted).
+	SizeTier string
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
@@ -487,6 +490,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	}
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
 	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA})
+	if rv.SizeTier != "" {
+		fields = append(fields, toon.Field{Key: "size_tier", Value: rv.SizeTier})
+	}
 	if rv.TestOverrideReason != "" {
 		fields = append(fields, toon.Field{Key: "test_override_reason", Value: rv.TestOverrideReason})
 	}

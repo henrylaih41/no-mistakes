@@ -1322,3 +1322,24 @@ func TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion(t *testing.T) {
 		})
 	}
 }
+
+func TestAxiRunObjectShowsTheSizeTierFromTheReviewLog(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	env := &axiEnv{p: p, cfg: &config.GlobalConfig{}}
+	rv := runView{ID: "r1", Branch: "b", Status: "running", HeadSHA: "abc"}
+	annotateRunView(env, &rv)
+	if out := axiDoc(runObjectField(rv)); strings.Contains(out, "size_tier") {
+		t.Fatalf("an unclassified run must not render a size tier:\n%s", out)
+	}
+	logDir := p.RunLogDir("r1")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "review.log"), []byte("reviewing changes...\nsize tier: small (37 lines)\ncodex started pid=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	annotateRunView(env, &rv)
+	if out := axiDoc(runObjectField(rv)); !strings.Contains(out, "size_tier: small (37 lines)") {
+		t.Fatalf("run object missing the size tier:\n%s", out)
+	}
+}

@@ -315,7 +315,21 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		}
 		roles[role] = next
 	}
+	var smallReviewer agent.Agent
+	if entry, ok, why := cfg.SmallReviewerEntry(); ok {
+		smallReviewer, err = newConfiguredAgent(ctx, cfg.ForReviewAgent(entry), evidenceRoot, lookPath, environment)
+		if err != nil {
+			_ = primary.Close()
+			for _, existing := range roles {
+				_ = existing.Close()
+			}
+			return nil, fmt.Errorf("create size_tiers small reviewer: %w", err)
+		}
+	} else if why != "" {
+		slog.Warn("size_tiers: small changes keep the reviewer's own effort", "reason", why)
+	}
 	return agent.WithReviewRoles(primary, agent.ReviewRoles{
+		SmallReviewer: smallReviewer,
 		Reviewer: agent.RoundedRole{
 			Agent:    roles[config.RoleReviewer],
 			Late:     roles[config.RoleReviewerAfterRound],

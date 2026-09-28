@@ -390,6 +390,13 @@ func escapeHatch(name types.AgentName) string {
 	return "use agent_args_override." + string(name) + " if your build of the CLI accepts one"
 }
 
+// EffortPinned reports whether rawArgs (agent_args_override) already pin the
+// harness's effort natively, in which case NativeArgs skips a profile effort.
+func EffortPinned(name types.AgentName, rawArgs []string) bool {
+	h, ok := lookup(name)
+	return ok && h.effort.pinned != nil && h.effort.pinned(rawArgs)
+}
+
 // NativeArgs renders the argv fragment that expresses the profile for a harness
 // whose knobs use MechanismArgs. rawArgs are the operator's agent_args_override
 // flags: a knob those already pin natively is skipped, so the raw spelling

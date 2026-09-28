@@ -52,6 +52,7 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// review/fix efficiency can be normalized without external git archaeology.
 	// Best-effort: a diff-stat failure leaves the workload unknown.
 	workload := reviewWorkload(ctx, sctx.WorkDir, baseSHA, sctx.Run.HeadSHA)
+	smallChange := classifyRunSize(sctx, baseSHA)
 
 	// The review conversation (see
 	// docs/src/content/docs/concepts/review-conversation.md).
@@ -218,6 +219,7 @@ Previous review findings to address:
 		// Nothing changed, so nothing needed covering; an empty coverage record
 		// is honest here and cannot clear any outstanding finding.
 		noChangeFindings.ReviewedPaths = nil
+		sctx.Shared.SetReviewRisk(noChangeFindings.RiskLevel)
 		findingsJSON, _ := json.Marshal(noChangeFindings)
 		return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
 			Findings:        string(findingsJSON),
@@ -455,6 +457,9 @@ Risk assessment (after listing all findings):
 		OnChunk:    sctx.LogChunk,
 		Purpose:    "review",
 		Workload:   workload,
+		// Every reviewer turn of a small run, rereviews included, runs at the
+		// size_tiers effort; the fixer is untouched.
+		SmallChange: smallChange,
 	}
 	var findings Findings
 	for attempt := 1; ; attempt++ {
@@ -523,6 +528,7 @@ Risk assessment (after listing all findings):
 		findings.Items = append(findings.Items, questionFindings...)
 	}
 	findings.ReviewedPaths = relativizeReviewedPaths(findings.ReviewedPaths, sctx.WorkDir)
+	sctx.Shared.SetReviewRisk(findings.RiskLevel)
 	needsApproval := hasBlockingFindings(findings.Items)
 	if !needsApproval && !reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable) {
 		// A clean round certifies the whole head, so it is held to a positive
@@ -792,4 +798,30 @@ func withdrawnFindings(findings Findings) []types.WithdrawnFinding {
 		}
 	}
 	return withdrawn
+}
+
+// classifyRunSize classifies the run's change once, on the submitted diff
+// (baseSHA..head, the range this review reads), records it for the rest of the
+// run and logs it. It reports whether the reviewer runs at the small-change
+// effort. Fix rounds never classify: a run whose tier this executor did not
+// record (tiers off, a classification error, a daemon restart) is reviewed as
+// standard.
+func classifyRunSize(sctx *pipeline.StepContext, baseSHA string) bool {
+	if !sctx.Config.SizeTiers.Enabled() {
+		return false
+	}
+	if tier, ok := sctx.Shared.SizeTier(); ok {
+		return tier.Small
+	}
+	if sctx.Fixing {
+		return false
+	}
+	tier, err := pipeline.ClassifySize(sctx.Ctx, sctx.WorkDir, baseSHA, sctx.Run.HeadSHA, sctx.Config.SizeTiers.SmallMaxLines)
+	if err != nil {
+		sctx.Log(fmt.Sprintf("size tier unknown, reviewing as standard: %v", err))
+		return false
+	}
+	sctx.Shared.SetSizeTier(tier)
+	sctx.Log("size tier: " + tier.String())
+	return tier.Small
 }
