@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
@@ -38,5 +39,42 @@ func TestSmallReviewerNeedsAnExplicitReviewerRole(t *testing.T) {
 	entry, ok, _ := cfg.SmallReviewerEntry()
 	if !ok || entry.Agent != types.AgentCodex || entry.Effort != agentcfg.EffortHigh {
 		t.Fatalf("SmallReviewerEntry = %+v ok=%v, want codex at high", entry, ok)
+	}
+}
+
+// size_tiers is loaded from the global config only: defaults apply when it is
+// absent, 0 disables classification, and an explicit effort is validated for
+// the review_agents.reviewer harness the way review_agents validates its own.
+func TestLoadGlobalSizeTiers(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		yaml    string
+		want    SizeTiers
+		wantErr string
+	}{
+		{"absent uses the defaults", "agent: codex\n", SizeTiers{SmallMaxLines: 100, SmallReviewEffort: agentcfg.EffortHigh}, ""},
+		{"zero disables", "size_tiers: {small_max_lines: 0}\n", SizeTiers{SmallReviewEffort: agentcfg.EffortHigh}, ""},
+		{"explicit values", "review_agents:\n  reviewer: {agent: codex}\nsize_tiers: {small_max_lines: 40, small_review_effort: medium}\n", SizeTiers{SmallMaxLines: 40, SmallReviewEffort: agentcfg.EffortMedium}, ""},
+		{"negative cutoff is refused", "size_tiers: {small_max_lines: -1}\n", SizeTiers{}, "size_tiers.small_max_lines must be >= 0"},
+		{"unknown effort is refused", "size_tiers: {small_review_effort: turbo}\n", SizeTiers{}, "size_tiers.small_review_effort"},
+		{"effort the reviewer harness cannot express is refused", "review_agents:\n  reviewer: {agent: rovodev}\nsize_tiers: {small_review_effort: high}\n", SizeTiers{}, "invalid size_tiers.small_review_effort"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			global, err := LoadGlobalFromBytes([]byte(tc.yaml))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("LoadGlobalFromBytes error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := Merge(global, &RepoConfig{}).SizeTiers; got != tc.want {
+				t.Fatalf("merged SizeTiers = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
