@@ -73,6 +73,9 @@ design_context:
   files:
     - ~/.agents/QUALITY.md
 
+pr:
+  style_file: ~/skills/clear-writing/SKILL.md
+
 review:
   max_fix_rounds: 3
   fix_round_min_severity: warning
@@ -1002,6 +1005,32 @@ A run's design context is resolved once, at run start, from three sources in thi
 Size caps bound the prompt: each file is cut at 64 KiB with a visible truncation note, the run keeps at most 256 KiB and 64 files, and once a cap is reached the remaining CLI and repository files are left out. A global file never is: if caller files exhaust the caps before a global file is reached, the run fails and asks for fewer `--design-context` files.
 
 Review, Test, Document and Lint turns, their fix turns, repository-gate repairs, rebase and merge conflict resolution, and CI repairs each receive the files as a fenced design-contract section. Each body is marked untrusted data: agents check the change against it and flag deviations, but instructions inside it do not override the prompt, and secrets are redacted before it is sent.
+
+### pr.style_file
+
+A writing-style file for the text a person reads on the pull request.
+
+|      |          |
+| ---- | -------- |
+| Type | `string` |
+| Default | Empty (no style section) |
+
+```yaml
+pr:
+  style_file: ~/skills/clear-writing/SKILL.md
+```
+
+The path is expanded when the config loads and must be absolute or start with `~/`. The file is read each time a prompt is built, so an edit applies to the next agent turn. Each agent turn that writes PR text gets the file and is told which text it governs:
+
+- the PR draft, for the `## What Changed` body (or the narrative it writes into a [`pr.template`](/no-mistakes/reference/repo-config/#prtemplate));
+- the Test turn, for `testing_summary`, the paragraph under `## Testing`;
+- the Review turn, for `risk_rationale`, the line under `## Risk Assessment`.
+
+The style governs how the text is written, not what an agent checks or reports. `testing_summary` and `risk_rationale` render inline as one paragraph, so their turns are also told to write plain sentences with no line breaks or lists. The What Changed body (or template narrative) takes its layout and length from the style instead of the default 1-3 bullets, and keeps its required headings. The `## Intent` section is the caller's `--intent` text, published verbatim, so the style never rewrites it.
+
+The style is cosmetic, so it never blocks a run: a missing, empty, or over-64 KiB file is skipped with a warning in the step log. Unlike [`design_context`](#design_context), it is not pinned at run start and is not marked untrusted, because it is the operator's own machine config.
+
+Global-only: a repository cannot set it.
 
 ### test.evidence
 

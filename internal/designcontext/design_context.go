@@ -50,22 +50,22 @@ func ResolveCLIPaths(cwd string, paths []string) ([]string, error) {
 	return out, nil
 }
 
-// ResolveGlobalPaths expands machine-global design-context paths and requires
-// an absolute result. The daemon has no meaningful working directory against
-// which to resolve relative operator configuration.
-func ResolveGlobalPaths(paths []string) ([]string, error) {
+// ResolveGlobalPaths expands the machine-global paths configured under key and
+// requires an absolute result. The daemon has no meaningful working directory
+// against which to resolve relative operator configuration.
+func ResolveGlobalPaths(key string, paths []string) ([]string, error) {
 	out := make([]string, 0, len(paths))
 	for _, raw := range paths {
 		path := strings.TrimSpace(raw)
 		if path == "" {
-			return nil, fmt.Errorf("empty design_context.files entry")
+			return nil, fmt.Errorf("empty %s entry", key)
 		}
 		expanded, err := expandHome(path)
 		if err != nil {
 			return nil, err
 		}
 		if !filepath.IsAbs(expanded) {
-			return nil, fmt.Errorf("design_context.files %q must be an absolute or ~/ path", path)
+			return nil, fmt.Errorf("%s %q must be an absolute or ~/ path", key, path)
 		}
 		out = append(out, filepath.Clean(expanded))
 	}

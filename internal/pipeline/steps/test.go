@@ -185,7 +185,7 @@ Previous test findings to address:
 	} else {
 		sctx.Log("baseline tests passed, asking agent to gather live evidence...")
 	}
-	reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + designContextPromptSection(sctx) + testguidance.Rule
+	reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + designContextPromptSection(sctx) + testguidance.Rule + prStylePromptSection(sctx, "testing_summary", true)
 	evidenceGuidance := fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree: %s", evidenceDir)
 	if sctx.Config.Test.Evidence.StoreInRepo {
 		evidenceGuidance = fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree; they are published to the repository's %s branch automatically and linked from the PR: %s", sctx.Config.Test.Evidence.Branch, evidenceDir)
