@@ -18,7 +18,8 @@ const prStyleBody = "Use short sentences.\nSay the whole picture first."
 // output is reader-facing PR text receives pr.style_file inside its fence:
 // the PR draft writes What Changed, Test writes the Testing paragraph in
 // both live-validation modes, and Review writes the risk line. The two JSON
-// fields render inline, so only their turns are told to write one paragraph.
+// fields render inline, so only their turns are told to write one paragraph;
+// the other targets take their layout and length from the style.
 func TestPRProsePromptsCarryTheStyleFile(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -67,10 +68,13 @@ func TestPRProsePromptsCarryTheStyleFile(t *testing.T) {
 				"-----BEGIN PR STYLE: "+style+"-----\n"+prStyleBody+"\n-----END PR STYLE: "+style+"-----",
 			)
 			onePara := "shows " + tc.target + " inline as one paragraph"
+			styleLayout := "The style's layout and length replace the layout and length rules above"
 			if tc.inline {
 				requirePromptContains(t, prompt, onePara)
+				requirePromptOmits(t, prompt, styleLayout)
 			} else {
 				requirePromptOmits(t, prompt, onePara)
+				requirePromptContains(t, prompt, styleLayout)
 			}
 		})
 	}

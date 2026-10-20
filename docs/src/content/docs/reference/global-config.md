@@ -1026,7 +1026,7 @@ The path is expanded when the config loads and must be absolute or start with `~
 - the Test turn, for `testing_summary`, the paragraph under `## Testing`;
 - the Review turn, for `risk_rationale`, the line under `## Risk Assessment`.
 
-The style governs wording only. It does not change what an agent checks or reports. `testing_summary` and `risk_rationale` render inline as one paragraph, so their turns are also told to write plain sentences with no line breaks or lists. The What Changed body may use the style's layout. The `## Intent` section is the caller's `--intent` text, published verbatim, so the style never rewrites it.
+The style governs how the text is written, not what an agent checks or reports. `testing_summary` and `risk_rationale` render inline as one paragraph, so their turns are also told to write plain sentences with no line breaks or lists. The What Changed body (or template narrative) takes its layout and length from the style instead of the default 1-3 bullets, and keeps its required headings. The `## Intent` section is the caller's `--intent` text, published verbatim, so the style never rewrites it.
 
 The style is cosmetic, so it never blocks a run: a missing, empty, or over-64 KiB file is skipped with a warning in the step log. Unlike [`design_context`](#design_context), it is not pinned at run start and is not marked untrusted, because it is the operator's own machine config.
 
