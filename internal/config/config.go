@@ -217,6 +217,9 @@ type GlobalConfig struct {
 	// expanded and syntax-validated when the global config is loaded; the
 	// referenced files are validated and materialized at run start.
 	DesignContext DesignContextRaw
+	// PR is the machine-owned pull-request prose policy. Repository PR
+	// settings live in RepoConfig.PR.
+	PR GlobalPRRaw
 	// SizeTiers is the machine-owned small/standard change policy (reviewer
 	// effort and the agent test turn). Global-only; see SizeTiers.
 	SizeTiers SizeTiers
@@ -259,6 +262,7 @@ type globalConfigRaw struct {
 	Test                    TestRaw                    `yaml:"test"`
 	Review                  GlobalReviewRaw            `yaml:"review"`
 	DesignContext           DesignContextRaw           `yaml:"design_context"`
+	PR                      GlobalPRRaw                `yaml:"pr"`
 	SizeTiers               sizeTiersRaw               `yaml:"size_tiers"`
 	Eval                    EvalRaw                    `yaml:"eval"`
 	// ReviewLoop is the retired post-PR review loop, kept as a parse-only
@@ -448,6 +452,15 @@ type GlobalReviewRaw struct {
 	// parse-only tombstone because captured eval cases pin it; it has no
 	// effect and is reported as deprecated at load.
 	MaxParallel *int `yaml:"max_parallel"`
+}
+
+// GlobalPRRaw is the machine-owned pull-request prose policy.
+type GlobalPRRaw struct {
+	// StyleFile is an absolute or ~/ path to a writing-style file. The agent
+	// turns that write reader-facing PR text (What Changed, the testing
+	// summary, the risk rationale) follow it. Expanded and syntax-validated at
+	// load; the file itself is read when each prompt is built.
+	StyleFile string `yaml:"style_file"`
 }
 
 // DesignContextRaw is the YAML representation of design-context file entries.
@@ -874,6 +887,8 @@ type PR struct {
 	// Nil preserves the historical default: publish the extracted intent.
 	PublishIntent *bool
 	TitleFormat   string
+	// StyleFile is the machine-global pr.style_file path, or empty.
+	StyleFile string
 }
 
 // Document is the resolved document-step config. Instructions come from the
@@ -2334,11 +2349,18 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateGlobalReviewRaw(raw.Review); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
-	globalDesignContextFiles, err := designcontext.ResolveGlobalPaths(raw.DesignContext.Files)
+	globalDesignContextFiles, err := designcontext.ResolveGlobalPaths("design_context.files", raw.DesignContext.Files)
 	if err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	cfg.DesignContext = DesignContextRaw{Files: globalDesignContextFiles}
+	if strings.TrimSpace(raw.PR.StyleFile) != "" {
+		styleFile, err := designcontext.ResolveGlobalPaths("pr.style_file", []string{raw.PR.StyleFile})
+		if err != nil {
+			return nil, fmt.Errorf("parse global config: %w", err)
+		}
+		cfg.PR.StyleFile = styleFile[0]
+	}
 	cfg.Review = raw.Review
 
 	if len(raw.Agent) > 0 {
@@ -3329,6 +3351,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		BaseBranch:    strings.TrimSpace(repo.PR.BaseBranch),
 		Template:      repo.PR.Template,
 		PublishIntent: repo.PR.PublishIntent,
+		StyleFile:     global.PR.StyleFile,
 	}
 	if override != nil && override.PR.TitleFormat != nil {
 		pr.TitleFormat = *override.PR.TitleFormat

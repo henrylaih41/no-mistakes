@@ -78,7 +78,7 @@ func testWithoutLiveValidation(sctx *pipeline.StepContext, in testTurnInputs) (*
 	if testCmd != "" {
 		configuredTestCommand = fmt.Sprintf("\nConfigured test command already ran successfully as baseline: `%s`\n", testCmd)
 	}
-	history := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + in.planSection + designContextPromptSection(sctx) + testguidance.Rule
+	history := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + in.planSection + designContextPromptSection(sctx) + testguidance.Rule + prStylePromptSection(sctx, "testing_summary", true)
 	prompt := fmt.Sprintf(
 		`You are validating a code change by testing it. Examine the repository and run the smallest relevant tests yourself.
 

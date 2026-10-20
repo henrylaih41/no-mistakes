@@ -451,6 +451,7 @@ Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, diffStat, finalDiff, prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 
 	prompt += prBodyBudgetPromptSection(bodyLimit)
+	prompt += prStylePromptSection(sctx, `the "## What Changed" body`, false)
 	prompt += agent.MemoryFilesRule
 
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
