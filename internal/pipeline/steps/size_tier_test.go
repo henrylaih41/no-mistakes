@@ -103,15 +103,9 @@ func TestReviewStep_SizeTierSelectsTheSmallReviewer(t *testing.T) {
 	})
 }
 
-// testWithTier runs the live-validation-off Test step with a passing
+// testWithTierConfig runs the live-validation-off Test step with a passing
 // commands.test, the given recorded tier and review risk, and counts the
-// agent test turns.
-func testWithTier(t *testing.T, cmds config.Commands, tiers config.SizeTiers, tier *pipeline.SizeTier, risk string) (int, string) {
-	t.Helper()
-	return testWithTierConfig(t, cmds, tiers, tier, risk, func(*config.Config) {})
-}
-
-// testWithTierConfig is testWithTier with a hook to adjust the resolved config.
+// agent test turns. adjust edits the resolved config.
 func testWithTierConfig(t *testing.T, cmds config.Commands, tiers config.SizeTiers, tier *pipeline.SizeTier, risk string, adjust func(*config.Config)) (int, string) {
 	t.Helper()
 	calls := 0
@@ -168,7 +162,7 @@ func TestTestStep_SizeTierDecidesTheAgentTestTurn(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			turns, logs := testWithTier(t, tc.cmds, tc.tiers, tc.tier, tc.risk)
+			turns, logs := testWithTierConfig(t, tc.cmds, tc.tiers, tc.tier, tc.risk, func(*config.Config) {})
 			if turns != tc.wantTurns {
 				t.Fatalf("agent test turns = %d, want %d; logs:\n%s", turns, tc.wantTurns, logs)
 			}
