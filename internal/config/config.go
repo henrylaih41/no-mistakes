@@ -952,12 +952,25 @@ type TestRaw struct {
 	// honored ONLY from the trusted default-branch copy: a pushed branch must
 	// not switch off the validation that tests it.
 	LiveValidation string `yaml:"live_validation"`
+	// AgentTurn is "auto" (the default when empty) or "off". "off" ends the
+	// Test step after a passing commands.test, never running the agent test
+	// turn whatever the size tier or review risk; it has no effect while
+	// commands.test is empty. Repository-only, and honored ONLY from the
+	// trusted default-branch copy: a pushed branch must not switch off the
+	// testing that gates it.
+	AgentTurn string `yaml:"agent_turn"`
 }
 
 // Test live-validation modes (test.live_validation).
 const (
 	LiveValidationOff = "off"
 	LiveValidationOn  = "on"
+)
+
+// Test agent-turn modes (test.agent_turn).
+const (
+	AgentTurnAuto = "auto"
+	AgentTurnOff  = "off"
 )
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -1003,6 +1016,8 @@ type Test struct {
 	AllowApproveOverFailure string
 	// LiveValidation is true only for test.live_validation: on.
 	LiveValidation bool
+	// AgentTurnOff is true only for test.agent_turn: off.
+	AgentTurnOff bool
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -2336,6 +2351,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if strings.TrimSpace(raw.Test.LiveValidation) != "" {
 		return nil, fmt.Errorf("parse global config: test.live_validation is repository-only; set it in the repository's .no-mistakes.yaml on its default branch")
 	}
+	if strings.TrimSpace(raw.Test.AgentTurn) != "" {
+		return nil, fmt.Errorf("parse global config: test.agent_turn is repository-only; set it in the repository's .no-mistakes.yaml on its default branch")
+	}
 	if err := validateEvalRaw(raw.Eval); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
@@ -2863,6 +2881,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// waive the gate that certifies it.
 		effective.Test.AllowApproveOverFailure = trusted.Test.AllowApproveOverFailure
 		effective.Test.LiveValidation = trusted.Test.LiveValidation
+		effective.Test.AgentTurn = trusted.Test.AgentTurn
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -2888,6 +2907,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Prepare = false
 		effective.Test.AllowApproveOverFailure = ""
 		effective.Test.LiveValidation = ""
+		effective.Test.AgentTurn = ""
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3093,6 +3113,15 @@ func validateTestRaw(test TestRaw) error {
 	case "", LiveValidationOff, LiveValidationOn:
 	default:
 		return fmt.Errorf("test.live_validation must be %q or %q, got %q", LiveValidationOff, LiveValidationOn, test.LiveValidation)
+	}
+	switch strings.TrimSpace(test.AgentTurn) {
+	case "", AgentTurnAuto:
+	case AgentTurnOff:
+		if strings.TrimSpace(test.LiveValidation) == LiveValidationOn {
+			return fmt.Errorf("test.agent_turn: %s contradicts test.live_validation: %s, which always runs the agent evidence turn", AgentTurnOff, LiveValidationOn)
+		}
+	default:
+		return fmt.Errorf("test.agent_turn must be %q or %q, got %q", AgentTurnAuto, AgentTurnOff, test.AgentTurn)
 	}
 	if test.Evidence.Branch != nil {
 		if _, err := evidence.NormalizeBranch(*test.Evidence.Branch); err != nil {
@@ -3312,6 +3341,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
 	test.LiveValidation = strings.TrimSpace(repo.Test.LiveValidation) == LiveValidationOn
+	test.AgentTurnOff = strings.TrimSpace(repo.Test.AgentTurn) == AgentTurnOff
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {

@@ -8,12 +8,12 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `review.max_fix_rounds`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.live_validation`, `test.evidence.branch`, `pr.template`, and `pr.publish_intent` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `review.max_fix_rounds`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.live_validation`, `test.agent_turn`, `test.evidence.branch`, `pr.template`, and `pr.publish_intent` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `design_context`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.live_validation`, and `test.evidence.branch`.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `design_context`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.live_validation`, `test.agent_turn`, and `test.evidence.branch`.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -108,6 +108,8 @@ intent:
 test:
   # Live-validation evidence turn: off (the default) or on. Read only from the trusted default branch.
   live_validation: on
+  # Agent test turn after a passing commands.test: auto (the default) or off. Read only from the trusted default branch.
+  agent_turn: auto
   # Product startup and live-validation runbook, read only from the trusted default branch.
   instructions: |
     Start the app with `make dev`, then drive the checkout flow in a browser.
@@ -346,7 +348,7 @@ Broad regression belongs in remote CI and remains mandatory before a PR is ready
 no-mistakes does not guess whether an arbitrary shell string is "too broad" - the contract is documented and dogfooded, not enforced with language- or filename-specific heuristics.
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
-What follows the baseline depends on [`test.live_validation`](#testlive_validation): with the default `off`, a passing baseline completes Test without an agent turn for a small change reviewed below high risk and runs one for a standard change ([`size_tiers`](/no-mistakes/reference/global-config/#size_tiers); a run tiers could not classify also gets one, and with tiers disabled only a run with user intent does); with `on`, the agent always derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
+What follows the baseline depends on [`test.live_validation`](#testlive_validation) and [`test.agent_turn`](#testagent_turn): with the default `off`, a passing baseline completes Test without an agent turn for a small change reviewed below high risk and runs one for a standard change ([`size_tiers`](/no-mistakes/reference/global-config/#size_tiers); a run tiers could not classify also gets one, and with tiers disabled only a run with user intent does); with `on`, the agent always derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
 A non-zero exit parks the Test step. Approving that gate records an explicit override on the step and on the PR attestation; the [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check treats that as non-compliant unless [`test.allow_approve_over_failure`](#testallow_approve_over_failure) is set.
 
 ### commands.lint
@@ -891,6 +893,25 @@ test:
 - `on`: the [Test step](/no-mistakes/reference/pipeline-steps/#test) always runs the evidence turn after the baseline, with its scenario list, verdict, and verdict-based approval policy.
 
 Any other value fails config parsing. This field is repository-only (setting it in global config is a parse error) and is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`: a contributor's pushed branch cannot switch off the live validation that tests it.
+
+### test.agent_turn
+
+Turns off the Test step's agent test turn once [`commands.test`](#commandstest) has passed.
+
+| | |
+| --- | --- |
+| Type | `string`: `auto` or `off` |
+| Default | `auto` |
+
+```yaml
+test:
+  agent_turn: off
+```
+
+- `auto` (default): the size-tier rule described under [`test.live_validation`](#testlive_validation) decides whether the turn runs.
+- `off`: after a passing `commands.test` the Test step never runs the agent turn, whatever the size tier or review risk, and reports "all tests passed". It has no effect while `commands.test` is empty, because the agent turn is then the only test. A failing `commands.test` parks as usual.
+
+Any other value fails config parsing, and `off` together with `test.live_validation: on` is a config error because live validation always runs the agent turn. This field is repository-only (setting it in global config is a parse error) and is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`: a contributor's pushed branch cannot turn off the testing that gates it.
 
 ### test.allow_approve_over_failure
 
