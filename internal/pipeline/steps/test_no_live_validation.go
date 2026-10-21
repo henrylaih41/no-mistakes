@@ -171,13 +171,18 @@ func newTestFileFinding(file string) Finding {
 }
 
 // agentTestTurnReason decides, after a passing commands.test, whether the
-// agent test turn still runs, and names why ("" means it does not). With the
+// agent test turn still runs, and names why ("" means it does not). With
+// test.agent_turn: off it never runs. Otherwise, with the
 // run's size tier known, a standard change always gets the turn and a small
 // one only when the latest review round rated its risk high. With tiers on
 // but no recorded tier (Review skipped, or a daemon restart) the turn runs.
 // With size_tiers off the untiered rule holds: the turn runs only when the
 // run carries user intent.
 func agentTestTurnReason(sctx *pipeline.StepContext) string {
+	if sctx.Config.Test.AgentTurnOff {
+		sctx.Log("test.agent_turn is off and the test command passed: skipping the agent test turn")
+		return ""
+	}
 	tier, ok := sctx.Shared.SizeTier()
 	if !ok {
 		if sctx.Config.SizeTiers.Enabled() {
