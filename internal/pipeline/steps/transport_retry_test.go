@@ -53,6 +53,7 @@ func TestIsTransportError(t *testing.T) {
 		"gh pr create: non-200 OK status code: 502 Bad Gateway body: x",
 		"dial tcp: i/o timeout",
 		"Bitbucket POST pull request: status 503: service unavailable",
+		"fatal: unable to access x: The requested URL returned error: 503",
 	}
 	for _, msg := range retry {
 		if !isTransportError(errors.New(msg)) {
@@ -71,6 +72,7 @@ func TestIsTransportError(t *testing.T) {
 		"gh pr create: HTTP 429: rate limited, connection reset",
 		"Bitbucket GET x: status 400: bad request, early EOF",
 		"tea: returned error: 409 conflict, i/o timeout",
+		"fatal: unable to access x: The requested URL returned error: 403, connection reset",
 		"",
 	}
 	for _, msg := range fail {

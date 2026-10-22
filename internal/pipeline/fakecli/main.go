@@ -623,6 +623,9 @@ func fakeGHHandlePRContentCommands(args []string, joined string) {
 			os.Exit(0)
 		}
 		title := os.Getenv("FAKE_CLI_PR_TITLE")
+		if data, err := os.ReadFile(os.Getenv("FAKE_CLI_PR_TITLE_FILE")); err == nil {
+			title = string(data)
+		}
 		if title == "" {
 			title = "test pr"
 		}
@@ -649,8 +652,21 @@ func fakeGHHandlePRContentCommands(args []string, joined string) {
 			os.Exit(1)
 		}
 		fakeGHStorePRBody(args)
+		// FAKE_CLI_PR_TITLE_FILE keeps the title an edit set, and content reads
+		// return it in place of FAKE_CLI_PR_TITLE.
+		if path, title := os.Getenv("FAKE_CLI_PR_TITLE_FILE"), titleFlag(args); path != "" && title != "" {
+			if err := os.WriteFile(path, []byte(title), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
 		os.Exit(0)
 	}
+}
+
+func titleFlag(args []string) string {
+	title, _ := fakeCLIFlagValue(args, "--title")
+	return title
 }
 
 func fakeGHStorePRBody(args []string) {

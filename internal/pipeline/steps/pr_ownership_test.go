@@ -272,3 +272,39 @@ func TestPROwnershipUpdateRetriesAWriteThatNeverLanded(t *testing.T) {
 		t.Fatalf("writes=%d, %s", host.writes, host.body)
 	}
 }
+
+type titleWriteHost struct {
+	*ownershipRaceHost
+	title      string
+	lost       bool
+	titleWrite string
+}
+
+func (h *titleWriteHost) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
+	got, err := h.ownershipRaceHost.GetPRContent(ctx, pr)
+	got.Title = h.title
+	return got, err
+}
+
+func (h *titleWriteHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
+	h.writes++
+	if h.writes == 1 && h.lost {
+		return nil, errors.New("HTTP 504: 504 Gateway Timeout")
+	}
+	h.body = content.Body
+	h.title = content.Title
+	return pr, nil
+}
+
+func TestPROwnershipTitleOnlyUpdateRetriesAfterALostWrite(t *testing.T) {
+	fastTransportRetry(t, time.Minute)
+	content, appendix := ownedFixture(t)
+	host := &titleWriteHost{ownershipRaceHost: &ownershipRaceHost{body: content.Body}, title: "Old title", lost: true}
+	sctx := &pipeline.StepContext{Ctx: context.Background(), Log: func(string) {}}
+	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent(content), "New title", "", appendix, 0); err != nil {
+		t.Fatal(err)
+	}
+	if host.title != "New title" || host.writes != 2 {
+		t.Fatalf("title=%q writes=%d, want the title applied by the retry", host.title, host.writes)
+	}
+}

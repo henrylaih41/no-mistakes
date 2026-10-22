@@ -44,8 +44,9 @@ var transportErrorPatterns = []string{
 
 var (
 	// transportForgeStatus matches a forge 5xx as the gh/glab/tea CLIs and the
-	// Bitbucket client print it.
-	transportForgeStatus = regexp.MustCompile(`http 5\d\d|status code: 5\d\d|status 5\d\d|\b5\d\d (bad gateway|service unavailable|gateway time-?out|internal server error)`)
+	// Bitbucket client print it, and as git prints it ("The requested URL
+	// returned error: 503").
+	transportForgeStatus = regexp.MustCompile(`http 5\d\d|status code: 5\d\d|status 5\d\d|returned error: 5\d\d|\b5\d\d (bad gateway|service unavailable|gateway time-?out|internal server error)`)
 	// notTransient overrides the patterns above: a message that carries one of
 	// these is a refusal by the remote, whatever else it says ("rpc failed;
 	// http 403" is an auth failure, not a dropped connection). Every forge 4xx
