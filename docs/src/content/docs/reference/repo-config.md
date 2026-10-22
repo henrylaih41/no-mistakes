@@ -345,7 +345,7 @@ Explicit **targeted** local test command. Run via the platform shell - `sh -c` o
 
 `commands.test` is local **targeted validation** of the change and requested intent, not a CI-parity repository-wide regression command.
 Broad regression belongs in remote CI and remains mandatory before a PR is ready; do not put a complete-suite walk here just to mirror CI.
-no-mistakes does not guess whether an arbitrary shell string is "too broad" - the contract is documented and dogfooded, not enforced with language- or filename-specific heuristics.
+no-mistakes does not guess whether an arbitrary shell string is "too broad" - the contract is documented, not enforced with language- or filename-specific heuristics.
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
 What follows the baseline depends on [`test.live_validation`](#testlive_validation) and [`test.agent_turn`](#testagent_turn): with the default `off`, a passing baseline completes Test without an agent turn for a small change reviewed below high risk and runs one for a standard change ([`size_tiers`](/no-mistakes/reference/global-config/#size_tiers); a run tiers could not classify also gets one, and with tiers disabled only a run with user intent does); with `on`, the agent always derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
