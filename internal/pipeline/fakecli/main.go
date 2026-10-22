@@ -288,6 +288,16 @@ func fakeGitFlakyPushPassthroughHandler(args []string) {
 		fakeGitForward(args, realGit)
 		return
 	}
+	// FAKE_CLI_PUSH_REJECT_PREFIX refuses (non-transport) any push whose
+	// refspec targets a ref under that prefix.
+	if prefix := os.Getenv("FAKE_CLI_PUSH_REJECT_PREFIX"); prefix != "" {
+		for _, a := range args {
+			if i := strings.Index(a, ":"+prefix); i >= 0 {
+				fmt.Fprintln(os.Stderr, "! [rejected] "+a+" (non-fast-forward)")
+				os.Exit(1)
+			}
+		}
+	}
 	failFirst, _ := strconv.Atoi(os.Getenv("FAKE_CLI_FAIL_FIRST"))
 	if fakeCLILogCount(os.Getenv("FAKE_CLI_LOG"), "push ") > failFirst {
 		fakeGitForward(args, realGit)

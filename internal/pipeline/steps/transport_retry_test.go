@@ -2,7 +2,9 @@ package steps
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,7 +234,7 @@ func TestRetryTransport_CancelledRunStopsAtOnce(t *testing.T) {
 // pushRetryFixture is a feature branch one commit ahead of its remote, with
 // the step's git replaced by the flaky-push fake. The returned log file counts
 // the pushes the step made.
-func pushRetryFixture(t *testing.T, vars map[string]string) (sctx *pipeline.StepContext, upstream, head, logFile string) {
+func pushRetryFixture(t *testing.T, vars map[string]string, commitBytes ...int) (sctx *pipeline.StepContext, upstream, head, logFile string) {
 	t.Helper()
 	upstream = t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -240,11 +242,21 @@ func pushRetryFixture(t *testing.T, vars map[string]string) (sctx *pipeline.Step
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	gitCmd(t, dir, "push", "origin", "main")
 	gitCmd(t, dir, "push", "origin", "feature")
-	if err := os.WriteFile(filepath.Join(dir, "next.txt"), []byte("next\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if len(commitBytes) == 0 {
+		commitBytes = []int{len("next\n")}
 	}
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "next")
+	for i, n := range commitBytes {
+		// Random bytes do not compress, so the pack is about n bytes.
+		blob := make([]byte, n)
+		if _, err := rand.Read(blob); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("next%d.bin", i)), blob, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, dir, "add", "-A")
+		gitCmd(t, dir, "commit", "-m", fmt.Sprintf("next %d", i))
+	}
 	head = gitCmd(t, dir, "rev-parse", "HEAD")
 
 	realGit, err := testgit.RealGit()
