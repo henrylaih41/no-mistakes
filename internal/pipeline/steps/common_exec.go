@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -194,7 +195,16 @@ func stepGitRun(sctx *pipeline.StepContext, args ...string) (string, error) {
 
 // stepGitRunRaw preserves NUL-delimited paths and porcelain status columns.
 func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
-	cmd := stepCmd(sctx, "git", args...)
+	return stepGitRunRawCtx(sctx, sctx.Ctx, args...)
+}
+
+// stepGitRunRawCtx is stepGitRunRaw under a caller-supplied context, so a
+// bounded attempt (see retryTransport) can kill a hung git. WaitDelay keeps a
+// killed git's surviving transport child (ssh) from holding the stderr pipe
+// open and blocking the wait forever.
+func stepGitRunRawCtx(sctx *pipeline.StepContext, ctx context.Context, args ...string) (string, error) {
+	cmd := stepCmdContext(sctx, ctx, "git", args...)
+	cmd.WaitDelay = gitKillWaitDelay
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
 	out, err := cmd.Output()
 	if err != nil {
@@ -206,6 +216,10 @@ func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
 	}
 	return string(out), nil
 }
+
+// gitKillWaitDelay bounds how long a context-killed git waits for its output
+// pipes to close.
+const gitKillWaitDelay = 10 * time.Second
 
 func stepGitHeadSHA(sctx *pipeline.StepContext) (string, error) {
 	return stepGitRun(sctx, "rev-parse", "HEAD")
@@ -229,7 +243,7 @@ func stepGitPush(sctx *pipeline.StepContext, remote, ref, expectedSHA string, fo
 // StepContext's environment, mirroring git.PushCommit's argument assembly. The
 // explicit source SHA (rather than HEAD) is what lets a caller publish exactly
 // the commit it verified, even if the worktree moves underneath it.
-func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expectedSHA string, forceWithLease bool) error {
+func stepGitPushCommit(sctx *pipeline.StepContext, ctx context.Context, remote, commitSHA, ref, expectedSHA string, forceWithLease bool) error {
 	args := []string{"push", remote}
 	if forceWithLease {
 		if expectedSHA != "" {
@@ -239,7 +253,7 @@ func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expec
 		}
 	}
 	args = append(args, commitSHA+":"+ref)
-	_, err := stepGitRun(sctx, args...)
+	_, err := stepGitRunRawCtx(sctx, ctx, args...)
 	return err
 }
 

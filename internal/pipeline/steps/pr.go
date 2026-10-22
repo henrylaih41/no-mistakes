@@ -110,7 +110,12 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 	bodyLimit := scm.MaxPRBodyChars(provider)
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
-	existing, err := host.FindPR(ctx, branch, "")
+	var existing *scm.PR
+	err = retryTransport(sctx, "find pull request", func(ctx context.Context) error {
+		var findErr error
+		existing, findErr = host.FindPR(ctx, branch, "")
+		return findErr
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +174,11 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
-			updated, err = host.UpdatePR(ctx, existing, scm.PRContent(content))
+			err = retryTransport(sctx, "update pull request", func(ctx context.Context) error {
+				var updateErr error
+				updated, updateErr = host.UpdatePR(ctx, existing, scm.PRContent(content))
+				return updateErr
+			}, nil)
 			if err != nil {
 				// A revalidation cycle may already have pushed a repaired head. Its
 				// attestation is part of delivery, so CI must not run after a failed
@@ -191,7 +200,24 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	sctx.Log("creating pull request...")
-	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent(content))
+	// A 5xx or a dropped connection can follow a create that succeeded, and a
+	// repeated create would open a second PR. Before each retry the branch is
+	// looked up again: a PR that is there is the one this create made, and it
+	// already carries exactly this content, so it stands in for the create's
+	// result.
+	var created *scm.PR
+	err = retryTransport(sctx, "create pull request", func(ctx context.Context) error {
+		var createErr error
+		created, createErr = host.CreatePR(ctx, branch, baseBranch, scm.PRContent(content))
+		return createErr
+	}, func(ctx context.Context) bool {
+		found, findErr := host.FindPR(ctx, branch, "")
+		if findErr != nil || found == nil {
+			return false
+		}
+		created = found
+		return true
+	})
 	if err != nil {
 		return nil, err
 	}

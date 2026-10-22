@@ -177,7 +177,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		// and a SHA-bound attestation depend on - which is what keeps that head
 		// from being rewritten when the branch integrated a moved base by
 		// merging rather than rebasing (rebase.strategy).
-		if err := stepGitPushCommit(sctx, pushURL, headBeingPushed, ref, "", false); err != nil {
+		if err := pushWithRetry(sctx, pushURL, headBeingPushed, ref, "", false); err != nil {
 			return fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	case decision.upToDate:
@@ -185,7 +185,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		// successful binding even though no objects needed to move.
 	default:
 		// Existing branch: force-with-lease anchored to the verified remote head.
-		if err := stepGitPushCommit(sctx, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
+		if err := pushWithRetry(sctx, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
 			return fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	}
@@ -230,6 +230,23 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	}
 	sctx.Run.HeadSHA = headBeingPushed
 	return nil
+}
+
+// pushWithRetry pushes head to ref, retrying transport failures (see
+// retryTransport). Before each retry it reads the remote ref: a push whose
+// error arrived after the remote accepted it is done, and repeating it with
+// the old lease would be rejected. A rejected push is not retried.
+func pushWithRetry(sctx *pipeline.StepContext, pushURL, head, ref, expectedSHA string, forceWithLease bool) error {
+	return retryTransport(sctx, "push", func(ctx context.Context) error {
+		return stepGitPushCommit(sctx, ctx, pushURL, head, ref, expectedSHA, forceWithLease)
+	}, func(ctx context.Context) bool {
+		gitRun := func(args ...string) (string, error) {
+			out, err := stepGitRunRawCtx(sctx, ctx, args...)
+			return strings.TrimSpace(out), err
+		}
+		remote, err := lsRemoteSHA(gitRun, pushURL, ref)
+		return err == nil && remote == head
+	})
 }
 
 // planGateMirrorReconciliation inspects the gate mirror without mutating it.
