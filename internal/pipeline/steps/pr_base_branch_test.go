@@ -171,7 +171,7 @@ func TestPRStep_RepoConfigChangeDoesNotRetargetExistingPR(t *testing.T) {
 func TestRetargetExistingPRIfNeeded_MismatchedIdentityFailsClosed(t *testing.T) {
 	t.Parallel()
 	owned := "https://github.com/test/repo/pull/42"
-	sctx := &pipeline.StepContext{Run: &db.Run{PRURL: &owned}, Log: func(string) {}}
+	sctx := &pipeline.StepContext{Ctx: context.Background(), Run: &db.Run{PRURL: &owned}, Log: func(string) {}}
 	host := &recordingRetargetHost{}
 	discovered := &scm.PR{
 		Number:     "99",
@@ -216,7 +216,7 @@ func TestRetargetExistingPRIfNeeded_MissingIdentityFailsClosed(t *testing.T) {
 func TestRetargetExistingPRIfNeeded_MatchingIdentityRetargets(t *testing.T) {
 	t.Parallel()
 	owned := "https://github.com/test/repo/pull/42"
-	sctx := &pipeline.StepContext{Run: &db.Run{PRURL: &owned}, Log: func(string) {}}
+	sctx := &pipeline.StepContext{Ctx: context.Background(), Run: &db.Run{PRURL: &owned}, Log: func(string) {}}
 	host := &recordingRetargetHost{}
 	existing := &scm.PR{
 		Number:     "42",
@@ -268,11 +268,11 @@ func TestPRStep_PrefersPersistedPRWhenFindPRReturnsSibling(t *testing.T) {
 func TestBindExistingPR_PrefersPersistedURLOverSibling(t *testing.T) {
 	t.Parallel()
 	owned := "https://github.com/test/repo/pull/42"
-	sctx := &pipeline.StepContext{Run: &db.Run{PRURL: &owned}, Log: func(string) {}}
+	sctx := &pipeline.StepContext{Ctx: context.Background(), Run: &db.Run{PRURL: &owned}, Log: func(string) {}}
 	sibling := &scm.PR{Number: "99", URL: "https://github.com/test/repo/pull/99", BaseBranch: "develop"}
 	host := &recordingRetargetHost{state: scm.PRStateOpen}
 
-	got, err := bindExistingPR(sctx, host, sibling)
+	got, err := bindExistingPR(context.Background(), sctx, host, sibling)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestPRStep_StaleIdentityRefusesRetargetOfEitherPR(t *testing.T) {
 				BaseBranch: "develop",
 			}
 
-			bound, err := bindExistingPR(sctx, host, discovered)
+			bound, err := bindExistingPR(context.Background(), sctx, host, discovered)
 			if err == nil {
 				t.Fatal("expected stale identity to refuse retarget")
 			}

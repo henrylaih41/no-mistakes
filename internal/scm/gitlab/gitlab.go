@@ -143,8 +143,8 @@ func (h *Host) Available(ctx context.Context) error {
 	if h.host != "" {
 		authArgs = append(authArgs, "--hostname", h.host)
 	}
-	if err := h.cmd(ctx, "glab", authArgs...).Run(); err != nil {
-		return errors.New("glab CLI is not authenticated")
+	if out, err := h.cmd(ctx, "glab", authArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("glab CLI is not authenticated: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
@@ -325,10 +325,7 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		if strings.TrimSpace(mr.Title) == "" {
 			return nil, errors.New("glab mr view: missing merge request title")
 		}
-		title := content.Title
-		if isDraftTitle(mr.Title) && !isDraftTitle(title) {
-			title = "Draft: " + title
-		}
+		title := h.EffectivePRTitle(mr.Title, content.Title)
 		if err := validateMRTitle(title); err != nil {
 			return nil, fmt.Errorf("glab mr update: %w", err)
 		}
@@ -367,6 +364,13 @@ func (h *Host) SetPRBaseBranch(ctx context.Context, pr *scm.PR, baseBranch strin
 
 // isDraftTitle reports whether an MR title carries a marker GitLab treats as
 // draft: "Draft:", "[Draft]", or "(Draft)", all case-insensitive.
+func (h *Host) EffectivePRTitle(existing, requested string) string {
+	if isDraftTitle(existing) && !isDraftTitle(requested) {
+		return "Draft: " + requested
+	}
+	return requested
+}
+
 func isDraftTitle(title string) bool {
 	t := strings.ToLower(strings.TrimSpace(title))
 	return strings.HasPrefix(t, "draft:") || strings.HasPrefix(t, "[draft]") || strings.HasPrefix(t, "(draft)")

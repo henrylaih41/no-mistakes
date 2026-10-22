@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -147,8 +148,9 @@ func validateOwnedPRBudget(body string, bodyLimit int) error {
 
 // updateOwnedPR re-reads before the full-body write and verifies afterwards.
 // This is NOT compare-and-swap: providers expose full-body writes. Detected
-// pre-write edits are merged from their latest version (bounded); a write error
-// or post-write divergence fails without replaying a potentially applied write.
+// pre-write edits are merged from their latest version (bounded); a write is
+// retried only after a transport failure (same content, so repeating a landed
+// one changes nothing); post-write divergence still fails.
 func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initial scm.PRContent, title, emptyNarrative, appendix string, bodyLimit int) error {
 	reader, ok := host.(scm.PRContentReader)
 	if !ok {
@@ -167,7 +169,9 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if err != nil {
 			return err
 		}
-		latest, err := reader.GetPRContent(sctx.Ctx, pr)
+		latest, err := retryTransportValue(sctx, "re-read pull request", func(ctx context.Context) (scm.PRContent, error) {
+			return reader.GetPRContent(ctx, pr)
+		})
 		if err != nil {
 			return fmt.Errorf("re-read PR before template update: %w", err)
 		}
@@ -175,16 +179,41 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 			current = latest
 			continue
 		}
+		wantTitle := content.Title
+		if resolver, ok := host.(scm.PRTitleResolver); ok && wantTitle != "" {
+			wantTitle = resolver.EffectivePRTitle(latest.Title, wantTitle)
+		}
 		if content.Body != current.Body || content.Title != "" {
-			if _, err := host.UpdatePR(sctx.Ctx, pr, scm.PRContent(content)); err != nil {
+			// A write whose reply was lost may have landed, and repeating it would
+			// erase an edit made since. Before each retry title and body are
+			// re-read: ours means landed, the pair just read means safe to repeat,
+			// anything else is unknown and stops the retry.
+			if err := retryTransport(sctx, "update pull request", func(ctx context.Context) error {
+				_, updateErr := host.UpdatePR(ctx, pr, scm.PRContent(content))
+				return updateErr
+			}, func(ctx context.Context) (bool, error) {
+				now, readErr := reader.GetPRContent(ctx, pr)
+				if readErr != nil {
+					return false, readErr
+				}
+				switch {
+				case now.Body == content.Body && (wantTitle == "" || now.Title == wantTitle):
+					return true, nil
+				case now.Body == current.Body && now.Title == latest.Title:
+					return false, nil
+				}
+				return false, fmt.Errorf("PR title or body changed while the update was retrying")
+			}); err != nil {
 				return fmt.Errorf("update templated PR: %w", err)
 			}
 		}
-		verified, err := reader.GetPRContent(sctx.Ctx, pr)
+		verified, err := retryTransportValue(sctx, "verify pull request update", func(ctx context.Context) (scm.PRContent, error) {
+			return reader.GetPRContent(ctx, pr)
+		})
 		if err != nil {
 			return fmt.Errorf("verify templated PR update: %w", err)
 		}
-		if verified.Body != content.Body {
+		if verified.Body != content.Body || (wantTitle != "" && verified.Title != wantTitle) {
 			return fmt.Errorf("PR body changed or update did not settle; refusing to report successful publication")
 		}
 		return nil

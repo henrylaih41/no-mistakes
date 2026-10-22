@@ -124,8 +124,8 @@ func (h *Host) Available(ctx context.Context) error {
 	// (AZURE_DEVOPS_EXT_PAT, or `az devops login`) against this organization.
 	args := []string{"devops", "project", "list", "--query", "value[0].id", "--output", "tsv"}
 	args = append(args, h.orgArgs()...)
-	if err := h.cmd(ctx, "az", args...).Run(); err != nil {
-		return errors.New("az CLI is not authenticated for Azure DevOps")
+	if out, err := h.cmd(ctx, "az", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("az CLI is not authenticated for Azure DevOps: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }

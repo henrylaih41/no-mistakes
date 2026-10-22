@@ -40,3 +40,12 @@ func TestPRRawContentRejectsUnprovenResponses(t *testing.T) {
 		t.Fatal("accepted failed transport")
 	}
 }
+
+func TestPRRawContentKeepsTheFailureText(t *testing.T) {
+	t.Parallel()
+	h := New(giteaTestCmdFactory(map[string]giteaTestResponse{"tea api --login work /repos/owner/repo/pulls/7": {stderr: "HTTP 503: Service Unavailable\n", code: 1}}), nil, "gitea.example.com", "work", "owner/repo")
+	_, err := h.GetPRContent(context.Background(), &scm.PR{Number: "7"})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
+		t.Fatalf("error = %v, want the tea stderr", err)
+	}
+}

@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -194,15 +195,24 @@ func stepGitRun(sctx *pipeline.StepContext, args ...string) (string, error) {
 
 // stepGitRunRaw preserves NUL-delimited paths and porcelain status columns.
 func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
-	cmd := stepCmd(sctx, "git", args...)
+	return stepGitRunRawCtx(sctx, sctx.Ctx, args...)
+}
+
+// stepGitRunRawCtx is stepGitRunRaw under a caller-supplied context, so a
+// bounded attempt (see retryTransport) can kill a hung git. The shell-command
+// runner kills git's whole process tree, so a transport child (ssh,
+// git-remote-https) cannot outlive the attempt.
+func stepGitRunRawCtx(sctx *pipeline.StepContext, ctx context.Context, args ...string) (string, error) {
+	cmd := stepCmdContext(sctx, ctx, "git", args...)
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
-	out, err := cmd.Output()
+	// OutputShellCommand captures stdout only, so capture stderr explicitly or
+	// the git error text below silently becomes empty.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	shellenv.ConfigureShellCommand(cmd)
+	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
-		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
-		}
-		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
+		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
 	}
 	return string(out), nil
 }
@@ -229,7 +239,7 @@ func stepGitPush(sctx *pipeline.StepContext, remote, ref, expectedSHA string, fo
 // StepContext's environment, mirroring git.PushCommit's argument assembly. The
 // explicit source SHA (rather than HEAD) is what lets a caller publish exactly
 // the commit it verified, even if the worktree moves underneath it.
-func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expectedSHA string, forceWithLease bool) error {
+func stepGitPushCommit(sctx *pipeline.StepContext, ctx context.Context, remote, commitSHA, ref, expectedSHA string, forceWithLease bool) error {
 	args := []string{"push", remote}
 	if forceWithLease {
 		if expectedSHA != "" {
@@ -239,7 +249,7 @@ func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expec
 		}
 	}
 	args = append(args, commitSHA+":"+ref)
-	_, err := stepGitRun(sctx, args...)
+	_, err := stepGitRunRawCtx(sctx, ctx, args...)
 	return err
 }
 

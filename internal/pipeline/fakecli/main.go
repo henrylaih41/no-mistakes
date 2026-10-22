@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Logging and stateful PR readback consume the same command stdin, not two
@@ -27,7 +28,25 @@ func main() {
 	if mode == "" {
 		os.Exit(1)
 	}
+	if mode == "sleep-child" {
+		fakeSleepChild(os.Getenv("FAKE_CLI_HEARTBEAT_FILE"))
+		return
+	}
 	handleFakeCLI(mode)
+}
+
+// fakeSleepChild is the hung push's child. It appends a line to heartbeatFile
+// every 50ms (when set) so a test can tell whether it is still alive.
+func fakeSleepChild(heartbeatFile string) {
+	for deadline := time.Now().Add(time.Hour); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if heartbeatFile == "" {
+			continue
+		}
+		if f, err := os.OpenFile(heartbeatFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			fmt.Fprintln(f, time.Now().Format(time.RFC3339Nano))
+			f.Close()
+		}
+	}
 }
 
 func handleFakeCLI(mode string) {
@@ -52,6 +71,8 @@ func handleFakeCLI(mode string) {
 		fakeRecordSuccessHandler()
 	case "git-passthrough":
 		fakeGitPassthroughHandler(args)
+	case "git-flaky-push-passthrough":
+		fakeGitFlakyPushPassthroughHandler(args)
 	case "git-move-head-passthrough":
 		fakeGitMoveHeadPassthroughHandler(args)
 	case "git-intervening-push-passthrough":
@@ -140,12 +161,25 @@ func fakeGHHandler(args []string) {
 	prBase := os.Getenv("FAKE_CLI_PR_BASE")
 	prListJSON, hasPRListJSON := os.LookupEnv("FAKE_CLI_PR_LIST_JSON")
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
+		// FAKE_CLI_AUTH_FAIL_FIRST=n fails the first n probes with FAKE_CLI_AUTH_ERR.
+		if failFirst, _ := strconv.Atoi(os.Getenv("FAKE_CLI_AUTH_FAIL_FIRST")); fakeCLILogCount(os.Getenv("FAKE_CLI_LOG"), "auth status") <= failFirst {
+			fmt.Fprintln(os.Stderr, os.Getenv("FAKE_CLI_AUTH_ERR"))
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
 		if hasPRListJSON {
 			fmt.Print(prListJSON)
 			os.Exit(0)
+		}
+		// A PR that a failed `pr create` still managed to open (see below).
+		if created := os.Getenv("FAKE_CLI_PR_CREATED_FILE"); created != "" {
+			if data, err := os.ReadFile(created); err == nil {
+				url := strings.TrimSpace(string(data))
+				fmt.Printf("[{\"number\":%d,\"url\":%q,\"baseRefName\":%q}]\n", extractTrailingNumber(url), url, prBase)
+				os.Exit(0)
+			}
 		}
 		if prURL == "" {
 			fmt.Println("[]")
@@ -182,7 +216,20 @@ func fakeGHHandler(args []string) {
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
 		fakeGHStorePRBody(args)
-		fmt.Println("https://github.com/test/repo/pull/99")
+		const createdURL = "https://github.com/test/repo/pull/99"
+		// FAKE_CLI_PR_CREATE_FAIL_FIRST=N fails the first N creates with
+		// FAKE_CLI_PR_CREATE_ERR. With FAKE_CLI_PR_CREATE_LANDS=1 a failing
+		// create has opened the PR anyway (a 5xx after the write), and
+		// FAKE_CLI_PR_CREATED_FILE records it for `pr list`.
+		failFirst, _ := strconv.Atoi(os.Getenv("FAKE_CLI_PR_CREATE_FAIL_FIRST"))
+		if fakeCLILogCount(os.Getenv("FAKE_CLI_LOG"), "pr create") <= failFirst {
+			if created := os.Getenv("FAKE_CLI_PR_CREATED_FILE"); created != "" && os.Getenv("FAKE_CLI_PR_CREATE_LANDS") == "1" {
+				_ = os.WriteFile(created, []byte(createdURL), 0o644)
+			}
+			fmt.Fprintln(os.Stderr, os.Getenv("FAKE_CLI_PR_CREATE_ERR"))
+			os.Exit(1)
+		}
+		fmt.Println(createdURL)
 		os.Exit(0)
 	}
 	os.Exit(1)
@@ -217,6 +264,73 @@ func fakeGitCommitErrorHandler(args []string) {
 func fakeGitPassthroughHandler(args []string) {
 	realGit := os.Getenv("FAKE_CLI_REAL_GIT")
 	fakeGitForward(args, realGit)
+}
+
+// fakeGitFlakyPushPassthroughHandler models a flaky transport. The first
+// FAKE_CLI_FAIL_FIRST pushes fail with FAKE_CLI_PUSH_ERR (default: a dropped
+// connection) and exit 128; the rest go through. With FAKE_CLI_FAIL_LANDED=1 a
+// failing push is first forwarded to the real remote, so the error arrives
+// after the remote accepted the ref. With FAKE_CLI_FAIL_HANG=1 a failing push
+// never returns, for the attempt timeout to kill: it waits on a child of itself
+// that holds its stdout and stderr, so only killing the whole process tree ends
+// it; the child appends to FAKE_CLI_HEARTBEAT_FILE while alive. Pushes are
+// counted from FAKE_CLI_LOG, which handleFakeCLI has already appended this one to.
+func fakeGitFlakyPushPassthroughHandler(args []string) {
+	realGit := os.Getenv("FAKE_CLI_REAL_GIT")
+	// FAKE_CLI_LSREMOTE_FAIL_NTH=n drops the n-th ls-remote with a dropped
+	// connection (counted from the log, which already holds this one).
+	if nth, _ := strconv.Atoi(os.Getenv("FAKE_CLI_LSREMOTE_FAIL_NTH")); nth > 0 && fakeGitSubcommand(args) == "ls-remote" &&
+		fakeCLILogCount(os.Getenv("FAKE_CLI_LOG"), "ls-remote ") == nth {
+		fmt.Fprintln(os.Stderr, "fatal: the remote end hung up unexpectedly")
+		os.Exit(128)
+	}
+	if fakeGitSubcommand(args) != "push" {
+		fakeGitForward(args, realGit)
+		return
+	}
+	failFirst, _ := strconv.Atoi(os.Getenv("FAKE_CLI_FAIL_FIRST"))
+	if fakeCLILogCount(os.Getenv("FAKE_CLI_LOG"), "push ") > failFirst {
+		fakeGitForward(args, realGit)
+		return
+	}
+	if os.Getenv("FAKE_CLI_FAIL_HANG") == "1" {
+		child := exec.Command(os.Args[0])
+		child.Env = append(os.Environ(), "FAKE_CLI_MODE=sleep-child")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		_ = child.Run()
+	}
+	if os.Getenv("FAKE_CLI_FAIL_LANDED") == "1" {
+		cmd := exec.Command(realGit, args...)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		_ = cmd.Run()
+	}
+	msg := os.Getenv("FAKE_CLI_PUSH_ERR")
+	if msg == "" {
+		msg = "fatal: the remote end hung up unexpectedly"
+	}
+	fmt.Fprintln(os.Stderr, msg)
+	os.Exit(128)
+}
+
+// fakeCLILogCount counts the invocations in the fake CLI log whose arguments
+// start with prefix.
+func fakeCLILogCount(logFile, prefix string) int {
+	return fakeCLILogCountMatching(logFile, func(line string) bool { return strings.HasPrefix(line, prefix) })
+}
+
+func fakeCLILogCountMatching(logFile string, match func(line string) bool) int {
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if match(line) {
+			n++
+		}
+	}
+	return n
 }
 
 func fakeGitMoveHeadPassthroughHandler(args []string) {
@@ -497,11 +611,21 @@ func fakeCIGHReconcileHandler(args []string) {
 
 func fakeGHHandlePRContentCommands(args []string, joined string) {
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json title,body") {
+		// FAKE_CLI_PR_CONTENT_FAIL_FIRST=n fails the first n content reads with
+		// FAKE_CLI_PR_CONTENT_ERR.
+		if failFirst, _ := strconv.Atoi(os.Getenv("FAKE_CLI_PR_CONTENT_FAIL_FIRST")); failFirst > 0 &&
+			fakeCLILogCountMatching(os.Getenv("FAKE_CLI_LOG"), func(l string) bool { return strings.Contains(l, "--json title,body") }) <= failFirst {
+			fmt.Fprintln(os.Stderr, os.Getenv("FAKE_CLI_PR_CONTENT_ERR"))
+			os.Exit(1)
+		}
 		if raw, ok := os.LookupEnv("FAKE_CLI_PR_CONTENT_JSON"); ok {
 			fmt.Println(raw)
 			os.Exit(0)
 		}
 		title := os.Getenv("FAKE_CLI_PR_TITLE")
+		if data, err := os.ReadFile(os.Getenv("FAKE_CLI_PR_TITLE_FILE")); err == nil {
+			title = string(data)
+		}
 		if title == "" {
 			title = "test pr"
 		}
@@ -528,6 +652,15 @@ func fakeGHHandlePRContentCommands(args []string, joined string) {
 			os.Exit(1)
 		}
 		fakeGHStorePRBody(args)
+		// FAKE_CLI_PR_TITLE_FILE keeps the title an edit set, and content reads
+		// return it in place of FAKE_CLI_PR_TITLE.
+		if title, _ := fakeCLIFlagValue(args, "--title"); os.Getenv("FAKE_CLI_PR_TITLE_FILE") != "" && title != "" {
+			path := os.Getenv("FAKE_CLI_PR_TITLE_FILE")
+			if err := os.WriteFile(path, []byte(title), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
 		os.Exit(0)
 	}
 }

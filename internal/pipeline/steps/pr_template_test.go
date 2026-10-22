@@ -193,7 +193,7 @@ func TestPRTemplateUpdateAppliesConfiguredTitleFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
-	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=Author title")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=Author title", "FAKE_CLI_PR_TITLE_FILE="+filepath.Join(t.TempDir(), "title"))
 
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)

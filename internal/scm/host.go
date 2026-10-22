@@ -416,6 +416,13 @@ type PRBaseRetargeter interface {
 	SetPRBaseBranch(ctx context.Context, pr *PR, baseBranch string) error
 }
 
+// PRTitleResolver is implemented by providers whose update writes a different
+// title than the one requested (GitLab keeps a draft MR a draft). It returns
+// the title the provider publishes when requested replaces existing.
+type PRTitleResolver interface {
+	EffectivePRTitle(existing, requested string) string
+}
+
 // PreRunFailureDetector reports which failed checks the provider failed before
 // the repository's own steps ran - a setup/action-resolution outcome (for GitHub
 // Actions, an action-download outage) rather than a verdict on the code. It

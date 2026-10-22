@@ -155,8 +155,9 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	// A bare --force-with-lease offers no protection when pushing to a URL (no
 	// remote-tracking refs), so the anchor is explicit.
 	lastSeen := lastKnownBranchTip(ctx, sctx, branch, usingFork)
-	gitRun := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
-	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
+	decision, err := retryTransportValue(sctx, "read remote branch", func(ctx context.Context) (forcePushDecision, error) {
+		return resolveForcePushDecision(ctxGitRunner(sctx, ctx), pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
+	})
 	if err != nil {
 		return fmt.Errorf("push to %s: %w", pushTarget, err)
 	}
@@ -177,7 +178,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		// and a SHA-bound attestation depend on - which is what keeps that head
 		// from being rewritten when the branch integrated a moved base by
 		// merging rather than rebasing (rebase.strategy).
-		if err := stepGitPushCommit(sctx, pushURL, headBeingPushed, ref, "", false); err != nil {
+		if err := pushWithRetry(sctx, pushURL, headBeingPushed, ref, "", false); err != nil {
 			return fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	case decision.upToDate:
@@ -185,11 +186,13 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		// successful binding even though no objects needed to move.
 	default:
 		// Existing branch: force-with-lease anchored to the verified remote head.
-		if err := stepGitPushCommit(sctx, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
+		if err := pushWithRetry(sctx, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
 			return fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	}
-	verifiedRemote, err := lsRemoteSHA(gitRun, pushURL, ref)
+	verifiedRemote, err := retryTransportValue(sctx, "verify push", func(ctx context.Context) (string, error) {
+		return lsRemoteSHA(ctxGitRunner(sctx, ctx), pushURL, ref)
+	})
 	if err != nil || verifiedRemote != headBeingPushed {
 		if err != nil {
 			return fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
@@ -230,6 +233,30 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	}
 	sctx.Run.HeadSHA = headBeingPushed
 	return nil
+}
+
+// pushWithRetry pushes head to ref, retrying transport failures (see
+// retryTransport). Before each retry it reads the remote ref: a push whose
+// error arrived after the remote accepted it is done, and repeating it with
+// the old lease would be rejected. A rejected push is not retried.
+func pushWithRetry(sctx *pipeline.StepContext, pushURL, head, ref, expectedSHA string, forceWithLease bool) error {
+	return retryTransport(sctx, "push", func(ctx context.Context) error {
+		return stepGitPushCommit(sctx, ctx, pushURL, head, ref, expectedSHA, forceWithLease)
+	}, func(ctx context.Context) (bool, error) {
+		remote, err := lsRemoteSHA(ctxGitRunner(sctx, ctx), pushURL, ref)
+		if err != nil {
+			return false, err
+		}
+		return remote == head, nil
+	})
+}
+
+// ctxGitRunner runs git under ctx, so a retried attempt can be bounded.
+func ctxGitRunner(sctx *pipeline.StepContext, ctx context.Context) gitRunner {
+	return func(args ...string) (string, error) {
+		out, err := stepGitRunRawCtx(sctx, ctx, args...)
+		return strings.TrimSpace(out), err
+	}
 }
 
 // planGateMirrorReconciliation inspects the gate mirror without mutating it.
