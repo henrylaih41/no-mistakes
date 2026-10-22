@@ -161,6 +161,11 @@ func fakeGHHandler(args []string) {
 	prBase := os.Getenv("FAKE_CLI_PR_BASE")
 	prListJSON, hasPRListJSON := os.LookupEnv("FAKE_CLI_PR_LIST_JSON")
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
+		// FAKE_CLI_AUTH_FAIL_FIRST=n fails the first n probes with FAKE_CLI_AUTH_ERR.
+		if failFirst, _ := strconv.Atoi(os.Getenv("FAKE_CLI_AUTH_FAIL_FIRST")); fakeCLILogCount(os.Getenv("FAKE_CLI_LOG"), "auth status") <= failFirst {
+			fmt.Fprintln(os.Stderr, os.Getenv("FAKE_CLI_AUTH_ERR"))
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {

@@ -3,7 +3,9 @@ package gitea
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -31,6 +33,12 @@ func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, err
 	endpoint := fmt.Sprintf("/repos/%s/%s/pulls/%s", owner, repo, id)
 	out, err := h.cmd(ctx, "tea", "api", "--login", h.login, endpoint).Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+				return scm.PRContent{}, fmt.Errorf("tea api pull content: %s: %w", stderr, err)
+			}
+		}
 		return scm.PRContent{}, fmt.Errorf("tea api pull content: %w", err)
 	}
 	var raw struct {

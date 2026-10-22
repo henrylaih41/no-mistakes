@@ -434,6 +434,23 @@ func TestPRStep_RetriesACreateThatGotA504(t *testing.T) {
 	}
 }
 
+func TestPRStep_RetriesAHostProbeThatGotA503(t *testing.T) {
+	fastTransportRetry(t, time.Minute)
+	err, ghLog, url := prRetryStep(t, map[string]string{
+		"FAKE_CLI_AUTH_FAIL_FIRST": "1",
+		"FAKE_CLI_AUTH_ERR":        "HTTP 503: Service Unavailable (https://api.github.com/)",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countLines(ghLog, "auth status"); got != 2 {
+		t.Errorf("probes = %d, want 2 (one 503, one success)", got)
+	}
+	if got := countLines(ghLog, "pr create"); got != 1 || url != "https://github.com/test/repo/pull/99" {
+		t.Errorf("creates = %d, PR URL = %q; want the PR published after the probe recovered", got, url)
+	}
+}
+
 func TestPRStep_ACreateThatLandedBeforeTheErrorOpensNoSecondPR(t *testing.T) {
 	fastTransportRetry(t, time.Minute)
 	err, ghLog, url := prRetryStep(t, map[string]string{
