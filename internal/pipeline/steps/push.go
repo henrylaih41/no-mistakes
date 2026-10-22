@@ -239,13 +239,16 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 func pushWithRetry(sctx *pipeline.StepContext, pushURL, head, ref, expectedSHA string, forceWithLease bool) error {
 	return retryTransport(sctx, "push", func(ctx context.Context) error {
 		return stepGitPushCommit(sctx, ctx, pushURL, head, ref, expectedSHA, forceWithLease)
-	}, func(ctx context.Context) bool {
+	}, func(ctx context.Context) (bool, error) {
 		gitRun := func(args ...string) (string, error) {
 			out, err := stepGitRunRawCtx(sctx, ctx, args...)
 			return strings.TrimSpace(out), err
 		}
 		remote, err := lsRemoteSHA(gitRun, pushURL, ref)
-		return err == nil && remote == head
+		if err != nil {
+			return false, err
+		}
+		return remote == head, nil
 	})
 }
 

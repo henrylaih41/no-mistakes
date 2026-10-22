@@ -28,6 +28,10 @@ func main() {
 	if mode == "" {
 		os.Exit(1)
 	}
+	if mode == "sleep-child" {
+		time.Sleep(time.Hour)
+		return
+	}
 	handleFakeCLI(mode)
 }
 
@@ -248,7 +252,8 @@ func fakeGitPassthroughHandler(args []string) {
 // connection) and exit 128; the rest go through. With FAKE_CLI_FAIL_LANDED=1 a
 // failing push is first forwarded to the real remote, so the error arrives
 // after the remote accepted the ref. With FAKE_CLI_FAIL_HANG=1 a failing push
-// never returns, for the attempt timeout to kill. Pushes are counted from
+// never returns, for the attempt timeout to kill: it waits on a child of itself
+// that holds its stdout and stderr, so only killing the whole process tree ends it. Pushes are counted from
 // FAKE_CLI_LOG, which handleFakeCLI has already appended this one to.
 func fakeGitFlakyPushPassthroughHandler(args []string) {
 	realGit := os.Getenv("FAKE_CLI_REAL_GIT")
@@ -262,7 +267,10 @@ func fakeGitFlakyPushPassthroughHandler(args []string) {
 		return
 	}
 	if os.Getenv("FAKE_CLI_FAIL_HANG") == "1" {
-		time.Sleep(time.Hour)
+		child := exec.Command(os.Args[0])
+		child.Env = append(os.Environ(), "FAKE_CLI_MODE=sleep-child")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		_ = child.Run()
 	}
 	if os.Getenv("FAKE_CLI_FAIL_LANDED") == "1" {
 		cmd := exec.Command(realGit, args...)

@@ -43,12 +43,19 @@ var transportErrorPatterns = []string{
 }
 
 var (
-	// transportForgeStatus matches a forge 5xx as the gh/glab/tea CLIs print it.
-	transportForgeStatus = regexp.MustCompile(`http 5\d\d|status code: 5\d\d|\b5\d\d (bad gateway|service unavailable|gateway time-?out|internal server error)`)
+	// transportForgeStatus matches a forge 5xx as the gh/glab/tea CLIs and the
+	// Bitbucket client print it.
+	transportForgeStatus = regexp.MustCompile(`http 5\d\d|status code: 5\d\d|status 5\d\d|\b5\d\d (bad gateway|service unavailable|gateway time-?out|internal server error)`)
 	// notTransient overrides the patterns above: a message that carries one of
 	// these is a refusal by the remote, whatever else it says ("rpc failed;
-	// http 403" is an auth failure, not a dropped connection).
-	notTransient = regexp.MustCompile(`non-fast-forward|stale info|hook declined|authentication failed|permission denied|http 40[134]|returned error: 40[134]`)
+	// http 403" is an auth failure, not a dropped connection). Every forge 4xx
+	// format is a refusal.
+	notTransient = regexp.MustCompile(`non-fast-forward|stale info|hook declined|authentication failed|permission denied|http 4\d\d|status code: 4\d\d|status 4\d\d|returned error: 4\d\d`)
+	// gitRPCTransient4xx is git's own "RPC failed; HTTP 4xx" for any code but
+	// 401/403/404. It is a deliberate exception to the 4xx rule: the measured
+	// GitHub transport test produced a transient "RPC failed; HTTP 400" on a
+	// healthy push, and "rpc failed" is a retryable pattern by design.
+	gitRPCTransient4xx = regexp.MustCompile(`rpc failed; http (?:40[0256789]|4[1-9]\d)(?: curl \d+ the requested url returned error: \d+)?`)
 )
 
 func isTransportError(err error) bool {
@@ -56,7 +63,7 @@ func isTransportError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	if notTransient.MatchString(msg) {
+	if notTransient.MatchString(gitRPCTransient4xx.ReplaceAllString(msg, "rpc failed")) {
 		return false
 	}
 	if transportForgeStatus.MatchString(msg) {
@@ -75,16 +82,25 @@ func isTransportError(err error) bool {
 // transportAttemptTimeout.
 //
 // A transport error can arrive after the remote already accepted the work, so
-// before each retry landed (when non-nil) is asked whether the attempt took
-// effect; if it did, the retry is skipped and the call succeeds. landed must
-// report false when it cannot tell.
-func retryTransport(sctx *pipeline.StepContext, what string, attempt func(ctx context.Context) error, landed func(ctx context.Context) bool) error {
+// after each backoff landed (when non-nil) is asked whether the attempt took
+// effect; if it did, the retry is skipped and the call succeeds. A landed
+// error means unknown, never "not landed": no new attempt runs, the backoff
+// slot is spent, and landed is asked again after the next one. When the
+// budget is spent the last attempt's error is returned.
+func retryTransport(sctx *pipeline.StepContext, what string, attempt func(ctx context.Context) error, landed func(ctx context.Context) (bool, error)) error {
 	attempts := len(transportBackoff) + 1
-	for i := 0; ; i++ {
+	var err error
+	var timedOut bool
+	made := 0
+	run := func() {
+		made++
 		attemptCtx, cancel := context.WithTimeout(sctx.Ctx, transportAttemptTimeout)
-		err := attempt(attemptCtx)
-		timedOut := err != nil && attemptCtx.Err() == context.DeadlineExceeded
+		err = attempt(attemptCtx)
+		timedOut = err != nil && attemptCtx.Err() == context.DeadlineExceeded
 		cancel()
+	}
+	run()
+	for i := 0; ; i++ {
 		if err == nil || sctx.Ctx.Err() != nil {
 			return err
 		}
@@ -98,19 +114,24 @@ func retryTransport(sctx *pipeline.StepContext, what string, attempt func(ctx co
 		if timedOut {
 			reason = fmt.Sprintf("timed out after %s: %s", transportAttemptTimeout, reason)
 		}
-		sctx.Log(fmt.Sprintf("%s: transport error (attempt %d/%d), retrying in %s: %s", what, i+1, attempts, transportBackoff[i], reason))
+		sctx.Log(fmt.Sprintf("%s: transport error (attempt %d/%d), retrying in %s: %s", what, made, attempts, transportBackoff[i], reason))
 		if !sleepContext(sctx.Ctx, transportBackoff[i]) {
 			return err
 		}
 		if landed != nil {
 			checkCtx, cancel := context.WithTimeout(sctx.Ctx, transportAttemptTimeout)
-			ok := landed(checkCtx)
+			ok, lookupErr := landed(checkCtx)
 			cancel()
+			if lookupErr != nil {
+				sctx.Log(fmt.Sprintf("%s: could not confirm whether the earlier attempt landed: %s", what, oneLine(lookupErr.Error())))
+				continue
+			}
 			if ok {
 				sctx.Log(fmt.Sprintf("%s: the earlier attempt had already landed; not retrying", what))
 				return nil
 			}
 		}
+		run()
 	}
 }
 

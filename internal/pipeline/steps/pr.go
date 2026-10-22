@@ -210,13 +210,13 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		var createErr error
 		created, createErr = host.CreatePR(ctx, branch, baseBranch, scm.PRContent(content))
 		return createErr
-	}, func(ctx context.Context) bool {
+	}, func(ctx context.Context) (bool, error) {
 		found, findErr := host.FindPR(ctx, branch, "")
 		if findErr != nil || found == nil {
-			return false
+			return false, findErr
 		}
 		created = found
-		return true
+		return true, nil
 	})
 	if err != nil {
 		return nil, err

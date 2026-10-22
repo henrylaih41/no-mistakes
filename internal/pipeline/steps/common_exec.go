@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -8,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -199,27 +199,23 @@ func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
 }
 
 // stepGitRunRawCtx is stepGitRunRaw under a caller-supplied context, so a
-// bounded attempt (see retryTransport) can kill a hung git. WaitDelay keeps a
-// killed git's surviving transport child (ssh) from holding the stderr pipe
-// open and blocking the wait forever.
+// bounded attempt (see retryTransport) can kill a hung git. The shell-command
+// runner kills git's whole process tree, so a transport child (ssh,
+// git-remote-https) cannot outlive the attempt.
 func stepGitRunRawCtx(sctx *pipeline.StepContext, ctx context.Context, args ...string) (string, error) {
 	cmd := stepCmdContext(sctx, ctx, "git", args...)
-	cmd.WaitDelay = gitKillWaitDelay
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
-	out, err := cmd.Output()
+	// OutputShellCommand captures stdout only, so capture stderr explicitly or
+	// the git error text below silently becomes empty.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	shellenv.ConfigureShellCommand(cmd)
+	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
-		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
-		}
-		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
+		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
 	}
 	return string(out), nil
 }
-
-// gitKillWaitDelay bounds how long a context-killed git waits for its output
-// pipes to close.
-const gitKillWaitDelay = 10 * time.Second
 
 func stepGitHeadSHA(sctx *pipeline.StepContext) (string, error) {
 	return stepGitRun(sctx, "rev-parse", "HEAD")

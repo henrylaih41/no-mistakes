@@ -52,6 +52,7 @@ func TestIsTransportError(t *testing.T) {
 		"gh pr create: HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)",
 		"gh pr create: non-200 OK status code: 502 Bad Gateway body: x",
 		"dial tcp: i/o timeout",
+		"Bitbucket POST pull request: status 503: service unavailable",
 	}
 	for _, msg := range retry {
 		if !isTransportError(errors.New(msg)) {
@@ -67,6 +68,9 @@ func TestIsTransportError(t *testing.T) {
 		"error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403",
 		"gh pr create: HTTP 422: Validation Failed",
 		"gh pr create: HTTP 404: Not Found",
+		"gh pr create: HTTP 429: rate limited, connection reset",
+		"Bitbucket GET x: status 400: bad request, early EOF",
+		"tea: returned error: 409 conflict, i/o timeout",
 		"",
 	}
 	for _, msg := range fail {
@@ -123,7 +127,10 @@ func TestRetryTransport_NonTransportFailsAtOnce(t *testing.T) {
 	err := retryTransport(sctx, "push", func(context.Context) error {
 		calls++
 		return errors.New("! [rejected] feature -> feature (non-fast-forward)")
-	}, func(context.Context) bool { t.Error("landed must not be asked for a refusal"); return false })
+	}, func(context.Context) (bool, error) {
+		t.Error("landed must not be asked for a refusal")
+		return false, nil
+	})
 	if err == nil || calls != 1 {
 		t.Fatalf("err=%v calls=%d, want one attempt", err, calls)
 	}
@@ -158,9 +165,49 @@ func TestRetryTransport_LandedStopsTheRetry(t *testing.T) {
 	err := retryTransport(sctx, "push", func(context.Context) error {
 		calls++
 		return errors.New("fatal: the remote end hung up unexpectedly")
-	}, func(context.Context) bool { return true })
+	}, func(context.Context) (bool, error) { return true, nil })
 	if err != nil || calls != 1 {
 		t.Fatalf("err=%v calls=%d, want success without a second attempt", err, calls)
+	}
+}
+
+func TestRetryTransport_UnknownLandedNeverRunsAnotherAttempt(t *testing.T) {
+	fastTransportRetry(t, time.Minute)
+	sctx := &pipeline.StepContext{Ctx: context.Background()}
+	captureLog(sctx)
+	calls, lookups := 0, 0
+	err := retryTransport(sctx, "push", func(context.Context) error {
+		calls++
+		return errors.New("fatal: the remote end hung up unexpectedly")
+	}, func(context.Context) (bool, error) {
+		lookups++
+		return false, errors.New("ls-remote: connection reset")
+	})
+	if err == nil || !strings.Contains(err.Error(), "hung up") {
+		t.Fatalf("err=%v, want the original attempt error", err)
+	}
+	if calls != 1 || lookups != 3 {
+		t.Fatalf("calls=%d lookups=%d, want 1 attempt and a lookup per backoff slot", calls, lookups)
+	}
+}
+
+func TestRetryTransport_LandedLookupFailingOnceThenLandedRunsOneAttempt(t *testing.T) {
+	fastTransportRetry(t, time.Minute)
+	sctx := &pipeline.StepContext{Ctx: context.Background()}
+	captureLog(sctx)
+	calls, lookups := 0, 0
+	err := retryTransport(sctx, "push", func(context.Context) error {
+		calls++
+		return errors.New("fatal: the remote end hung up unexpectedly")
+	}, func(context.Context) (bool, error) {
+		lookups++
+		if lookups == 1 {
+			return false, errors.New("ls-remote: connection reset")
+		}
+		return true, nil
+	})
+	if err != nil || calls != 1 || lookups != 2 {
+		t.Fatalf("err=%v calls=%d lookups=%d, want success after one attempt", err, calls, lookups)
 	}
 }
 
@@ -230,13 +277,7 @@ func fakeLogCount(t *testing.T, logFile, prefix string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, prefix) {
-			n++
-		}
-	}
-	return n
+	return countLines(string(data), prefix)
 }
 
 func TestPushStep_RetriesDroppedPushesUntilOneLands(t *testing.T) {
@@ -334,19 +375,13 @@ func TestPushStep_FailsAfterTheRetriesAreSpent(t *testing.T) {
 func prRetryStep(t *testing.T, vars map[string]string) (error, string, string) {
 	t.Helper()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	binDir := fakeCLIBinDir(t)
-	linkTestBinary(t, binDir, "gh")
-	logFile := filepath.Join(t.TempDir(), "gh.log")
-	env := map[string]string{
-		"FAKE_CLI_MODE":            "gh",
-		"FAKE_CLI_LOG":             logFile,
-		"FAKE_CLI_PR_CREATED_FILE": filepath.Join(t.TempDir(), "created-pr"),
-	}
+	ghEnv, logFile := fakeGH(t, "")
+	ghEnv = append(ghEnv, "FAKE_CLI_PR_CREATED_FILE="+filepath.Join(t.TempDir(), "created-pr"))
 	for k, v := range vars {
-		env[k] = v
+		ghEnv = append(ghEnv, k+"="+v)
 	}
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = fakeCLIEnv(binDir, env)
+	sctx.Env = ghEnv
 	captureLog(sctx)
 
 	_, err := (&PRStep{}).Execute(sctx)
