@@ -43,7 +43,7 @@ func pushLargeBranchInPieces(sctx *pipeline.StepContext, pushURL, head string) (
 		sctx.Log(fmt.Sprintf("push: not splitting the push, could not read remote branches: %v", err))
 		return cleanup, nil
 	}
-	total, err := newObjectBytes(sctx, sctx.Ctx, head, tips)
+	total, err := newObjectBytes(sctx, head, tips)
 	if err != nil {
 		sctx.Log(fmt.Sprintf("push: not splitting the push, could not measure it: %v", err))
 		return cleanup, nil
@@ -138,8 +138,12 @@ func presentRemoteTips(sctx *pipeline.StepContext, pushURL string) ([]string, er
 }
 
 // newObjectBytes is the size of the pack a push of head would send when the
-// remote already has everything reachable from exclude.
-func newObjectBytes(sctx *pipeline.StepContext, ctx context.Context, head string, exclude []string) (int64, error) {
+// remote already has everything reachable from exclude. One measurement is
+// bounded by transportAttemptTimeout so a stuck pack-objects falls back to the
+// ordinary push.
+func newObjectBytes(sctx *pipeline.StepContext, head string, exclude []string) (int64, error) {
+	ctx, cancel := context.WithTimeout(sctx.Ctx, transportAttemptTimeout)
+	defer cancel()
 	var in strings.Builder
 	in.WriteString(head + "\n")
 	for _, e := range exclude {
@@ -167,7 +171,9 @@ func planPushPieces(sctx *pipeline.StepContext, head string, remoteTips []string
 		args = append(args, "--not")
 		args = append(args, remoteTips...)
 	}
-	out, err := stepGitRun(sctx, args...)
+	ctx, cancel := context.WithTimeout(sctx.Ctx, transportAttemptTimeout)
+	defer cancel()
+	out, err := stepGitRunRawCtx(sctx, ctx, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +187,7 @@ func planPushPieces(sctx *pipeline.StepContext, head string, remoteTips []string
 		if prev != "" {
 			exclude = append(append([]string(nil), remoteTips...), prev)
 		}
-		return newObjectBytes(sctx, sctx.Ctx, tip, exclude)
+		return newObjectBytes(sctx, tip, exclude)
 	})
 }
 

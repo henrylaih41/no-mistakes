@@ -159,6 +159,27 @@ func TestPushStep_ScratchRefIsDeletedWhenTheBranchPushFails(t *testing.T) {
 	}
 }
 
+func TestPushStep_HungSizingFallsBackToTheOrdinaryPush(t *testing.T) {
+	fastTransportRetry(t, 2*time.Second)
+	smallLargePushThreshold(t, 3<<20)
+	const mb = 1 << 20
+	sctx, upstream, head, logFile := pushRetryFixture(t, map[string]string{"FAKE_CLI_PACK_HANG": "1"}, 2*mb, 2*mb, 2*mb)
+	logs := captureLog(sctx)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := pushRefspecs(t, logFile); len(got) != 1 || got[0] != head+":refs/heads/feature" {
+		t.Errorf("push refspecs = %v, want one ordinary branch push", got)
+	}
+	if remote := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remote != head {
+		t.Errorf("remote feature = %s, want %s", remote, head)
+	}
+	if !strings.Contains(logs(), "not splitting the push") {
+		t.Errorf("step log should record the skipped split:\n%s", logs())
+	}
+}
+
 // commitRandom commits n incompressible bytes, so the commit's pack is about n.
 func commitRandom(t *testing.T, dir, name, message string, n int) {
 	t.Helper()
