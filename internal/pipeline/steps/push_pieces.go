@@ -106,13 +106,6 @@ func deleteScratchRef(sctx *pipeline.StepContext, pushURL, ref string) {
 	sctx.Log(fmt.Sprintf("push: deleted scratch ref %s", ref))
 }
 
-func ctxGitRunner(sctx *pipeline.StepContext, ctx context.Context) gitRunner {
-	return func(args ...string) (string, error) {
-		out, err := stepGitRunRawCtx(sctx, ctx, args...)
-		return strings.TrimSpace(out), err
-	}
-}
-
 // presentRemoteTips returns the remote's branch tips this clone already has;
 // objects reachable from them are on the remote and are not sent again.
 func presentRemoteTips(sctx *pipeline.StepContext, pushURL string) ([]string, error) {

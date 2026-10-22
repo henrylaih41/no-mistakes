@@ -493,8 +493,10 @@ func TestPushStep_RetriesTheRemoteReadsAroundThePush(t *testing.T) {
 		nth  string // which ls-remote the fake drops
 		step string
 	}{
+		// The step reads the remote three times (decision, branch tips for
+		// the large-push check, verification); the dropped one is read again.
 		{"read before the push", "1", "read remote branch"},
-		{"verification after the push", "2", "verify push"},
+		{"verification after the push", "3", "verify push"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fastTransportRetry(t, time.Minute)
@@ -504,8 +506,8 @@ func TestPushStep_RetriesTheRemoteReadsAroundThePush(t *testing.T) {
 			if _, err := (&PushStep{}).Execute(sctx); err != nil {
 				t.Fatal(err)
 			}
-			if got := fakeLogCount(t, logFile, "ls-remote "); got != 3 {
-				t.Errorf("ls-remote calls = %d, want 3 (two reads and one retry)", got)
+			if got := fakeLogCount(t, logFile, "ls-remote "); got != 4 {
+				t.Errorf("ls-remote calls = %d, want 4 (three reads and one retry)", got)
 			}
 			if got := countPushes(t, logFile); got != 1 {
 				t.Errorf("pushes = %d, want 1", got)
