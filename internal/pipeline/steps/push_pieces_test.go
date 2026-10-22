@@ -160,7 +160,7 @@ func TestPushStep_ScratchRefIsDeletedWhenTheBranchPushFails(t *testing.T) {
 }
 
 // commitRandom commits n incompressible bytes, so the commit's pack is about n.
-func commitRandom(t *testing.T, dir, name string, n int) {
+func commitRandom(t *testing.T, dir, name, message string, n int) {
 	t.Helper()
 	blob := make([]byte, n)
 	if _, err := rand.Read(blob); err != nil {
@@ -170,7 +170,7 @@ func commitRandom(t *testing.T, dir, name string, n int) {
 		t.Fatal(err)
 	}
 	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", name)
+	gitCmd(t, dir, "commit", "-m", message)
 }
 
 func scratchPushes(t *testing.T, logFile string) int {
@@ -191,9 +191,9 @@ func TestPushStep_MergeOfUnpushedLegsIsNotSplit(t *testing.T) {
 	sctx, upstream, _, logFile := pushRetryFixture(t, nil)
 	dir := sctx.WorkDir
 	gitCmd(t, dir, "checkout", "-b", "side", "feature~1")
-	commitRandom(t, dir, "side.bin", 2*mb)
+	commitRandom(t, dir, "side.bin", "side.bin", 2*mb)
 	gitCmd(t, dir, "checkout", "feature")
-	commitRandom(t, dir, "leg.bin", 2*mb)
+	commitRandom(t, dir, "leg.bin", "leg.bin", 2*mb)
 	gitCmd(t, dir, "merge", "--no-ff", "-m", "merge side", "side")
 	head := gitCmd(t, dir, "rev-parse", "HEAD")
 	recordReviewApproval(t, sctx, head)
@@ -216,13 +216,13 @@ func TestPushStep_ChainThatMergedThePushedBaseStillSplits(t *testing.T) {
 	sctx, upstream, _, logFile := pushRetryFixture(t, nil)
 	dir := sctx.WorkDir
 	gitCmd(t, dir, "checkout", "main")
-	commitRandom(t, dir, "base.txt", 16)
+	commitRandom(t, dir, "base.txt", "base.txt", 16)
 	gitCmd(t, dir, "push", "origin", "main")
 	gitCmd(t, dir, "checkout", "feature")
-	commitRandom(t, dir, "one.bin", 2*mb)
+	commitRandom(t, dir, "one.bin", "one.bin", 2*mb)
 	gitCmd(t, dir, "merge", "--no-ff", "-m", "merge main", "main")
-	commitRandom(t, dir, "two.bin", 2*mb)
-	commitRandom(t, dir, "three.bin", 2*mb)
+	commitRandom(t, dir, "two.bin", "two.bin", 2*mb)
+	commitRandom(t, dir, "three.bin", "three.bin", 2*mb)
 	head := gitCmd(t, dir, "rev-parse", "HEAD")
 	recordReviewApproval(t, sctx, head)
 

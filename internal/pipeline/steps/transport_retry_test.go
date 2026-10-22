@@ -2,7 +2,6 @@ package steps
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -246,16 +245,7 @@ func pushRetryFixture(t *testing.T, vars map[string]string, commitBytes ...int) 
 		commitBytes = []int{len("next\n")}
 	}
 	for i, n := range commitBytes {
-		// Random bytes do not compress, so the pack is about n bytes.
-		blob := make([]byte, n)
-		if _, err := rand.Read(blob); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("next%d.bin", i)), blob, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		gitCmd(t, dir, "add", "-A")
-		gitCmd(t, dir, "commit", "-m", fmt.Sprintf("next %d", i))
+		commitRandom(t, dir, fmt.Sprintf("next%d.bin", i), fmt.Sprintf("next %d", i), n)
 	}
 	head = gitCmd(t, dir, "rev-parse", "HEAD")
 
