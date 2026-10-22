@@ -275,9 +275,7 @@ func TestPROwnershipUpdateRetriesAWriteThatNeverLanded(t *testing.T) {
 
 type titleWriteHost struct {
 	*ownershipRaceHost
-	title      string
-	lost       bool
-	titleWrite string
+	title string
 }
 
 func (h *titleWriteHost) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
@@ -288,7 +286,7 @@ func (h *titleWriteHost) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRCo
 
 func (h *titleWriteHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
 	h.writes++
-	if h.writes == 1 && h.lost {
+	if h.writes == 1 {
 		return nil, errors.New("HTTP 504: 504 Gateway Timeout")
 	}
 	h.body = content.Body
@@ -299,12 +297,36 @@ func (h *titleWriteHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRC
 func TestPROwnershipTitleOnlyUpdateRetriesAfterALostWrite(t *testing.T) {
 	fastTransportRetry(t, time.Minute)
 	content, appendix := ownedFixture(t)
-	host := &titleWriteHost{ownershipRaceHost: &ownershipRaceHost{body: content.Body}, title: "Old title", lost: true}
+	host := &titleWriteHost{ownershipRaceHost: &ownershipRaceHost{body: content.Body}, title: "Old title"}
 	sctx := &pipeline.StepContext{Ctx: context.Background(), Log: func(string) {}}
 	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent(content), "New title", "", appendix, 0); err != nil {
 		t.Fatal(err)
 	}
 	if host.title != "New title" || host.writes != 2 {
 		t.Fatalf("title=%q writes=%d, want the title applied by the retry", host.title, host.writes)
+	}
+}
+
+type draftTitleHost struct{ *titleWriteHost }
+
+func (h draftTitleHost) EffectivePRTitle(existing, requested string) string {
+	return "Draft: " + requested
+}
+
+func (h draftTitleHost) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
+	content.Title = h.EffectivePRTitle(h.title, content.Title)
+	return h.titleWriteHost.UpdatePR(ctx, pr, content)
+}
+
+func TestPROwnershipTitleUpdateComparesTheProviderEffectiveTitle(t *testing.T) {
+	fastTransportRetry(t, time.Minute)
+	content, appendix := ownedFixture(t)
+	host := draftTitleHost{&titleWriteHost{ownershipRaceHost: &ownershipRaceHost{body: content.Body}, title: "Draft: old"}}
+	sctx := &pipeline.StepContext{Ctx: context.Background(), Log: func(string) {}}
+	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent(content), "fix: x", "", appendix, 0); err != nil {
+		t.Fatal(err)
+	}
+	if host.title != "Draft: fix: x" || host.writes != 2 {
+		t.Fatalf("title=%q writes=%d, want the draft title applied by the retry", host.title, host.writes)
 	}
 }

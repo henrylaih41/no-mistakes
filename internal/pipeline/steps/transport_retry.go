@@ -97,7 +97,10 @@ func retryTransport(sctx *pipeline.StepContext, what string, attempt func(ctx co
 		made++
 		attemptCtx, cancel := context.WithTimeout(sctx.Ctx, transportAttemptTimeout)
 		err = attempt(attemptCtx)
-		timedOut = err != nil && attemptCtx.Err() == context.DeadlineExceeded
+		timedOut = attemptCtx.Err() == context.DeadlineExceeded
+		if err == nil && timedOut {
+			err = fmt.Errorf("attempt finished after its %s deadline", transportAttemptTimeout)
+		}
 		cancel()
 	}
 	run()

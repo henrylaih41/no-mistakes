@@ -179,6 +179,10 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 			current = latest
 			continue
 		}
+		wantTitle := content.Title
+		if resolver, ok := host.(scm.PRTitleResolver); ok && wantTitle != "" {
+			wantTitle = resolver.EffectivePRTitle(latest.Title, wantTitle)
+		}
 		if content.Body != current.Body || content.Title != "" {
 			// A write whose reply was lost may have landed, and repeating it would
 			// erase an edit made since. Before each retry title and body are
@@ -193,7 +197,7 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 					return false, readErr
 				}
 				switch {
-				case now.Body == content.Body && (content.Title == "" || now.Title == content.Title):
+				case now.Body == content.Body && (wantTitle == "" || now.Title == wantTitle):
 					return true, nil
 				case now.Body == current.Body && now.Title == latest.Title:
 					return false, nil
@@ -209,7 +213,7 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if err != nil {
 			return fmt.Errorf("verify templated PR update: %w", err)
 		}
-		if verified.Body != content.Body || (content.Title != "" && verified.Title != content.Title) {
+		if verified.Body != content.Body || (wantTitle != "" && verified.Title != wantTitle) {
 			return fmt.Errorf("PR body changed or update did not settle; refusing to report successful publication")
 		}
 		return nil

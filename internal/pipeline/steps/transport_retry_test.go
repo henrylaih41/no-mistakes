@@ -538,3 +538,19 @@ func TestPRStep_RetriesAnExistingPRContentReadThatGotA504(t *testing.T) {
 		t.Errorf("PR URL = %q", url)
 	}
 }
+
+func TestRetryTransport_NilAfterTheDeadlineIsRetried(t *testing.T) {
+	fastTransportRetry(t, 20*time.Millisecond)
+	sctx := &pipeline.StepContext{Ctx: context.Background(), Log: func(string) {}}
+	calls := 0
+	err := retryTransport(sctx, "x", func(ctx context.Context) error {
+		calls++
+		if calls == 1 {
+			<-ctx.Done()
+		}
+		return nil
+	}, nil)
+	if err != nil || calls != 2 {
+		t.Fatalf("err=%v calls=%d, want the expired nil attempt retried once", err, calls)
+	}
+}
