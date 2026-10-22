@@ -341,11 +341,21 @@ func TestPushStep_RejectedPushIsNotRetried(t *testing.T) {
 
 func TestPushStep_HungPushIsKilledAndRetried(t *testing.T) {
 	fastTransportRetry(t, 3*time.Second)
-	sctx, upstream, head, logFile := pushRetryFixture(t, map[string]string{"FAKE_CLI_FAIL_FIRST": "1", "FAKE_CLI_FAIL_HANG": "1"})
+	heartbeat := filepath.Join(t.TempDir(), "heartbeat")
+	sctx, upstream, head, logFile := pushRetryFixture(t, map[string]string{"FAKE_CLI_FAIL_FIRST": "1", "FAKE_CLI_FAIL_HANG": "1", "FAKE_CLI_HEARTBEAT_FILE": heartbeat})
 	logs := captureLog(sctx)
 
 	if _, err := (&PushStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)
+	}
+	before, err := os.Stat(heartbeat)
+	if err != nil || before.Size() == 0 {
+		t.Fatalf("the hung push's child never ran: stat=%v err=%v", before, err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	after, err := os.Stat(heartbeat)
+	if err != nil || after.Size() != before.Size() {
+		t.Errorf("the hung push's child outlived its attempt: heartbeat grew from %d to %d bytes", before.Size(), after.Size())
 	}
 	if got := countPushes(t, logFile); got != 2 {
 		t.Errorf("pushes = %d, want 2 (one hung, one landed)", got)

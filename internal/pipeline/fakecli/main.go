@@ -29,10 +29,24 @@ func main() {
 		os.Exit(1)
 	}
 	if mode == "sleep-child" {
-		time.Sleep(time.Hour)
+		fakeSleepChild(os.Getenv("FAKE_CLI_HEARTBEAT_FILE"))
 		return
 	}
 	handleFakeCLI(mode)
+}
+
+// fakeSleepChild is the hung push's child. It appends a line to heartbeatFile
+// every 50ms (when set) so a test can tell whether it is still alive.
+func fakeSleepChild(heartbeatFile string) {
+	for deadline := time.Now().Add(time.Hour); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if heartbeatFile == "" {
+			continue
+		}
+		if f, err := os.OpenFile(heartbeatFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			fmt.Fprintln(f, time.Now().Format(time.RFC3339Nano))
+			f.Close()
+		}
+	}
 }
 
 func handleFakeCLI(mode string) {
@@ -253,8 +267,9 @@ func fakeGitPassthroughHandler(args []string) {
 // failing push is first forwarded to the real remote, so the error arrives
 // after the remote accepted the ref. With FAKE_CLI_FAIL_HANG=1 a failing push
 // never returns, for the attempt timeout to kill: it waits on a child of itself
-// that holds its stdout and stderr, so only killing the whole process tree ends it. Pushes are counted from
-// FAKE_CLI_LOG, which handleFakeCLI has already appended this one to.
+// that holds its stdout and stderr, so only killing the whole process tree ends
+// it; the child appends to FAKE_CLI_HEARTBEAT_FILE while alive. Pushes are
+// counted from FAKE_CLI_LOG, which handleFakeCLI has already appended this one to.
 func fakeGitFlakyPushPassthroughHandler(args []string) {
 	realGit := os.Getenv("FAKE_CLI_REAL_GIT")
 	if fakeGitSubcommand(args) != "push" {
