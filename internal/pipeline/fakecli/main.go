@@ -272,6 +272,13 @@ func fakeGitPassthroughHandler(args []string) {
 // counted from FAKE_CLI_LOG, which handleFakeCLI has already appended this one to.
 func fakeGitFlakyPushPassthroughHandler(args []string) {
 	realGit := os.Getenv("FAKE_CLI_REAL_GIT")
+	// FAKE_CLI_LSREMOTE_FAIL_NTH=n drops the n-th ls-remote with a dropped
+	// connection (counted from the log, which already holds this one).
+	if nth, _ := strconv.Atoi(os.Getenv("FAKE_CLI_LSREMOTE_FAIL_NTH")); nth > 0 && fakeGitSubcommand(args) == "ls-remote" &&
+		fakeCLILogCount(os.Getenv("FAKE_CLI_LOG"), "ls-remote ") == nth {
+		fmt.Fprintln(os.Stderr, "fatal: the remote end hung up unexpectedly")
+		os.Exit(128)
+	}
 	if fakeGitSubcommand(args) != "push" {
 		fakeGitForward(args, realGit)
 		return
@@ -304,13 +311,17 @@ func fakeGitFlakyPushPassthroughHandler(args []string) {
 // fakeCLILogCount counts the invocations in the fake CLI log whose arguments
 // start with prefix.
 func fakeCLILogCount(logFile, prefix string) int {
+	return fakeCLILogCountMatching(logFile, func(line string) bool { return strings.HasPrefix(line, prefix) })
+}
+
+func fakeCLILogCountMatching(logFile string, match func(line string) bool) int {
 	data, err := os.ReadFile(logFile)
 	if err != nil {
 		return 0
 	}
 	n := 0
 	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, prefix) {
+		if match(line) {
 			n++
 		}
 	}
@@ -595,6 +606,13 @@ func fakeCIGHReconcileHandler(args []string) {
 
 func fakeGHHandlePRContentCommands(args []string, joined string) {
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json title,body") {
+		// FAKE_CLI_PR_CONTENT_FAIL_FIRST=n fails the first n content reads with
+		// FAKE_CLI_PR_CONTENT_ERR.
+		if failFirst, _ := strconv.Atoi(os.Getenv("FAKE_CLI_PR_CONTENT_FAIL_FIRST")); failFirst > 0 &&
+			fakeCLILogCountMatching(os.Getenv("FAKE_CLI_LOG"), func(l string) bool { return strings.Contains(l, "--json title,body") }) <= failFirst {
+			fmt.Fprintln(os.Stderr, os.Getenv("FAKE_CLI_PR_CONTENT_ERR"))
+			os.Exit(1)
+		}
 		if raw, ok := os.LookupEnv("FAKE_CLI_PR_CONTENT_JSON"); ok {
 			fmt.Println(raw)
 			os.Exit(0)

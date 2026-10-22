@@ -377,7 +377,7 @@ func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, err
 	args = append(args, "--json", "title,body")
 	out, err := h.cmd(ctx, "gh", args...).Output()
 	if err != nil {
-		return scm.PRContent{}, fmt.Errorf("gh pr view: %w", err)
+		return scm.PRContent{}, fmt.Errorf("gh pr view: %w", withStderr(err))
 	}
 	var parsed struct {
 		Title *string `json:"title"`
@@ -406,6 +406,20 @@ func (h *Host) SetPRBaseBranch(ctx context.Context, pr *scm.PR, baseBranch strin
 	return nil
 }
 
+// withStderr adds the CLI's stderr to the error of a failed cmd.Output(), which
+// otherwise reads only "exit status 1". Callers of the PR step's retry need the
+// forge's own message (for example "HTTP 504") to tell a transient failure from
+// a refusal.
+func withStderr(err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			return fmt.Errorf("%s: %w", stderr, err)
+		}
+	}
+	return err
+}
+
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
 	selector, err := prSelector(pr)
 	if err != nil {
@@ -416,7 +430,7 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	cmd := h.cmd(ctx, "gh", args...)
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("gh pr view: %w", err)
+		return "", fmt.Errorf("gh pr view: %w", withStderr(err))
 	}
 	return normalizePRState(strings.TrimSpace(string(out))), nil
 }
@@ -430,7 +444,7 @@ func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) 
 	args = append(args, "--json", "baseRefName", "--jq", ".baseRefName")
 	out, err := h.cmd(ctx, "gh", args...).Output()
 	if err != nil {
-		return "", fmt.Errorf("gh pr view base branch: %w", err)
+		return "", fmt.Errorf("gh pr view base branch: %w", withStderr(err))
 	}
 	return strings.TrimSpace(string(out)), nil
 }

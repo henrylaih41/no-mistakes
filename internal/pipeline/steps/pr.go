@@ -86,7 +86,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("skipping PR creation: %s", skipReason))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
 	}
-	if err := host.Available(ctx); err != nil {
+	if _, err := retryTransportValue(sctx, "check pull request host", func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, host.Available(ctx)
+	}); err != nil {
 		sctx.Log(fmt.Sprintf("skipping PR creation: %v", err))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 	}
@@ -119,14 +121,18 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if err != nil {
 		return nil, err
 	}
-	existing, err = bindExistingPR(sctx, host, existing)
+	existing, err = retryTransportValue(sctx, "read pull request state", func(context.Context) (*scm.PR, error) {
+		return bindExistingPR(sctx, host, existing)
+	})
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil {
 		var live scm.PRContent
 		if reader, ok := host.(scm.PRContentReader); ok {
-			live, err = reader.GetPRContent(ctx, existing)
+			live, err = retryTransportValue(sctx, "read pull request content", func(ctx context.Context) (scm.PRContent, error) {
+				return reader.GetPRContent(ctx, existing)
+			})
 			if err != nil {
 				return nil, fmt.Errorf("read existing PR before publication: %w", err)
 			}
@@ -236,7 +242,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if !ok {
 			return nil, fmt.Errorf("provider cannot verify the created template body")
 		}
-		actual, err := reader.GetPRContent(ctx, created)
+		actual, err := retryTransportValue(sctx, "read created pull request", func(ctx context.Context) (scm.PRContent, error) {
+			return reader.GetPRContent(ctx, created)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("verify created templated PR: %w", err)
 		}

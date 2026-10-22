@@ -135,6 +135,18 @@ func retryTransport(sctx *pipeline.StepContext, what string, attempt func(ctx co
 	}
 }
 
+// retryTransportValue is retryTransport for an idempotent read that returns a
+// value. There is no landed check: repeating a read is always safe.
+func retryTransportValue[T any](sctx *pipeline.StepContext, what string, read func(ctx context.Context) (T, error)) (T, error) {
+	var v T
+	err := retryTransport(sctx, what, func(ctx context.Context) error {
+		var readErr error
+		v, readErr = read(ctx)
+		return readErr
+	}, nil)
+	return v, err
+}
+
 func sleepContext(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()

@@ -465,3 +465,57 @@ func TestPRStep_AValidationErrorFailsAtOnce(t *testing.T) {
 		t.Errorf("creates = %d, want 1", got)
 	}
 }
+
+func TestPushStep_RetriesTheRemoteReadsAroundThePush(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		nth  string // which ls-remote the fake drops
+		step string
+	}{
+		{"read before the push", "1", "read remote branch"},
+		{"verification after the push", "2", "verify push"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fastTransportRetry(t, time.Minute)
+			sctx, upstream, head, logFile := pushRetryFixture(t, map[string]string{"FAKE_CLI_LSREMOTE_FAIL_NTH": tc.nth})
+			logs := captureLog(sctx)
+
+			if _, err := (&PushStep{}).Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := fakeLogCount(t, logFile, "ls-remote "); got != 3 {
+				t.Errorf("ls-remote calls = %d, want 3 (two reads and one retry)", got)
+			}
+			if got := countPushes(t, logFile); got != 1 {
+				t.Errorf("pushes = %d, want 1", got)
+			}
+			if remote := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remote != head {
+				t.Errorf("remote = %s, want %s", remote, head)
+			}
+			if want := tc.step + ": transport error (attempt 1/4)"; !strings.Contains(logs(), want) {
+				t.Errorf("step log missing %q:\n%s", want, logs())
+			}
+		})
+	}
+}
+
+func TestPRStep_RetriesAnExistingPRContentReadThatGotA504(t *testing.T) {
+	fastTransportRetry(t, time.Minute)
+	err, ghLog, url := prRetryStep(t, map[string]string{
+		"FAKE_CLI_PR_URL":                "https://github.com/test/repo/pull/7",
+		"FAKE_CLI_PR_CONTENT_FAIL_FIRST": "1",
+		"FAKE_CLI_PR_CONTENT_ERR":        "HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(ghLog, "--json title,body"); got != 2 {
+		t.Errorf("content reads = %d, want 2 (one 504, one success)", got)
+	}
+	if got := countLines(ghLog, "pr edit"); got != 1 {
+		t.Errorf("updates = %d, want 1", got)
+	}
+	if url != "https://github.com/test/repo/pull/7" {
+		t.Errorf("PR URL = %q", url)
+	}
+}
