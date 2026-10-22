@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,7 +233,7 @@ func TestRetryTransport_CancelledRunStopsAtOnce(t *testing.T) {
 // pushRetryFixture is a feature branch one commit ahead of its remote, with
 // the step's git replaced by the flaky-push fake. The returned log file counts
 // the pushes the step made.
-func pushRetryFixture(t *testing.T, vars map[string]string) (sctx *pipeline.StepContext, upstream, head, logFile string) {
+func pushRetryFixture(t *testing.T, vars map[string]string, commitBytes ...int) (sctx *pipeline.StepContext, upstream, head, logFile string) {
 	t.Helper()
 	upstream = t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -240,11 +241,12 @@ func pushRetryFixture(t *testing.T, vars map[string]string) (sctx *pipeline.Step
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	gitCmd(t, dir, "push", "origin", "main")
 	gitCmd(t, dir, "push", "origin", "feature")
-	if err := os.WriteFile(filepath.Join(dir, "next.txt"), []byte("next\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if len(commitBytes) == 0 {
+		commitBytes = []int{len("next\n")}
 	}
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "next")
+	for i, n := range commitBytes {
+		commitRandom(t, dir, fmt.Sprintf("next%d.bin", i), fmt.Sprintf("next %d", i), n)
+	}
 	head = gitCmd(t, dir, "rev-parse", "HEAD")
 
 	realGit, err := testgit.RealGit()
@@ -491,8 +493,10 @@ func TestPushStep_RetriesTheRemoteReadsAroundThePush(t *testing.T) {
 		nth  string // which ls-remote the fake drops
 		step string
 	}{
+		// The step reads the remote three times (decision, branch tips for
+		// the large-push check, verification); the dropped one is read again.
 		{"read before the push", "1", "read remote branch"},
-		{"verification after the push", "2", "verify push"},
+		{"verification after the push", "3", "verify push"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fastTransportRetry(t, time.Minute)
@@ -502,8 +506,8 @@ func TestPushStep_RetriesTheRemoteReadsAroundThePush(t *testing.T) {
 			if _, err := (&PushStep{}).Execute(sctx); err != nil {
 				t.Fatal(err)
 			}
-			if got := fakeLogCount(t, logFile, "ls-remote "); got != 3 {
-				t.Errorf("ls-remote calls = %d, want 3 (two reads and one retry)", got)
+			if got := fakeLogCount(t, logFile, "ls-remote "); got != 4 {
+				t.Errorf("ls-remote calls = %d, want 4 (three reads and one retry)", got)
 			}
 			if got := countPushes(t, logFile); got != 1 {
 				t.Errorf("pushes = %d, want 1", got)

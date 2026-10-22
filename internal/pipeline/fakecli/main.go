@@ -284,9 +284,26 @@ func fakeGitFlakyPushPassthroughHandler(args []string) {
 		fmt.Fprintln(os.Stderr, "fatal: the remote end hung up unexpectedly")
 		os.Exit(128)
 	}
+	// FAKE_CLI_PACK_HANG=1 makes pack-objects never return (see FAKE_CLI_FAIL_HANG).
+	if os.Getenv("FAKE_CLI_PACK_HANG") == "1" && fakeGitSubcommand(args) == "pack-objects" {
+		child := exec.Command(os.Args[0])
+		child.Env = append(os.Environ(), "FAKE_CLI_MODE=sleep-child")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		_ = child.Run()
+	}
 	if fakeGitSubcommand(args) != "push" {
 		fakeGitForward(args, realGit)
 		return
+	}
+	// FAKE_CLI_PUSH_REJECT_PREFIX refuses (non-transport) any push whose
+	// refspec targets a ref under that prefix.
+	if prefix := os.Getenv("FAKE_CLI_PUSH_REJECT_PREFIX"); prefix != "" {
+		for _, a := range args {
+			if i := strings.Index(a, ":"+prefix); i >= 0 {
+				fmt.Fprintln(os.Stderr, "! [rejected] "+a+" (non-fast-forward)")
+				os.Exit(1)
+			}
+		}
 	}
 	failFirst, _ := strconv.Atoi(os.Getenv("FAKE_CLI_FAIL_FIRST"))
 	if fakeCLILogCount(os.Getenv("FAKE_CLI_LOG"), "push ") > failFirst {

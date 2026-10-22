@@ -169,6 +169,14 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		return err
 	}
 
+	if !decision.upToDate {
+		cleanup, err := pushLargeBranchInPieces(sctx, pushURL, headBeingPushed)
+		defer cleanup()
+		if err != nil {
+			return fmt.Errorf("push to %s: %w", pushTarget, err)
+		}
+	}
+
 	switch {
 	case decision.newBranch, decision.fastForward:
 		// A branch absent from the remote creates it, and an append-only update
