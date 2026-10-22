@@ -825,3 +825,16 @@ func TestGiteaHelperProcess(t *testing.T) {
 	}
 	os.Exit(0)
 }
+
+func TestAvailableKeepsTheProbeFailureText(t *testing.T) {
+	t.Parallel()
+
+	host := New(giteaTestCmdFactory(map[string]giteaTestResponse{
+		"tea api --login work /user": {stderr: "HTTP 503: Service Unavailable\n", code: 1},
+	}), func() bool { return true }, "gitea.example.com", "work", "owner/repo")
+
+	err := host.Available(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not authenticated") || !strings.Contains(err.Error(), "HTTP 503") {
+		t.Fatalf("Available() error = %v, want the not-authenticated wording plus the probe's HTTP 503", err)
+	}
+}

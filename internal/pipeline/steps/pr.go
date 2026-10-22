@@ -106,23 +106,22 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return nil, err
 		}
 	}
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	baseSHA, err := retryTransportValue(sctx, "fetch default branch", func(ctx context.Context) (string, error) {
+		return resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	})
 	if err != nil {
 		return nil, err
 	}
 	bodyLimit := scm.MaxPRBodyChars(provider)
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
-	var existing *scm.PR
-	err = retryTransport(sctx, "find pull request", func(ctx context.Context) error {
-		var findErr error
-		existing, findErr = host.FindPR(ctx, branch, "")
-		return findErr
-	}, nil)
+	existing, err := retryTransportValue(sctx, "find pull request", func(ctx context.Context) (*scm.PR, error) {
+		return host.FindPR(ctx, branch, "")
+	})
 	if err != nil {
 		return nil, err
 	}
-	existing, err = retryTransportValue(sctx, "read pull request state", func(context.Context) (*scm.PR, error) {
-		return bindExistingPR(sctx, host, existing)
+	existing, err = retryTransportValue(sctx, "read pull request state", func(ctx context.Context) (*scm.PR, error) {
+		return bindExistingPR(ctx, sctx, host, existing)
 	})
 	if err != nil {
 		return nil, err
@@ -180,11 +179,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
-			err = retryTransport(sctx, "update pull request", func(ctx context.Context) error {
-				var updateErr error
-				updated, updateErr = host.UpdatePR(ctx, existing, scm.PRContent(content))
-				return updateErr
-			}, nil)
+			updated, err = retryTransportValue(sctx, "update pull request", func(ctx context.Context) (*scm.PR, error) {
+				return host.UpdatePR(ctx, existing, scm.PRContent(content))
+			})
 			if err != nil {
 				// A revalidation cycle may already have pushed a repaired head. Its
 				// attestation is part of delivery, so CI must not run after a failed
@@ -284,7 +281,9 @@ func retargetExistingPRIfNeeded(sctx *pipeline.StepContext, host scm.Host, exist
 		from = "its current base"
 	}
 	sctx.Log(fmt.Sprintf("retargeting existing pull request %s from %s to %s", describePR(existing), from, requested))
-	if err := retargeter.SetPRBaseBranch(sctx.Ctx, existing, requested); err != nil {
+	if _, err := retryTransportValue(sctx, "retarget pull request", func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, retargeter.SetPRBaseBranch(ctx, existing, requested)
+	}); err != nil {
 		return fmt.Errorf("retarget pull request to %s: %w", requested, err)
 	}
 	existing.BaseBranch = requested
@@ -296,7 +295,7 @@ func retargetExistingPRIfNeeded(sctx *pipeline.StepContext, host scm.Host, exist
 // or merged persisted PR is stale: title/body update the discovered PR, and
 // a per-run --base-branch retarget is refused rather than moving either
 // object. First-attach (no persisted URL) keeps the discovered PR.
-func bindExistingPR(sctx *pipeline.StepContext, host scm.Host, discovered *scm.PR) (*scm.PR, error) {
+func bindExistingPR(ctx context.Context, sctx *pipeline.StepContext, host scm.Host, discovered *scm.PR) (*scm.PR, error) {
 	owned := runPRURL(sctx)
 	if owned == "" {
 		return discovered, nil
@@ -307,10 +306,6 @@ func bindExistingPR(sctx *pipeline.StepContext, host scm.Host, discovered *scm.P
 	ownedPR := discovered
 	if !samePRIdentity(owned, discovered) {
 		ownedPR = prFromOwnedURL(owned)
-	}
-	ctx := context.Background()
-	if sctx != nil && sctx.Ctx != nil {
-		ctx = sctx.Ctx
 	}
 	state, err := host.GetPRState(ctx, ownedPR)
 	if err != nil {

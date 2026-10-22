@@ -94,9 +94,8 @@ func (h *Host) Available(ctx context.Context) error {
 	// --login on every call, so an authenticated GET /user through it is the
 	// host-scoped equivalent: it fails when this login's token is missing or
 	// invalid without being influenced by any other configured tea login.
-	cmd := h.cmd(ctx, "tea", "api", "--login", h.login, "/user")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tea CLI is not authenticated for login %q", h.login)
+	if out, err := h.cmd(ctx, "tea", "api", "--login", h.login, "/user").CombinedOutput(); err != nil {
+		return fmt.Errorf("tea CLI is not authenticated for login %q: %s: %w", h.login, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }

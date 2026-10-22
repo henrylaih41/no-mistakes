@@ -820,7 +820,7 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 	if err != nil {
 		return fmt.Errorf("%w: find pull request: %v", errAttestationWriteFailed, err)
 	}
-	pr, err := bindExistingPR(sctx, host, discovered)
+	pr, err := bindExistingPR(sctx.Ctx, sctx, host, discovered)
 	if err != nil {
 		return fmt.Errorf("%w: resolve pull request: %v", errAttestationWriteFailed, err)
 	}

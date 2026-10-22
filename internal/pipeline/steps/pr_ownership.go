@@ -180,10 +180,25 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 			continue
 		}
 		if content.Body != current.Body || content.Title != "" {
-			// The write is the same content every time, so repeating one that
-			// landed changes nothing.
-			if _, err := retryTransportValue(sctx, "update pull request", func(ctx context.Context) (*scm.PR, error) {
-				return host.UpdatePR(ctx, pr, scm.PRContent(content))
+			// A write whose reply was lost may have landed, and repeating it would
+			// erase an edit made since. Before each retry the body is re-read:
+			// ours means landed, the one just read means safe to repeat, anything
+			// else is unknown and stops the retry.
+			if err := retryTransport(sctx, "update pull request", func(ctx context.Context) error {
+				_, updateErr := host.UpdatePR(ctx, pr, scm.PRContent(content))
+				return updateErr
+			}, func(ctx context.Context) (bool, error) {
+				now, readErr := reader.GetPRContent(ctx, pr)
+				if readErr != nil {
+					return false, readErr
+				}
+				switch now.Body {
+				case content.Body:
+					return true, nil
+				case current.Body:
+					return false, nil
+				}
+				return false, fmt.Errorf("PR body changed while the update was retrying")
 			}); err != nil {
 				return fmt.Errorf("update templated PR: %w", err)
 			}

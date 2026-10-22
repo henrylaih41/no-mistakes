@@ -143,8 +143,8 @@ func (h *Host) Available(ctx context.Context) error {
 	if h.host != "" {
 		authArgs = append(authArgs, "--hostname", h.host)
 	}
-	if err := h.cmd(ctx, "glab", authArgs...).Run(); err != nil {
-		return errors.New("glab CLI is not authenticated")
+	if out, err := h.cmd(ctx, "glab", authArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("glab CLI is not authenticated: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
