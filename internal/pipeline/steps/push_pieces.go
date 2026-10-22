@@ -116,7 +116,9 @@ func ctxGitRunner(sctx *pipeline.StepContext, ctx context.Context) gitRunner {
 // presentRemoteTips returns the remote's branch tips this clone already has;
 // objects reachable from them are on the remote and are not sent again.
 func presentRemoteTips(sctx *pipeline.StepContext, pushURL string) ([]string, error) {
-	out, err := stepGitRun(sctx, "ls-remote", "--heads", pushURL)
+	ctx, cancel := context.WithTimeout(sctx.Ctx, transportAttemptTimeout)
+	defer cancel()
+	out, err := stepGitRunRawCtx(sctx, ctx, "ls-remote", "--heads", pushURL)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +132,7 @@ func presentRemoteTips(sctx *pipeline.StepContext, pushURL string) ([]string, er
 		return nil, nil
 	}
 	var checked bytes.Buffer
-	if err := stepGitStream(sctx, sctx.Ctx, strings.Join(shas, "\n")+"\n", &checked, "cat-file", "--batch-check=%(objectname) %(objecttype)"); err != nil {
+	if err := stepGitStream(sctx, ctx, strings.Join(shas, "\n")+"\n", &checked, "cat-file", "--batch-check=%(objectname) %(objecttype)"); err != nil {
 		return nil, err
 	}
 	var present []string
@@ -167,7 +169,7 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // planPushPieces splits head's new commits, oldest first, into pieces whose
 // packs stay under the threshold.
 func planPushPieces(sctx *pipeline.StepContext, head string, remoteTips []string) ([][]string, error) {
-	args := []string{"rev-list", "--reverse", "--topo-order", head}
+	args := []string{"rev-list", "--reverse", "--topo-order", "--parents", head}
 	if len(remoteTips) > 0 {
 		args = append(args, "--not")
 		args = append(args, remoteTips...)
@@ -176,7 +178,11 @@ func planPushPieces(sctx *pipeline.StepContext, head string, remoteTips []string
 	if err != nil {
 		return nil, err
 	}
-	commits := strings.Fields(out)
+	commits, isChain := newCommitChain(out)
+	if !isChain {
+		sctx.Log("push: not splitting the push, the new commits are not a single chain")
+		return nil, nil
+	}
 	return piecePlan(commits, largePushThreshold, func(prev, tip string) (int64, error) {
 		exclude := remoteTips
 		if prev != "" {
@@ -184,6 +190,40 @@ func planPushPieces(sctx *pipeline.StepContext, head string, remoteTips []string
 		}
 		return newObjectBytes(sctx, sctx.Ctx, tip, exclude)
 	})
+}
+
+// newCommitChain parses `rev-list --reverse --parents` output and reports
+// whether the commits form a single chain: each one's parents among the new
+// commits are exactly the one before it. Parents the remote already has are
+// ignored. Only a chain can be staged through one scratch ref, since each
+// piece's tip then contains every earlier piece.
+func newCommitChain(revListParents string) ([]string, bool) {
+	var commits []string
+	parents := map[string][]string{}
+	for _, line := range strings.Split(revListParents, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		commits = append(commits, fields[0])
+		parents[fields[0]] = fields[1:]
+	}
+	isNew := make(map[string]bool, len(commits))
+	for _, c := range commits {
+		isNew[c] = true
+	}
+	for i, c := range commits {
+		var inNew []string
+		for _, p := range parents[c] {
+			if isNew[p] {
+				inNew = append(inNew, p)
+			}
+		}
+		if i == 0 && len(inNew) != 0 || i > 0 && (len(inNew) != 1 || inNew[0] != commits[i-1]) {
+			return nil, false
+		}
+	}
+	return commits, true
 }
 
 // piecePlan groups commits (oldest to newest) greedily: a piece grows while the

@@ -1,8 +1,10 @@
 package steps
 
 import (
+	"crypto/rand"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -154,5 +156,83 @@ func TestPushStep_ScratchRefIsDeletedWhenTheBranchPushFails(t *testing.T) {
 	}
 	if refs := gitCmd(t, upstream, "for-each-ref", "refs/no-mistakes"); refs != "" {
 		t.Errorf("scratch ref left on the remote after a failed run:\n%s", refs)
+	}
+}
+
+// commitRandom commits n incompressible bytes, so the commit's pack is about n.
+func commitRandom(t *testing.T, dir, name string, n int) {
+	t.Helper()
+	blob := make([]byte, n)
+	if _, err := rand.Read(blob); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", name)
+}
+
+func scratchPushes(t *testing.T, logFile string) int {
+	t.Helper()
+	n := 0
+	for _, spec := range pushRefspecs(t, logFile) {
+		if strings.HasPrefix(spec, "+") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestPushStep_MergeOfUnpushedLegsIsNotSplit(t *testing.T) {
+	fastTransportRetry(t, time.Minute)
+	smallLargePushThreshold(t, 3<<20)
+	const mb = 1 << 20
+	sctx, upstream, _, logFile := pushRetryFixture(t, nil)
+	dir := sctx.WorkDir
+	gitCmd(t, dir, "checkout", "-b", "side", "feature~1")
+	commitRandom(t, dir, "side.bin", 2*mb)
+	gitCmd(t, dir, "checkout", "feature")
+	commitRandom(t, dir, "leg.bin", 2*mb)
+	gitCmd(t, dir, "merge", "--no-ff", "-m", "merge side", "side")
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	recordReviewApproval(t, sctx, head)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := pushRefspecs(t, logFile); len(got) != 1 || got[0] != head+":refs/heads/feature" {
+		t.Errorf("push refspecs = %v, want one ordinary branch push", got)
+	}
+	if remote := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remote != head {
+		t.Errorf("remote feature = %s, want %s", remote, head)
+	}
+}
+
+func TestPushStep_ChainThatMergedThePushedBaseStillSplits(t *testing.T) {
+	fastTransportRetry(t, time.Minute)
+	smallLargePushThreshold(t, 3<<20)
+	const mb = 1 << 20
+	sctx, upstream, _, logFile := pushRetryFixture(t, nil)
+	dir := sctx.WorkDir
+	gitCmd(t, dir, "checkout", "main")
+	commitRandom(t, dir, "base.txt", 16)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "feature")
+	commitRandom(t, dir, "one.bin", 2*mb)
+	gitCmd(t, dir, "merge", "--no-ff", "-m", "merge main", "main")
+	commitRandom(t, dir, "two.bin", 2*mb)
+	commitRandom(t, dir, "three.bin", 2*mb)
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	recordReviewApproval(t, sctx, head)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := scratchPushes(t, logFile); n < 1 {
+		t.Errorf("scratch pushes = %d, want the chain split", n)
+	}
+	if remote := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remote != head {
+		t.Errorf("remote feature = %s, want %s", remote, head)
 	}
 }
